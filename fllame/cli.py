@@ -76,6 +76,19 @@ def _write_compose_file(*, offline_handle: str | None = None) -> None:
     write_compose_file(compose, config.compose_file_path())
 
 
+def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+    """Left-aligned, space-padded columns - `docker ps`/`kubectl get`
+    style, no border characters. The point is making a column (size,
+    quantization, ...) comparable at a glance down the page; a border
+    wouldn't add anything padding doesn't already give it.
+    """
+    all_rows = [headers, *rows]
+    widths = [max(len(row[i]) for row in all_rows) for i in range(len(headers))]
+    for row in all_rows:
+        padded = [cell.ljust(width) for cell, width in zip(row[:-1], widths[:-1], strict=False)]
+        typer.echo("  ".join([*padded, row[-1]]))
+
+
 def _run_compose(*args: str) -> int:
     command = [
         "docker",
@@ -152,8 +165,10 @@ def model_list() -> None:
     if not models:
         typer.echo(f"No models cached in {config.hf_cache_dir()}")
         raise typer.Exit(code=0)
-    for repo in models:
-        typer.echo(f"{repo.repo_id}\t{repo.size_on_disk_str}\t{repo.last_modified_str}")
+    _print_table(
+        ["REPO_ID", "SIZE", "LAST_MODIFIED"],
+        [[repo.repo_id, repo.size_on_disk_str, repo.last_modified_str] for repo in models],
+    )
 
 
 @model_app.command("scan")
@@ -163,7 +178,7 @@ def model_scan(
     ),
     quantization: str | None = typer.Option(
         None,
-        "--quantization",
+        "--quant",
         help="Search only this quantization, ignoring the hardware scan's supported list.",
     ),
     min_params: float | None = typer.Option(
@@ -182,7 +197,7 @@ def model_scan(
     scan reports as supported, capped by a coarse VRAM/RAM-based size
     estimate - a starting point, not a benchmarked guarantee a result
     actually fits (see CLAUDE.md for why there's no stronger guarantee
-    yet). --quantization and/or --max-params override that default
+    yet). --quant and/or --max-params override that default
     independently, ignoring the hardware scan entirely for whichever is
     given.
     """
@@ -192,7 +207,7 @@ def model_scan(
     if not quantizations:
         typer.echo(
             "No supported quantizations detected for this hardware - "
-            "pass --quantization explicitly to search anyway.",
+            "pass --quant explicitly to search anyway.",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -231,9 +246,17 @@ def model_scan(
         typer.echo("No matching models found.")
         raise typer.Exit(code=0)
 
-    for c in candidates:
-        size = f"{c.params_billion:.1f}B" if c.params_billion is not None else "size unknown"
-        typer.echo(f"{c.repo_id}\t{c.quantization}\t{size}")
+    _print_table(
+        ["REPO_ID", "QUANT", "PARAMS"],
+        [
+            [
+                c.repo_id,
+                c.quantization,
+                f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
+            ]
+            for c in candidates
+        ],
+    )
 
 
 @app.command()

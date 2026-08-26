@@ -100,7 +100,7 @@ results by size fit, downloads, and recency. `discovery.py` takes
 already-resolved quantizations and a ceiling dict as plain arguments -
 it has no dependency on `HardwareProfile` or hardware scanning at all,
 which is what lets `cli.py` bypass hardware entirely when
-`--quantization`/`--max-params` are both given explicitly (verified live:
+`--quant`/`--max-params` are both given explicitly (verified live:
 that path never calls `scan_hardware()`, going straight to the Hub
 search). Adapted from the same admin-ui project's Hub-search logic
 mentioned above, trimmed to fllame's scope: no training/LoRA headroom,
@@ -184,5 +184,5 @@ actually be vLLM-servable - some GGUF-only repos may still show up).
 - `fllame model scan` - `models/sizing.py` (a coarse per-quantization
   size ceiling from a `HardwareProfile`) + `models/discovery.py` (Hub
   search, ranked by size fit/downloads/recency) via `cli.py`.
-  `--quantization`/`--max-params` each independently opt out of the
+  `--quant`/`--max-params` each independently opt out of the
   hardware-driven default.

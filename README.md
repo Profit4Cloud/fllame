@@ -64,7 +64,7 @@ Then:
 fllame hardware scan                           # what this box can run
 fllame model scan                              # models that plausibly fit, ranked
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
-fllame model scan --quantization gptq --max-params 30       # ignore hardware entirely
+fllame model scan --quant gptq --max-params 30       # ignore hardware entirely
 fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved compose service, as YAML
 fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
@@ -82,7 +82,7 @@ it searches this machine's `hardware scan`-detected quantizations,
 capped by a coarse VRAM/RAM-based size ceiling per quantization - a
 starting point for "what can I run," not a benchmarked guarantee (see
 CLAUDE.md for the difference between this estimate and the stronger,
-still-unbuilt per-recipe one). `--quantization` and/or `--max-params`
+still-unbuilt per-recipe one). `--quant` and/or `--max-params`
 each independently override that default and ignore the hardware scan
 entirely for whichever is given - useful for looking at a format or size
 your current box doesn't support, e.g. because you're scanning from a

@@ -33,6 +33,17 @@ def _capturing_run(captured: dict):
     return fake_run
 
 
+def test_print_table_pads_columns_to_widest_cell(capsys):
+    cli._print_table(
+        ["REPO_ID", "QUANT", "PARAMS"],
+        [["org/short", "awq", "7.0B"], ["org/a-much-longer-name", "gptq", "70.0B"]],
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    # Same column boundary on every line - the whole point of a table.
+    assert lines[0].index("QUANT") == lines[1].index("awq") == lines[2].index("gptq")
+
+
 def test_help_flag_short_alias():
     result = runner.invoke(app, ["-h"])
 
@@ -215,7 +226,7 @@ def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
 
     monkeypatch.setattr(cli, "search_models", fake_search_models)
 
-    result = runner.invoke(app, ["model", "scan", "--quantization", "gptq", "--max-params", "13"])
+    result = runner.invoke(app, ["model", "scan", "--quant", "gptq", "--max-params", "13"])
 
     assert result.exit_code == 0
     assert captured["quantizations"] == ["gptq"]
@@ -228,7 +239,7 @@ def test_model_scan_no_supported_quantizations_gives_friendly_error(monkeypatch)
     result = runner.invoke(app, ["model", "scan"])
 
     assert result.exit_code == 1
-    assert "--quantization" in result.output
+    assert "--quant" in result.output
 
 
 def test_model_scan_hub_unreachable_gives_friendly_error(monkeypatch):
