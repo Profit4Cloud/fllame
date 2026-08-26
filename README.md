@@ -18,8 +18,8 @@ fllame does not install or vendor vLLM itself - it runs the official
 
 To get a `fllame` command available everywhere, install it with
 [pipx](https://pipx.pypa.io/) (installs into its own isolated venv and
-puts a shim on your `PATH` - no `poetry run`/`poetry shell` needed
-afterward, and it doesn't matter which directory you're in):
+puts a shim on your `PATH` - no activating anything needed afterward,
+and it doesn't matter which directory you're in):
 
 ```
 pipx install .
@@ -28,9 +28,10 @@ pipx install .
 `poetry install` (below) only creates a project-local virtualenv - it's
 what you want if you're developing fllame itself, but the resulting
 `fllame` command only exists inside that venv, reachable via `poetry run
-fllame ...` or after `poetry shell`. If you just ran `poetry install`
-and got `fllame: command not found`, that's why - use `pipx install .`
-instead for everyday use.
+fllame ...` or after activating it with `eval $(poetry env activate)`
+(Poetry 2.0+ - the old `poetry shell` needs a separate plugin now). If
+you just ran `poetry install` and got `fllame: command not found`,
+that's why - use `pipx install .` instead for everyday use.
 
 Developing fllame and using it as a normal global command at the same
 time: `pipx install --editable .` (or `pipx install -e .`). It's the

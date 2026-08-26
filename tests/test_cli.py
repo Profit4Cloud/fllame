@@ -90,6 +90,28 @@ def test_hardware_scan_with_gpu(monkeypatch):
     assert "awq, gptq, fp8" in result.stdout
 
 
+def test_hardware_scan_unified_memory_gpu(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA GB10",
+            gpu_count=1,
+            vram_gb_per_gpu=None,
+            ram_gb=128.0,
+            chip_family="grace_blackwell",
+            supported_quantizations=["awq", "gptq", "fp8", "fp4", "nvfp4"],
+            scanned_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+    result = runner.invoke(app, ["hardware", "scan"])
+
+    assert result.exit_code == 0
+    assert "NVIDIA GB10 x1" in result.stdout
+    assert "unified memory" in result.stdout
+
+
 def test_hardware_scan_no_gpu(monkeypatch):
     monkeypatch.setattr(
         cli,

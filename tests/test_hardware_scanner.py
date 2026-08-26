@@ -48,6 +48,24 @@ def test_grace_blackwell_gets_extra_quantizations(monkeypatch):
     assert "nvfp4" in profile.supported_quantizations
 
 
+def test_unified_memory_gpu_reports_unknown_vram_instead_of_crashing(monkeypatch):
+    # The exact `nvidia-smi` output on a DGX Spark's GB10 - unified
+    # memory, no discrete VRAM pool to report as memory.total.
+    monkeypatch.setattr(scanner.shutil, "which", lambda _: "/usr/bin/nvidia-smi")
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="NVIDIA GB10, [N/A]\n")
+
+    monkeypatch.setattr(scanner.subprocess, "run", fake_run)
+
+    profile = scanner.scan_hardware()
+
+    assert profile.has_gpu is True
+    assert profile.gpu_name == "NVIDIA GB10"
+    assert profile.vram_gb_per_gpu is None
+    assert profile.chip_family == "grace_blackwell"
+
+
 def test_multiple_gpus_counted(monkeypatch):
     monkeypatch.setattr(scanner.shutil, "which", lambda _: "/usr/bin/nvidia-smi")
 

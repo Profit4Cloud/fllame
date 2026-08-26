@@ -121,7 +121,10 @@ def hardware_scan() -> None:
         typer.echo("gpu:            none detected (no nvidia-smi on PATH)")
     else:
         typer.echo(f"gpu:            {profile.gpu_name} x{profile.gpu_count}")
-        typer.echo(f"vram_per_gpu:   {profile.vram_gb_per_gpu:.1f} GB")
+        if profile.vram_gb_per_gpu is not None:
+            typer.echo(f"vram_per_gpu:   {profile.vram_gb_per_gpu:.1f} GB")
+        else:
+            typer.echo("vram_per_gpu:   unknown (unified memory - see 'ram' below)")
     typer.echo(f"chip_family:    {profile.chip_family}")
     ram = f"{profile.ram_gb:.1f} GB" if profile.ram_gb is not None else "unknown"
     typer.echo(f"ram:            {ram}")
