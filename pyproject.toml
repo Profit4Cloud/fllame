@@ -7,9 +7,10 @@ readme = "README.md"
 packages = [{ include = "fllame" }]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.12"
 typer = "^0.15"
 pyyaml = "^6.0"
+huggingface-hub = "^0.27"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

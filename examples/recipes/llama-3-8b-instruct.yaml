@@ -2,10 +2,10 @@
 # runtime. Copy this into your own recipes directory
 # ($FLLAME_RECIPES_DIR, or ~/.config/fllame/recipes by default) to use it.
 repo_id: meta-llama/Meta-Llama-3-8B-Instruct
+image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
 port: 8000
-env:
-  HF_HOME: /data/hf-cache
+gpus: all
 serve_args:
   - --gpu-memory-utilization=0.9
   - --max-model-len=8192

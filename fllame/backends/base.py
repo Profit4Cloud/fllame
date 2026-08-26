@@ -5,6 +5,7 @@ implementation exists today (`VllmServingBackend`) - see CLAUDE.md,
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from fllame.domain.recipe import Recipe
@@ -13,6 +14,7 @@ from fllame.domain.recipe import Recipe
 class ServingBackend(Protocol):
     name: str
 
-    def build_argv(self, recipe: Recipe, *, port: int) -> list[str]:
-        """The command line to launch this recipe, as argv."""
+    def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
+        """A docker-compose service definition (the value under
+        `services.<handle>`) for running this recipe."""
         ...

@@ -7,7 +7,9 @@ from fllame.recipes.store import RecipeStore
 
 
 def test_list_and_load(tmp_path: Path):
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nport: 9001\n")
+    (tmp_path / "demo.yaml").write_text(
+        "repo_id: org/demo\nimage: vllm/vllm-openai:v0.27.1\nport: 9001\n"
+    )
     store = RecipeStore(tmp_path)
 
     assert store.list_handles() == ["demo"]

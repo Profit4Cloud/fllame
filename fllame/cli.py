@@ -1,24 +1,25 @@
 """fllame - a headless CLI for vLLM serving.
 
-`fllame serve <handle>` resolves a hand-edited recipe (model repo id +
-vLLM args) and launches `vllm serve`. See README.md for the recipe file
-format and CLAUDE.md for the architecture this sits on.
+`fllame serve <handle>` resolves a hand-edited recipe, guarantees the
+model is fully downloaded, and runs it as a Docker container via
+`docker compose`. See README.md for the recipe file format and CLAUDE.md
+for the architecture this sits on.
 """
 
 from __future__ import annotations
 
-import os
-import signal
 import subprocess
 
 import typer
+import yaml
 
 from fllame import config
 from fllame.backends.vllm import VllmServingBackend
-from fllame.domain.recipe import RecipeError
+from fllame.compose.generator import generate_compose, write_compose_file
+from fllame.domain.recipe import Recipe, RecipeError
 from fllame.hardware.scanner import scan_hardware
+from fllame.models.puller import pull_model
 from fllame.recipes.store import RecipeStore
-from fllame.state.store import StateStore
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 recipe_app = typer.Typer(no_args_is_help=True)
@@ -33,15 +34,48 @@ def _recipe_store() -> RecipeStore:
     return RecipeStore(config.recipes_dir())
 
 
-def _state_store() -> StateStore:
-    return StateStore(config.state_db_path())
-
-
-def _load_or_exit(handle: str):
+def _load_or_exit(handle: str) -> Recipe:
     try:
         return _recipe_store().load(handle)
     except RecipeError as e:
         typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+
+def _write_compose_file() -> None:
+    """Regenerates the compose file from every valid recipe on file. An
+    invalid recipe is skipped with a warning rather than blocking every
+    other recipe from being served.
+    """
+    store = _recipe_store()
+    recipes = []
+    for handle in store.list_handles():
+        try:
+            recipes.append(store.load(handle))
+        except RecipeError as e:
+            typer.echo(f"warning: {e}", err=True)
+    compose = generate_compose(recipes, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    write_compose_file(compose, config.compose_file_path())
+
+
+def _run_compose(*args: str) -> int:
+    command = [
+        "docker",
+        "compose",
+        "-f",
+        str(config.compose_file_path()),
+        "-p",
+        config.COMPOSE_PROJECT_NAME,
+        *args,
+    ]
+    try:
+        return subprocess.run(command).returncode
+    except FileNotFoundError as e:
+        typer.echo(
+            "docker (or the compose plugin) was not found on PATH - fllame runs "
+            "vLLM as a Docker container, install Docker to use this command.",
+            err=True,
+        )
         raise typer.Exit(code=1) from e
 
 
@@ -58,15 +92,10 @@ def recipe_list() -> None:
 
 @recipe_app.command("show")
 def recipe_show(handle: str) -> None:
-    """Print the resolved recipe for HANDLE."""
+    """Print the resolved docker-compose service for HANDLE."""
     recipe = _load_or_exit(handle)
-    argv = BACKEND.build_argv(recipe, port=recipe.port)
-    typer.echo(f"handle:       {recipe.handle}")
-    typer.echo(f"backend:      {recipe.backend}")
-    typer.echo(f"repo_id:      {recipe.repo_id}")
-    typer.echo(f"port:         {recipe.port}")
-    typer.echo(f"env:          {recipe.env or '{}'}")
-    typer.echo(f"command:      {' '.join(argv)}")
+    service = BACKEND.build_service(recipe, hf_cache_dir=config.hf_cache_dir())
+    typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
 
 
 @hardware_app.command("scan")
@@ -86,50 +115,46 @@ def hardware_scan() -> None:
 
 
 @app.command()
+def pull(handle: str) -> None:
+    """Download HANDLE's model into the Hugging Face cache."""
+    recipe = _load_or_exit(handle)
+    typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
+    path = pull_model(recipe.repo_id)
+    typer.echo(f"done: {path}")
+
+
+@app.command()
 def serve(
     handle: str,
-    port: int | None = typer.Option(None, help="Override the recipe's default port."),
     detach: bool = typer.Option(False, "--detach", "-d", help="Run in the background."),
 ) -> None:
-    """Launch the recipe for HANDLE with vLLM."""
+    """Launch the recipe for HANDLE as a Docker container via `docker compose`.
+
+    Always downloads the model first (see `pull`) - vLLM's own
+    auto-download inside the container is never relied on.
+    """
     recipe = _load_or_exit(handle)
+    typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
+    pull_model(recipe.repo_id)
 
-    resolved_port = port if port is not None else recipe.port
-    argv = BACKEND.build_argv(recipe, port=resolved_port)
-    env = {**os.environ, **recipe.env}
-
-    if not detach:
-        os.execvpe(argv[0], argv, env)  # replaces this process; never returns
-
-    process = subprocess.Popen(argv, env=env, start_new_session=True)
-    _state_store().record_started(handle, process.pid, resolved_port, argv)
-    typer.echo(f"started '{handle}' (pid {process.pid}, port {resolved_port})")
+    _write_compose_file()
+    args = ["up", "-d", handle] if detach else ["up", handle]
+    raise typer.Exit(code=_run_compose(*args))
 
 
 @app.command()
 def status() -> None:
-    """List servers fllame started in the background."""
-    servers = _state_store().list_all()
-    if not servers:
-        typer.echo("No servers tracked.")
-        raise typer.Exit(code=0)
-    for s in servers:
-        state = "running" if s.is_alive() else "not running (stale)"
-        typer.echo(f"{s.handle}\tpid={s.pid}\tport={s.port}\t{state}\tstarted={s.started_at}")
+    """Show the state of fllame-managed containers via `docker compose ps`."""
+    _write_compose_file()
+    raise typer.Exit(code=_run_compose("ps"))
 
 
 @app.command()
 def stop(handle: str) -> None:
-    """Stop a server fllame started in the background."""
-    store = _state_store()
-    server = store.get(handle)
-    if server is None:
-        typer.echo(f"'{handle}' is not tracked as running.", err=True)
-        raise typer.Exit(code=1)
-    if server.is_alive():
-        os.kill(server.pid, signal.SIGTERM)
-        typer.echo(f"sent SIGTERM to '{handle}' (pid {server.pid})")
-    store.remove(handle)
+    """Stop HANDLE's container via `docker compose stop`."""
+    _load_or_exit(handle)
+    _write_compose_file()
+    raise typer.Exit(code=_run_compose("stop", handle))
 
 
 if __name__ == "__main__":
