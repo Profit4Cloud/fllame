@@ -96,6 +96,46 @@ def test_recipe_add_from_pasted_block(tmp_path: Path, monkeypatch):
     assert "FOO: bar" in saved.read_text()
 
 
+def test_recipe_add_accepts_vllm_serve_line_as_trailing_args(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "recipe",
+            "add",
+            "--image",
+            "vllm/vllm-openai:v0.27.1",
+            "vllm",
+            "serve",
+            "Qwen/Qwen3-8B-FP8",
+            "--tensor-parallel-size",
+            "1",
+            "--enable-auto-tool-choice",
+        ],
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "qwen3-8b-fp8.yaml"
+    assert saved.is_file()
+    text = saved.read_text()
+    assert "Qwen/Qwen3-8B-FP8" in text
+    assert "--tensor-parallel-size" in text
+    assert "--enable-auto-tool-choice" in text
+
+
+def test_recipe_add_trailing_args_bad_paste_still_validates(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "org/repo", "-x"],
+    )
+
+    assert result.exit_code == 1
+    assert list(tmp_path.glob("*.yaml")) == []
+
+
 def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = "vllm serve org/demo\n"

@@ -66,6 +66,8 @@ fllame model scan                              # models that plausibly fit, rank
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
 fllame model scan --quant gptq --max-params 30       # ignore hardware entirely
 fllame recipe add                              # paste export/vllm serve lines to create one
+fllame recipe add --image vllm/vllm-openai:v0.27.1 \
+  vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or as trailing args
 fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved compose service, as YAML
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
@@ -95,16 +97,22 @@ regardless of source.
 
 `fllame recipe add` creates a recipe from whatever you'd typically copy
 off a model card or vLLM's own docs: prompts for the Docker image (warns
-if the tag looks unpinned, e.g. `:latest`), then reads a pasted block of
-zero or more `export KEY=VALUE` lines and exactly one `vllm serve
-<repo_id> <args...>` line from stdin until EOF (Ctrl-D). The paste is
-parsed and sanitized, not evaluated as shell - anything else on a line,
-or a shell metacharacter/substitution (`;`, `&`, `|`, `` ` ``, `$(...)`)
-in a value, is a hard error and nothing gets written. The handle is
-derived from the repo id (the part after the last `/`, lowercased and
-slugified, e.g. `meta-llama/Meta-Llama-3-8B-Instruct` ->
-`meta-llama-3-8b-instruct`); a second recipe for a repo that already has
-one gets `_2`, `_3`, etc. rather than overwriting - useful for keeping
+if the tag looks unpinned, e.g. `:latest`), then takes the `vllm serve
+<repo_id> <args...>` line either as trailing arguments on the command
+itself (handy for a one-liner you already have on your clipboard as a
+single command - shell quoting/escaping applies as normal, e.g. wrap a
+value with spaces in quotes) or, if none are given, reads a pasted block
+of zero or more `export KEY=VALUE` lines plus that one `vllm serve` line
+from stdin until EOF (Ctrl-D) - the only way to set env vars, since
+those aren't something you'd type as trailing arguments. Either way the
+input is parsed and sanitized, not evaluated as shell - anything that
+isn't one of those line shapes, or a shell metacharacter/substitution
+(`;`, `&`, `|`, `` ` ``, `$(...)`) in a value, is a hard error and
+nothing gets written. The handle is derived from the repo id (the part
+after the last `/`, lowercased and slugified, e.g.
+`meta-llama/Meta-Llama-3-8B-Instruct` -> `meta-llama-3-8b-instruct`); a
+second recipe for a repo that already has one gets `_2`, `_3`, etc.
+rather than overwriting - useful for keeping
 more than one tuning of the same model around. `recipe edit` opens the
 YAML file directly in `$EDITOR` and re-validates on save (reporting an
 error but leaving your edit in place if it's now invalid, never silently

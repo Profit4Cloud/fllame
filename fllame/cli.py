@@ -8,6 +8,7 @@ for the architecture this sits on.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 
@@ -133,8 +134,14 @@ def recipe_show(handle: str) -> None:
     typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
 
 
-@recipe_app.command("add")
+@recipe_app.command("add", context_settings={**_CONTEXT_SETTINGS, "ignore_unknown_options": True})
 def recipe_add(
+    vllm_serve_line: list[str] = typer.Argument(
+        None,
+        help="Optionally, the whole `vllm serve <repo_id> ...` line as trailing "
+        "arguments instead of pasting it - e.g. `fllame recipe add vllm serve "
+        "org/repo --max-model-len 8192`. Env vars still need the interactive paste.",
+    ),
     image: str = typer.Option(
         "vllm/vllm-openai:latest",
         "--image",
@@ -142,9 +149,10 @@ def recipe_add(
     ),
     gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
 ) -> None:
-    """Create a recipe by pasting `export ...` lines and a `vllm serve ...`
-    line - the shape a recipe typically comes in from a model card or
-    vLLM's own docs.
+    """Create a recipe from a `vllm serve ...` line - and optionally
+    `export ...` lines - either as trailing arguments or pasted
+    interactively. This is the shape a recipe typically comes in from a
+    model card or vLLM's own docs.
     """
     if image.endswith(":latest") or ":" not in image:
         typer.echo(
@@ -153,10 +161,13 @@ def recipe_add(
             err=True,
         )
 
-    typer.echo(
-        "Paste the recipe's `export ...` lines and `vllm serve ...` line, " "then press Ctrl-D."
-    )
-    pasted = sys.stdin.read()
+    if vllm_serve_line:
+        pasted = shlex.join(vllm_serve_line)
+    else:
+        typer.echo(
+            "Paste the recipe's `export ...` lines and `vllm serve ...` line, " "then press Ctrl-D."
+        )
+        pasted = sys.stdin.read()
 
     try:
         parsed = parse_pasted_recipe(pasted)

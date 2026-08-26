@@ -65,13 +65,21 @@ writes them: `save()` (used by `recipe add`), `remove()`, and
 `next_available_handle()` (handle collision -> `_2`, `_3`, ... - never
 overwrites, even for a second recipe on the same repo_id, since that's
 a legitimate way to keep more than one tuning of a model around).
-`fllame/recipes/parser.py` turns what `recipe add` reads from stdin
-(zero or more `export KEY=VALUE` lines, exactly one `vllm serve
-<repo_id> <args...>` line - the shape a recipe typically comes in from
-a model card) into that data; anything else on a line, or a shell
-metacharacter/substitution in a value, is a hard parse error - fllame
-parses this text itself rather than handing it to a real shell, so it
-never silently evaluates something dangerous. `fllame/recipes/naming.py`
+`fllame/recipes/parser.py` turns that same text - zero or more `export
+KEY=VALUE` lines, exactly one `vllm serve <repo_id> <args...>` line, the
+shape a recipe typically comes in from a model card - into that data,
+regardless of whether `recipe add` got it from stdin (the only path
+that supports `export` lines) or joined it from trailing CLI arguments
+via `shlex.join` (`ignore_unknown_options=True` on that one command's
+`context_settings`, so a pasted `vllm serve ... --flag value` works
+verbatim as trailing args without every flag needing to be a
+recognized fllame option - the exact case that motivated adding this
+second path: a user tried the natural "run this as if it were a shell
+command" shape first). Anything else on a line, or a shell
+metacharacter/substitution in a value, is a hard parse error either
+way - fllame parses this text itself rather than handing it to a real
+shell, so it never silently evaluates something dangerous.
+`fllame/recipes/naming.py`
 derives the handle recipe `add` uses from the repo_id (the part after
 the last `/`, slugified). `ServingBackend`
 (`fllame/backends/`) turns a `Recipe` into a docker-compose service
@@ -183,7 +191,9 @@ actually be vLLM-servable - some GGUF-only repos may still show up).
   `--offline`), `status`, `stop` - `-h` works as a `--help` alias at
   every level (set via `context_settings` on each `Typer()` instance;
   Click only binds `--help` by default).
-- `recipe add`: paste-driven recipe creation (`recipes/parser.py` +
+- `recipe add`: recipe creation from a `vllm serve` line, either pasted
+  interactively (stdin until Ctrl-D, the only path that also accepts
+  `export` lines) or as trailing CLI arguments (`recipes/parser.py` +
   `recipes/naming.py` + `RecipeStore.save`/`next_available_handle`).
   `recipe edit` opens `$EDITOR` (`click.edit(filename=...)`, edits the
   file in place) and re-validates on save without reverting a
