@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "fllame"
+version = "0.1.0"
+description = "Headless CLI for vLLM serving: curated model recipes, hardware-aware defaults, and a path into production-stack for scale."
+authors = ["Profit4Cloud"]
+readme = "README.md"
+packages = [{ include = "fllame" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+typer = "^0.15"
+pyyaml = "^6.0"
+huggingface-hub = "^0.27"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+ruff = "^0.6"
+
+[tool.poetry.scripts]
+fllame = "fllame.cli:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

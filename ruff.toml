@@ -1,0 +1,10 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[lint.flake8-bugbear]
+# typer's own pattern for CLI parameters - a call as the parameter
+# default is how Typer introspects them, not a real mutable-default bug.
+extend-immutable-calls = ["typer.Argument"]
