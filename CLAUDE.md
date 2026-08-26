@@ -129,7 +129,17 @@ time it's needed rather than persist and risk going stale.
 
 - CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `model
   pull`/`model list`, `serve` (foreground, `--detach`, `--offline`),
-  `status`, `stop`.
+  `status`, `stop` - `-h` works as a `--help` alias at every level (set
+  via `context_settings` on each `Typer()` instance; Click only binds
+  `--help` by default).
+- **Install with `pipx install .`, not `poetry install`, for everyday
+  use.** `poetry install` only creates a project-local venv; the `fllame`
+  command it produces isn't on `PATH` outside `poetry run`/`poetry
+  shell`. `pipx install .` builds via the same `poetry-core` backend
+  (`[tool.poetry.scripts]` needed no changes) but installs into its own
+  isolated venv with a `PATH` shim - the standard way to install a
+  Python CLI tool globally. `poetry install` stays the right command for
+  developing fllame itself.
 - `Recipe` domain type (Docker image required, `gpus: all|none`, `env`
   rejects `HF_HOME`) + YAML-directory-backed `RecipeStore`.
 - `VllmServingBackend`, the sole `ServingBackend` implementation -

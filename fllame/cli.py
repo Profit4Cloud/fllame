@@ -23,12 +23,16 @@ from fllame.models.cache import list_cached_models
 from fllame.models.puller import pull_model
 from fllame.recipes.store import RecipeStore
 
-app = typer.Typer(no_args_is_help=True, add_completion=False)
-recipe_app = typer.Typer(no_args_is_help=True)
+# `--help` is Click's default; `-h` is the standard Unix short form on
+# top of it - wired in explicitly since Click doesn't bind it by default.
+_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+app = typer.Typer(no_args_is_help=True, add_completion=False, context_settings=_CONTEXT_SETTINGS)
+recipe_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(recipe_app, name="recipe", help="Inspect the recipe registry.")
-hardware_app = typer.Typer(no_args_is_help=True)
+hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
-model_app = typer.Typer(no_args_is_help=True)
+model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(model_app, name="model", help="Download and inspect the local HF model cache.")
 
 BACKEND = VllmServingBackend()

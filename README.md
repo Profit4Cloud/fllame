@@ -16,9 +16,21 @@ Requires Python 3.12+ and Docker (with the `compose` plugin) on `PATH`.
 fllame does not install or vendor vLLM itself - it runs the official
 `vllm/vllm-openai` image.
 
+To get a `fllame` command available everywhere, install it with
+[pipx](https://pipx.pypa.io/) (installs into its own isolated venv and
+puts a shim on your `PATH` - no `poetry run`/`poetry shell` needed
+afterward, and it doesn't matter which directory you're in):
+
 ```
-poetry install
+pipx install .
 ```
+
+`poetry install` (below) only creates a project-local virtualenv - it's
+what you want if you're developing fllame itself, but the resulting
+`fllame` command only exists inside that venv, reachable via `poetry run
+fllame ...` or after `poetry shell`. If you just ran `poetry install`
+and got `fllame: command not found`, that's why - use `pipx install .`
+instead for everyday use.
 
 ## Quick start
 
@@ -85,7 +97,7 @@ recipe instead.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `repo_id`     | yes      | HF repo id (or local path) - what's passed to `vllm serve` and downloaded via `fllame pull`/`serve` |
+| `repo_id`     | yes      | HF repo id (or local path) - what's passed to `vllm serve` and downloaded via `fllame model pull`/`serve` |
 | `image`       | yes      | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |

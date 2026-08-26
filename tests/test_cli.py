@@ -32,6 +32,13 @@ def _capturing_run(captured: dict):
     return fake_run
 
 
+def test_help_flag_short_alias():
+    result = runner.invoke(app, ["-h"])
+
+    assert result.exit_code == 0
+    assert "Usage" in result.stdout
+
+
 def test_recipe_list_empty(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
