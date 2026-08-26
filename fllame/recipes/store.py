@@ -29,3 +29,37 @@ class RecipeStore:
 
     def load_all(self) -> list[Recipe]:
         return [self.load(handle) for handle in self.list_handles()]
+
+    def next_available_handle(self, base_handle: str) -> str:
+        """`base_handle` itself if free, else `base_handle`_2, _3, ...
+        Never overwrites an existing recipe - not even one for the same
+        repo_id, since a second recipe for the same model (a different
+        quantization, a different serve_args tuning) is a legitimate,
+        separate thing to keep.
+        """
+        if not (self.directory / f"{base_handle}.yaml").is_file():
+            return base_handle
+        n = 2
+        while (self.directory / f"{base_handle}_{n}.yaml").is_file():
+            n += 1
+        return f"{base_handle}_{n}"
+
+    def save(self, recipe: Recipe) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self.directory / f"{recipe.handle}.yaml"
+        data: dict = {"repo_id": recipe.repo_id, "image": recipe.image}
+        if recipe.description:
+            data["description"] = recipe.description
+        data["port"] = recipe.port
+        data["gpus"] = recipe.gpus
+        if recipe.env:
+            data["env"] = recipe.env
+        if recipe.serve_args:
+            data["serve_args"] = recipe.serve_args
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    def remove(self, handle: str) -> None:
+        path = self.directory / f"{handle}.yaml"
+        if not path.is_file():
+            raise RecipeError(f"no recipe found for '{handle}' (expected {path})")
+        path.unlink()

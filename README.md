@@ -65,8 +65,11 @@ fllame hardware scan                           # what this box can run
 fllame model scan                              # models that plausibly fit, ranked
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
 fllame model scan --quant gptq --max-params 30       # ignore hardware entirely
+fllame recipe add                              # paste export/vllm serve lines to create one
 fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved compose service, as YAML
+fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
+fllame recipe remove llama-3-8b-instruct       # delete it (asks first, unless -y)
 fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
 fllame model list                              # what's actually cached locally
 fllame serve llama-3-8b-instruct               # pulls if needed, then runs in the foreground
@@ -89,6 +92,24 @@ your current box doesn't support, e.g. because you're scanning from a
 laptop for a model you'll actually serve elsewhere. `--min-params`,
 `--max-params`, and `-q`/`--query` (free text) all narrow further
 regardless of source.
+
+`fllame recipe add` creates a recipe from whatever you'd typically copy
+off a model card or vLLM's own docs: prompts for the Docker image (warns
+if the tag looks unpinned, e.g. `:latest`), then reads a pasted block of
+zero or more `export KEY=VALUE` lines and exactly one `vllm serve
+<repo_id> <args...>` line from stdin until EOF (Ctrl-D). The paste is
+parsed and sanitized, not evaluated as shell - anything else on a line,
+or a shell metacharacter/substitution (`;`, `&`, `|`, `` ` ``, `$(...)`)
+in a value, is a hard error and nothing gets written. The handle is
+derived from the repo id (the part after the last `/`, lowercased and
+slugified, e.g. `meta-llama/Meta-Llama-3-8B-Instruct` ->
+`meta-llama-3-8b-instruct`); a second recipe for a repo that already has
+one gets `_2`, `_3`, etc. rather than overwriting - useful for keeping
+more than one tuning of the same model around. `recipe edit` opens the
+YAML file directly in `$EDITOR` and re-validates on save (reporting an
+error but leaving your edit in place if it's now invalid, never silently
+reverting it); `recipe remove` deletes a recipe, asking first unless
+`-y`/`--yes`.
 
 `fllame hardware scan` detects NVIDIA GPU(s) via `nvidia-smi` (name, count,
 VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM

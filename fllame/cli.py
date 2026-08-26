@@ -9,7 +9,9 @@ for the architecture this sits on.
 from __future__ import annotations
 
 import subprocess
+import sys
 
+import click
 import typer
 import yaml
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
@@ -24,6 +26,8 @@ from fllame.models.cache import list_cached_models
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import max_params_billion, memory_budget_gb
+from fllame.recipes.naming import derive_handle
+from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
@@ -127,6 +131,92 @@ def recipe_show(handle: str) -> None:
     recipe = _load_or_exit(handle)
     service = BACKEND.build_service(recipe, hf_cache_dir=config.hf_cache_dir())
     typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
+
+
+@recipe_app.command("add")
+def recipe_add(
+    image: str = typer.Option(
+        "vllm/vllm-openai:latest",
+        "--image",
+        prompt="Docker image (e.g. vllm/vllm-openai:v0.27.1)",
+    ),
+    gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
+) -> None:
+    """Create a recipe by pasting `export ...` lines and a `vllm serve ...`
+    line - the shape a recipe typically comes in from a model card or
+    vLLM's own docs.
+    """
+    if image.endswith(":latest") or ":" not in image:
+        typer.echo(
+            "warning: using an unpinned image tag - pin it to a specific "
+            "version once you've confirmed this recipe works.",
+            err=True,
+        )
+
+    typer.echo(
+        "Paste the recipe's `export ...` lines and `vllm serve ...` line, " "then press Ctrl-D."
+    )
+    pasted = sys.stdin.read()
+
+    try:
+        parsed = parse_pasted_recipe(pasted)
+    except RecipePasteError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    store = _recipe_store()
+    handle = store.next_available_handle(derive_handle(parsed.repo_id))
+    try:
+        recipe = Recipe.from_dict(
+            handle,
+            {
+                "repo_id": parsed.repo_id,
+                "image": image,
+                "gpus": gpus,
+                "env": parsed.env,
+                "serve_args": parsed.serve_args,
+            },
+        )
+    except RecipeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    store.save(recipe)
+    typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
+
+
+@recipe_app.command("edit")
+def recipe_edit(handle: str) -> None:
+    """Open HANDLE's recipe file in $EDITOR, then re-validate it."""
+    path = config.recipes_dir() / f"{handle}.yaml"
+    if not path.is_file():
+        typer.echo(f"no recipe found for '{handle}' (expected {path})", err=True)
+        raise typer.Exit(code=1)
+
+    click.edit(filename=str(path))
+
+    try:
+        _recipe_store().load(handle)
+    except RecipeError as e:
+        typer.echo(f"'{handle}' is no longer a valid recipe: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(f"'{handle}' saved and valid.")
+
+
+@recipe_app.command("remove")
+def recipe_remove(
+    handle: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
+) -> None:
+    """Delete HANDLE's recipe file."""
+    if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
+        raise typer.Exit(code=0)
+    try:
+        _recipe_store().remove(handle)
+    except RecipeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(f"removed '{handle}'")
 
 
 @hardware_app.command("scan")

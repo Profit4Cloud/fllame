@@ -22,7 +22,9 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   domain/hardware.py # The `HardwareProfile` type - a scan snapshot, never persisted.
   backends/           # `ServingBackend` seam; `vllm.py` is the only implementation,
                        # turning a Recipe into a docker-compose service definition.
-  recipes/store.py   # Reads Recipes from a directory of hand-edited YAML files.
+  recipes/store.py   # Reads/writes Recipes from a directory of hand-edited YAML files.
+  recipes/parser.py  # Parses a pasted export/vllm-serve block for `recipe add`.
+  recipes/naming.py  # Derives a recipe handle from a repo_id.
   hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   compose/generator.py # Compiles all recipes into one docker-compose.yml.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
@@ -58,7 +60,20 @@ reservation, env vars, and extra `vllm serve` flags. Recipes are loaded
 from plain YAML files (`fllame/recipes/store.py`) that live in the
 *operator's* own directory, not inside fllame - they're meant to be
 hand-edited and git-tracked the same way a Helm `values.yaml` or an
-Ollama Modelfile is, not stored in a database. `ServingBackend`
+Ollama Modelfile is, not stored in a database. `RecipeStore` also
+writes them: `save()` (used by `recipe add`), `remove()`, and
+`next_available_handle()` (handle collision -> `_2`, `_3`, ... - never
+overwrites, even for a second recipe on the same repo_id, since that's
+a legitimate way to keep more than one tuning of a model around).
+`fllame/recipes/parser.py` turns what `recipe add` reads from stdin
+(zero or more `export KEY=VALUE` lines, exactly one `vllm serve
+<repo_id> <args...>` line - the shape a recipe typically comes in from
+a model card) into that data; anything else on a line, or a shell
+metacharacter/substitution in a value, is a hard parse error - fllame
+parses this text itself rather than handing it to a real shell, so it
+never silently evaluates something dangerous. `fllame/recipes/naming.py`
+derives the handle recipe `add` uses from the repo_id (the part after
+the last `/`, slugified). `ServingBackend`
 (`fllame/backends/`) turns a `Recipe` into a docker-compose service
 definition (image, entrypoint/command, ports, volumes, GPU reservation);
 `VllmServingBackend` is the only implementation and the only one fllame
@@ -144,6 +159,18 @@ actually be vLLM-servable - some GGUF-only repos may still show up).
   exists and reports what a box can run, but `serve` doesn't yet cross-
   check a recipe against it before launching. Blocked on the estimator
   above: a wrong "fits" verdict is worse than no verdict.
+- **Injecting `--gpu-memory-utilization` at serve time from the
+  hardware scan.** Decided, not yet built: this is deliberately *not* a
+  `Recipe`/`serve_args` concern - a recipe (hand-written or from `recipe
+  add`) is never required to set it, and nothing normalizes or defaults
+  it into the recipe file. The intended design is for `fllame serve` to
+  compute a safe value from `scan_hardware()` at launch time and add it
+  to the generated compose service's command, the same invocation-time
+  pattern `--offline` already uses for `HF_HUB_OFFLINE` in `cli.py` -
+  not persisted, recomputed per machine. Until this exists, a recipe
+  that omits `--gpu-memory-utilization` gets whatever vLLM's own default
+  is; one that sets it explicitly (e.g. from a paste that already had
+  it) is used as-is.
 - **Any multi-user or remote-access concern** (auth, RBAC, a server
   process) - fllame is a local CLI for a trusted single operator by
   design, not a service. If that assumption ever needs to change, that's
@@ -151,11 +178,17 @@ actually be vLLM-servable - some GGUF-only repos may still show up).
 
 ## Merged so far
 
-- CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `model
-  pull`/`model list`/`model scan`, `serve` (foreground, `--detach`,
+- CLI scaffold: `recipe list`/`show`/`add`/`edit`/`remove`, `hardware
+  scan`, `model pull`/`list`/`scan`, `serve` (foreground, `--detach`,
   `--offline`), `status`, `stop` - `-h` works as a `--help` alias at
   every level (set via `context_settings` on each `Typer()` instance;
   Click only binds `--help` by default).
+- `recipe add`: paste-driven recipe creation (`recipes/parser.py` +
+  `recipes/naming.py` + `RecipeStore.save`/`next_available_handle`).
+  `recipe edit` opens `$EDITOR` (`click.edit(filename=...)`, edits the
+  file in place) and re-validates on save without reverting a
+  now-invalid edit. `recipe remove` deletes with a confirmation prompt
+  (`-y` to skip it).
 - **Install with `pipx install .`, not `poetry install`, for everyday
   use.** `poetry install` only creates a project-local venv; the `fllame`
   command it produces isn't on `PATH` outside `poetry run`/`poetry

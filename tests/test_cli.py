@@ -79,6 +79,139 @@ def test_recipe_show_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
+def test_recipe_add_from_pasted_block(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pasted = "export FOO=bar\nvllm serve meta-llama/Llama-3-8B-Instruct --port 8000\n"
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "llama-3-8b-instruct.yaml"
+    assert saved.is_file()
+    assert "meta-llama/Llama-3-8B-Instruct" in saved.read_text()
+    assert "FOO: bar" in saved.read_text()
+
+
+def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pasted = "vllm serve org/demo\n"
+
+    runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+    result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+
+    assert result.exit_code == 0
+    assert (tmp_path / "demo.yaml").is_file()
+    assert (tmp_path / "demo_2.yaml").is_file()
+
+
+def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input="vllm serve org/demo\n",
+    )
+
+    assert "unpinned" not in result.output
+
+
+def test_recipe_add_unpinned_image_warns(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:latest"],
+        input="vllm serve org/demo\n",
+    )
+
+    assert "unpinned" in result.output
+
+
+def test_recipe_add_rejects_bad_paste(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1"],
+        input="docker run img:v1\n",
+    )
+
+    assert result.exit_code == 1
+    assert list(tmp_path.glob("*.yaml")) == []
+
+
+def test_recipe_edit_missing_handle(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "edit", "nope"])
+
+    assert result.exit_code == 1
+
+
+def test_recipe_edit_revalidates_after_editing(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    def fake_edit(filename):
+        return None
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 0
+    assert "valid" in result.output
+
+
+def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    def fake_edit(filename):
+        Path(filename).write_text("repo_id: org/demo\n")  # image now missing
+        return None
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 1
+    assert "no longer a valid recipe" in result.output
+
+
+def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert not (tmp_path / "demo.yaml").exists()
+
+
+def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    result = runner.invoke(app, ["recipe", "remove", "demo"], input="n\n")
+
+    assert result.exit_code == 0
+    assert (tmp_path / "demo.yaml").exists()
+
+
+def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "remove", "nope", "--yes"])
+
+    assert result.exit_code == 1
+
+
 def test_hardware_scan_with_gpu(monkeypatch):
     monkeypatch.setattr(
         cli,
