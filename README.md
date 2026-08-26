@@ -38,6 +38,7 @@ serve_args:
 Then:
 
 ```
+fllame hardware scan                           # what this box can run
 fllame recipe list
 fllame recipe show llama-3-8b-instruct
 fllame serve llama-3-8b-instruct              # foreground, execs vllm
@@ -45,6 +46,12 @@ fllame serve llama-3-8b-instruct --detach      # background, tracked
 fllame status
 fllame stop llama-3-8b-instruct
 ```
+
+`fllame hardware scan` detects NVIDIA GPU(s) via `nvidia-smi` (name, count,
+VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
+quantizations that hardware supports. It's a live scan, not a persisted
+value - nothing to keep in sync. It does not check a recipe against the
+detected hardware before `fllame serve` runs it; see CLAUDE.md for why.
 
 ## Recipe format
 

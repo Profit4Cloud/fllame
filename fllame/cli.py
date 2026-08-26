@@ -16,12 +16,15 @@ import typer
 from fllame import config
 from fllame.backends.vllm import VllmServingBackend
 from fllame.domain.recipe import RecipeError
+from fllame.hardware.scanner import scan_hardware
 from fllame.recipes.store import RecipeStore
 from fllame.state.store import StateStore
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 recipe_app = typer.Typer(no_args_is_help=True)
 app.add_typer(recipe_app, name="recipe", help="Inspect the recipe registry.")
+hardware_app = typer.Typer(no_args_is_help=True)
+app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
 
 BACKEND = VllmServingBackend()
 
@@ -64,6 +67,22 @@ def recipe_show(handle: str) -> None:
     typer.echo(f"port:         {recipe.port}")
     typer.echo(f"env:          {recipe.env or '{}'}")
     typer.echo(f"command:      {' '.join(argv)}")
+
+
+@hardware_app.command("scan")
+def hardware_scan() -> None:
+    """Detect GPU(s), VRAM, and RAM on this machine."""
+    profile = scan_hardware()
+    if not profile.has_gpu:
+        typer.echo("gpu:            none detected (no nvidia-smi on PATH)")
+    else:
+        typer.echo(f"gpu:            {profile.gpu_name} x{profile.gpu_count}")
+        typer.echo(f"vram_per_gpu:   {profile.vram_gb_per_gpu:.1f} GB")
+    typer.echo(f"chip_family:    {profile.chip_family}")
+    ram = f"{profile.ram_gb:.1f} GB" if profile.ram_gb is not None else "unknown"
+    typer.echo(f"ram:            {ram}")
+    quantizations = ", ".join(profile.supported_quantizations) or "none"
+    typer.echo(f"quantizations:  {quantizations}")
 
 
 @app.command()

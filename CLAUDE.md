@@ -16,10 +16,12 @@ defaults - is intentional inspiration, not shared code.
 
 ```
 fllame/            # The package. CLI (Typer), domain types, backends, stores.
-  cli.py             # Entry point - `recipe`, `serve`, `status`, `stop` commands.
+  cli.py             # Entry point - `recipe`, `hardware`, `serve`, `status`, `stop` commands.
   domain/recipe.py   # The `Recipe` type and its validation.
+  domain/hardware.py # The `HardwareProfile` type - a scan snapshot, never persisted.
   backends/           # `ServingBackend` seam; `vllm.py` is the only implementation.
   recipes/store.py   # Reads Recipes from a directory of hand-edited YAML files.
+  hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   state/store.py     # SQLite-backed tracking of backgrounded servers.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
@@ -59,6 +61,12 @@ records the PID/port in a local SQLite state file
 again. That SQLite file is ephemeral machine state, not configuration -
 deliberately not something an operator would hand-edit.
 
+`HardwareProfile` (`fllame/domain/hardware.py`) is a third, distinct kind
+of data: neither hand-edited config nor state to remember between runs,
+just the result of a live scan (`fllame/hardware/scanner.py`, NVIDIA GPU
+via `nvidia-smi` + RAM via `/proc/meminfo`) that's cheap enough to redo
+each time it's needed rather than persist and risk going stale.
+
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
 - **Non-vLLM backends** (llama.cpp, MLX, ...) - `ServingBackend` exists
@@ -78,6 +86,14 @@ deliberately not something an operator would hand-edit.
 - **Hardware-aware recipe selection** - recipes are looked up by handle
   alone today; picking between multiple recipes for the same handle
   based on detected GPU/VRAM is not implemented.
+- **A pre-flight OOM guard on `fllame serve`** - `fllame hardware scan`
+  exists and reports what a box can run, but `serve` doesn't yet cross-
+  check a recipe against it before launching. Deliberately held back
+  until there's a real VRAM estimator (parameter count + quantization +
+  `--max-model-len` + max concurrency, for weights and KV cache both) -
+  the admin-ui project's equivalent turned out to be a flat safety
+  margin on on-disk model size, not a real estimate, and isn't worth
+  copying. A wrong "fits" verdict is worse than no verdict.
 - **Any multi-user or remote-access concern** (auth, RBAC, a server
   process) - fllame is a local CLI for a trusted single operator by
   design, not a service. If that assumption ever needs to change, that's
@@ -85,8 +101,10 @@ deliberately not something an operator would hand-edit.
 
 ## Merged so far
 
-- CLI scaffold: `recipe list`/`recipe show`, `serve` (foreground exec or
-  `--detach`), `status`, `stop`.
+- CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `serve`
+  (foreground exec or `--detach`), `status`, `stop`.
 - `Recipe` domain type + YAML-directory-backed `RecipeStore`.
 - `VllmServingBackend`, the sole `ServingBackend` implementation.
 - SQLite-backed `StateStore` for backgrounded servers.
+- `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
+  recipes or `serve` so far (see "Explicitly deferred").
