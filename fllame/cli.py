@@ -12,7 +12,8 @@ import subprocess
 
 import typer
 import yaml
-from huggingface_hub.errors import LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from requests.exceptions import RequestException
 
 from fllame import config
 from fllame.backends.vllm import VllmServingBackend
@@ -20,7 +21,9 @@ from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import list_cached_models
+from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
+from fllame.models.sizing import max_params_billion, memory_budget_gb
 from fllame.recipes.store import RecipeStore
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
@@ -33,7 +36,7 @@ app.add_typer(recipe_app, name="recipe", help="Inspect the recipe registry.")
 hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(model_app, name="model", help="Download and inspect the local HF model cache.")
+app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
 
 BACKEND = VllmServingBackend()
 
@@ -151,6 +154,86 @@ def model_list() -> None:
         raise typer.Exit(code=0)
     for repo in models:
         typer.echo(f"{repo.repo_id}\t{repo.size_on_disk_str}\t{repo.last_modified_str}")
+
+
+@model_app.command("scan")
+def model_scan(
+    query: str | None = typer.Option(
+        None, "--query", "-q", help="Free-text filter, e.g. a model family name."
+    ),
+    quantization: str | None = typer.Option(
+        None,
+        "--quantization",
+        help="Search only this quantization, ignoring the hardware scan's supported list.",
+    ),
+    min_params: float | None = typer.Option(
+        None, "--min-params", help="Minimum size, in billions of parameters."
+    ),
+    max_params: float | None = typer.Option(
+        None,
+        "--max-params",
+        help="Maximum size, in billions of parameters - ignoring the hardware-based estimate.",
+    ),
+    limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
+) -> None:
+    """Search the Hugging Face Hub for models, ranked by fit and popularity.
+
+    With no filters, searches the quantizations this machine's hardware
+    scan reports as supported, capped by a coarse VRAM/RAM-based size
+    estimate - a starting point, not a benchmarked guarantee a result
+    actually fits (see CLAUDE.md for why there's no stronger guarantee
+    yet). --quantization and/or --max-params override that default
+    independently, ignoring the hardware scan entirely for whichever is
+    given.
+    """
+    profile = scan_hardware() if quantization is None or max_params is None else None
+
+    quantizations = [quantization] if quantization is not None else profile.supported_quantizations
+    if not quantizations:
+        typer.echo(
+            "No supported quantizations detected for this hardware - "
+            "pass --quantization explicitly to search anyway.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if max_params is not None:
+        ceiling_billion = dict.fromkeys(quantizations, max_params)
+    else:
+        budget_gb = memory_budget_gb(profile)
+        if budget_gb is None:
+            typer.echo(
+                "Could not determine available VRAM/RAM for this hardware - "
+                "pass --max-params explicitly to search anyway.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        unified = profile.chip_family == "grace_blackwell"
+        ceiling_billion = {
+            q: max_params_billion(budget_gb=budget_gb, unified_memory=unified, quantization=q)
+            for q in quantizations
+        }
+
+    try:
+        candidates = search_models(
+            quantizations=quantizations,
+            ceiling_billion=ceiling_billion,
+            min_params_billion=min_params,
+            max_params_billion=max_params,
+            query=query,
+            max_results=limit,
+        )
+    except (HfHubHTTPError, RequestException) as e:
+        typer.echo(f"Hugging Face Hub unreachable: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+    if not candidates:
+        typer.echo("No matching models found.")
+        raise typer.Exit(code=0)
+
+    for c in candidates:
+        size = f"{c.params_billion:.1f}B" if c.params_billion is not None else "size unknown"
+        typer.echo(f"{c.repo_id}\t{c.quantization}\t{size}")
 
 
 @app.command()

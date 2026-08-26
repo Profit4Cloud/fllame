@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from huggingface_hub.errors import LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from typer.testing import CliRunner
 
 import fllame.cli as cli
 from fllame import config
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
+from fllame.models.discovery import ModelCandidate
 
 runner = CliRunner()
 
@@ -167,6 +168,91 @@ def test_model_list_shows_cached_repos(monkeypatch):
     assert "org/demo" in result.stdout
     assert "16.1GB" in result.stdout
     assert "2 days ago" in result.stdout
+
+
+def _hardware_profile(**overrides) -> HardwareProfile:
+    defaults = dict(
+        gpu_name="NVIDIA A100 80GB PCIe",
+        gpu_count=1,
+        vram_gb_per_gpu=80.0,
+        ram_gb=256.0,
+        chip_family="nvidia",
+        supported_quantizations=["awq", "gptq", "fp8"],
+        scanned_at="2026-01-01T00:00:00+00:00",
+    )
+    defaults.update(overrides)
+    return HardwareProfile(**defaults)
+
+
+def test_model_scan_defaults_use_hardware_scan(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 100, 1000, None)]
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan"])
+
+    assert result.exit_code == 0
+    assert "org/demo-7B-AWQ" in result.stdout
+    assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
+    assert captured["max_params_billion"] is None
+
+
+def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("scan_hardware should not be called when both overrides are given")
+
+    monkeypatch.setattr(cli, "scan_hardware", fail_if_called)
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--quantization", "gptq", "--max-params", "13"])
+
+    assert result.exit_code == 0
+    assert captured["quantizations"] == ["gptq"]
+    assert captured["ceiling_billion"] == {"gptq": 13.0}
+
+
+def test_model_scan_no_supported_quantizations_gives_friendly_error(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile(supported_quantizations=[]))
+
+    result = runner.invoke(app, ["model", "scan"])
+
+    assert result.exit_code == 1
+    assert "--quantization" in result.output
+
+
+def test_model_scan_hub_unreachable_gives_friendly_error(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+
+    def fake_search_models(**kwargs):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan"])
+
+    assert result.exit_code == 1
+    assert "unreachable" in result.output
+
+
+def test_model_scan_no_results(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    monkeypatch.setattr(cli, "search_models", lambda **kwargs: [])
+
+    result = runner.invoke(app, ["model", "scan"])
+
+    assert result.exit_code == 0
+    assert "No matching models" in result.stdout
 
 
 def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):

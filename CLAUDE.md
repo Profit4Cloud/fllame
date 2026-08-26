@@ -27,6 +27,8 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   compose/generator.py # Compiles all recipes into one docker-compose.yml.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
   models/cache.py    # Lists what's in that cache - a filesystem scan, no network.
+  models/discovery.py # Searches the HF Hub for candidate models, ranked.
+  models/sizing.py   # The coarse per-quantization size ceiling `discovery.py` searches within.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -89,6 +91,22 @@ result of a live scan (`fllame/hardware/scanner.py`, NVIDIA GPU via
 `nvidia-smi` + RAM via `/proc/meminfo`) that's cheap enough to redo each
 time it's needed rather than persist and risk going stale.
 
+`fllame model scan` composes two independent pieces: `models/sizing.py`
+turns a `HardwareProfile` into a coarse, per-quantization ceiling on
+servable model size (declared params only - no context length or
+concurrency in this estimate, see "Explicitly deferred" below), and
+`models/discovery.py` searches the HF Hub within that ceiling and ranks
+results by size fit, downloads, and recency. `discovery.py` takes
+already-resolved quantizations and a ceiling dict as plain arguments -
+it has no dependency on `HardwareProfile` or hardware scanning at all,
+which is what lets `cli.py` bypass hardware entirely when
+`--quantization`/`--max-params` are both given explicitly (verified live:
+that path never calls `scan_hardware()`, going straight to the Hub
+search). Adapted from the same admin-ui project's Hub-search logic
+mentioned above, trimmed to fllame's scope: no training/LoRA headroom,
+no GGUF/MLX weight-format filtering (a scan result isn't guaranteed to
+actually be vLLM-servable - some GGUF-only repos may still show up).
+
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
 - **Non-vLLM backends** (llama.cpp, MLX, ...) - `ServingBackend` exists
@@ -112,14 +130,20 @@ time it's needed rather than persist and risk going stale.
 - **Hardware-aware recipe selection** - recipes are looked up by handle
   alone today; picking between multiple recipes for the same handle
   based on detected GPU/VRAM is not implemented.
+- **A real, recipe-level VRAM estimator** (params + quantization +
+  `--max-model-len` + max concurrency, for weights and KV cache both) -
+  likely surfacing as `fllame recipe vram-usage`. Deliberately not
+  attempted yet; the admin-ui project's equivalent turned out to be a
+  flat safety margin on on-disk model size, not a real estimate, and
+  isn't worth copying. Don't confuse this with `models/sizing.py`'s
+  ceiling, which is a much cruder, declared-params-only estimate built
+  to narrow a Hub search, not to confirm a specific recipe fits - the
+  two are intentionally separate and shouldn't gradually merge into each
+  other without this being designed properly first.
 - **A pre-flight OOM guard on `fllame serve`** - `fllame hardware scan`
   exists and reports what a box can run, but `serve` doesn't yet cross-
-  check a recipe against it before launching. Deliberately held back
-  until there's a real VRAM estimator (parameter count + quantization +
-  `--max-model-len` + max concurrency, for weights and KV cache both) -
-  the admin-ui project's equivalent turned out to be a flat safety
-  margin on on-disk model size, not a real estimate, and isn't worth
-  copying. A wrong "fits" verdict is worse than no verdict.
+  check a recipe against it before launching. Blocked on the estimator
+  above: a wrong "fits" verdict is worse than no verdict.
 - **Any multi-user or remote-access concern** (auth, RBAC, a server
   process) - fllame is a local CLI for a trusted single operator by
   design, not a service. If that assumption ever needs to change, that's
@@ -128,10 +152,10 @@ time it's needed rather than persist and risk going stale.
 ## Merged so far
 
 - CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `model
-  pull`/`model list`, `serve` (foreground, `--detach`, `--offline`),
-  `status`, `stop` - `-h` works as a `--help` alias at every level (set
-  via `context_settings` on each `Typer()` instance; Click only binds
-  `--help` by default).
+  pull`/`model list`/`model scan`, `serve` (foreground, `--detach`,
+  `--offline`), `status`, `stop` - `-h` works as a `--help` alias at
+  every level (set via `context_settings` on each `Typer()` instance;
+  Click only binds `--help` by default).
 - **Install with `pipx install .`, not `poetry install`, for everyday
   use.** `poetry install` only creates a project-local venv; the `fllame`
   command it produces isn't on `PATH` outside `poetry run`/`poetry
@@ -157,3 +181,8 @@ time it's needed rather than persist and risk going stale.
   `model pull`.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
   recipes or `serve` so far (see "Explicitly deferred").
+- `fllame model scan` - `models/sizing.py` (a coarse per-quantization
+  size ceiling from a `HardwareProfile`) + `models/discovery.py` (Hub
+  search, ranked by size fit/downloads/recency) via `cli.py`.
+  `--quantization`/`--max-params` each independently opt out of the
+  hardware-driven default.
