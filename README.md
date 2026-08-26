@@ -32,6 +32,13 @@ fllame ...` or after `poetry shell`. If you just ran `poetry install`
 and got `fllame: command not found`, that's why - use `pipx install .`
 instead for everyday use.
 
+Developing fllame and using it as a normal global command at the same
+time: `pipx install --editable .` (or `pipx install -e .`). It's the
+same global `fllame` command as above, but the venv points straight at
+this checkout instead of a frozen copy - edit the source and the very
+next `fllame` invocation picks it up, no reinstall. `pipx install .`
+(no `-e`) copies the code at install time, so it won't see later edits.
+
 ## Quick start
 
 Recipes live in `~/.config/fllame/recipes/<handle>.yaml` by default

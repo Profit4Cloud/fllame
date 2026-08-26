@@ -139,7 +139,11 @@ time it's needed rather than persist and risk going stale.
   (`[tool.poetry.scripts]` needed no changes) but installs into its own
   isolated venv with a `PATH` shim - the standard way to install a
   Python CLI tool globally. `poetry install` stays the right command for
-  developing fllame itself.
+  developing fllame itself. `pipx install --editable .` covers both at
+  once - same global `fllame` command, but the venv's `.pth` points
+  straight at the checkout instead of a frozen copy, so source edits are
+  picked up on the next invocation with no reinstall; verified this
+  live, including that it isn't defeated by a stale `__pycache__` .pyc.
 - `Recipe` domain type (Docker image required, `gpus: all|none`, `env`
   rejects `HF_HOME`) + YAML-directory-backed `RecipeStore`.
 - `VllmServingBackend`, the sole `ServingBackend` implementation -
