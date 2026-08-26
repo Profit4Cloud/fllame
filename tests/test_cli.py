@@ -1,8 +1,10 @@
 from pathlib import Path
 
+from huggingface_hub.errors import LocalEntryNotFoundError
 from typer.testing import CliRunner
 
 import fllame.cli as cli
+from fllame import config
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 
@@ -102,29 +104,56 @@ def test_hardware_scan_no_gpu(monkeypatch):
     assert "none detected" in result.stdout
 
 
-def test_pull_downloads_recipes_model(tmp_path: Path, monkeypatch):
+def test_model_pull_downloads_recipes_model(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id: f"/cache/{repo_id}")
 
-    result = runner.invoke(app, ["pull", "demo"])
+    result = runner.invoke(app, ["model", "pull", "demo"])
 
     assert result.exit_code == 0
     assert "org/demo" in result.stdout
+
+
+def test_model_list_empty(monkeypatch):
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [])
+
+    result = runner.invoke(app, ["model", "list"])
+
+    assert result.exit_code == 0
+    assert "No models cached" in result.stdout
+
+
+def test_model_list_shows_cached_repos(monkeypatch):
+    class _FakeRepo:
+        repo_id = "org/demo"
+        size_on_disk_str = "16.1GB"
+        last_modified_str = "2 days ago"
+
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [_FakeRepo()])
+
+    result = runner.invoke(app, ["model", "list"])
+
+    assert result.exit_code == 0
+    assert "org/demo" in result.stdout
+    assert "16.1GB" in result.stdout
+    assert "2 days ago" in result.stdout
 
 
 def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     pulled = []
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id: pulled.append(repo_id))
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    assert pulled == ["org/demo"]
+    assert pulled == [("org/demo", False)]
     assert captured["command"][:3] == ["docker", "compose", "-f"]
     assert captured["command"][-3:] == ["up", "-d", "demo"]
 
@@ -132,7 +161,7 @@ def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch)
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id: None)
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -145,12 +174,48 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
 def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     called = []
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id: called.append("pull"))
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: called.append("pull"))
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
     result = runner.invoke(app, ["serve", "nope"])
 
     assert result.exit_code == 1
+    assert called == []
+
+
+def test_serve_offline_passes_offline_to_pull_and_sets_container_env(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo", "--offline"])
+
+    assert result.exit_code == 0
+    assert pulled == [("org/demo", True)]
+    compose_text = config.compose_file_path().read_text()
+    assert "HF_HUB_OFFLINE" in compose_text
+
+
+def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    def fake_pull(repo_id, offline=False):
+        raise LocalEntryNotFoundError("not cached")
+
+    monkeypatch.setattr(cli, "pull_model", fake_pull)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["serve", "demo", "--offline"])
+
+    assert result.exit_code == 1
+    assert "fllame model pull" in result.output
     assert called == []
 
 

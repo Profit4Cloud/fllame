@@ -10,7 +10,14 @@ from __future__ import annotations
 from huggingface_hub import snapshot_download
 
 
-def pull_model(repo_id: str) -> str:
+def pull_model(repo_id: str, *, offline: bool = False) -> str:
     """Downloads repo_id into the HF cache - a no-op if it's already
-    fully present - and returns the local snapshot path."""
-    return snapshot_download(repo_id)
+    fully present - and returns the local snapshot path.
+
+    `offline=True` forces `local_files_only`: no network attempt at all,
+    just a fast, deterministic resolution against whatever's already
+    cached (raising if it isn't) - the guarantee `fllame serve --offline`
+    depends on, rather than hoping a plain download call happens to fall
+    back to cache quickly on a genuinely offline machine.
+    """
+    return snapshot_download(repo_id, local_files_only=offline)

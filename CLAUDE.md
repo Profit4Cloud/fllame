@@ -17,7 +17,7 @@ defaults - is intentional inspiration, not shared code.
 
 ```
 fllame/            # The package. CLI (Typer), domain types, backends, generators.
-  cli.py             # Entry point - `recipe`, `hardware`, `pull`, `serve`, `status`, `stop`.
+  cli.py             # Entry point - `recipe`, `hardware`, `model`, `serve`, `status`, `stop`.
   domain/recipe.py   # The `Recipe` type and its validation.
   domain/hardware.py # The `HardwareProfile` type - a scan snapshot, never persisted.
   backends/           # `ServingBackend` seam; `vllm.py` is the only implementation,
@@ -26,6 +26,7 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   compose/generator.py # Compiles all recipes into one docker-compose.yml.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
+  models/cache.py    # Lists what's in that cache - a filesystem scan, no network.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -69,6 +70,18 @@ whatever Docker already tracks; fllame keeps none of its own. Before
 guarantee the model is fully present in HF's own cache - vLLM's own
 auto-download inside the container is never relied on - and that same
 host cache directory is bind-mounted into the container.
+`fllame/models/cache.py` (`huggingface_hub.scan_cache_dir`) is the
+read-only counterpart, backing `fllame model list`.
+
+`serve --offline` forces the download step's `local_files_only=True`
+(failing fast with a clear error if the model isn't fully cached, rather
+than a plain download call's network-then-fallback-to-cache behavior,
+which isn't fast or fully deterministic on a genuinely offline machine)
+and sets `HF_HUB_OFFLINE=1` on that one generated service's environment
+- an invocation-time concern applied in `cli.py` when it (re)writes the
+compose file, not a property threaded through `Recipe`/`ServingBackend`.
+This is what makes "pull while online, `serve --offline` later with no
+network at all" a real guarantee rather than a hope.
 
 `HardwareProfile` (`fllame/domain/hardware.py`) is a fourth, distinct
 kind of data: neither hand-edited config nor container state, just the
@@ -114,16 +127,19 @@ time it's needed rather than persist and risk going stale.
 
 ## Merged so far
 
-- CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `pull`,
-  `serve` (foreground or `--detach`), `status`, `stop`.
-- `Recipe` domain type (Docker image required, `gpus: all|none`) +
-  YAML-directory-backed `RecipeStore`.
+- CLI scaffold: `recipe list`/`recipe show`, `hardware scan`, `model
+  pull`/`model list`, `serve` (foreground, `--detach`, `--offline`),
+  `status`, `stop`.
+- `Recipe` domain type (Docker image required, `gpus: all|none`, `env`
+  rejects `HF_HOME`) + YAML-directory-backed `RecipeStore`.
 - `VllmServingBackend`, the sole `ServingBackend` implementation -
   compiles a `Recipe` into a docker-compose service definition.
 - `fllame/compose/generator.py` - compiles the whole recipe registry
   into one compose file; `serve`/`status`/`stop` drive it via `docker
   compose up|ps|stop` instead of fllame tracking its own state.
-- `fllame/models/puller.py` - downloads via `huggingface_hub`, called
-  unconditionally before `serve` ever starts a container.
+- `fllame/models/puller.py` + `models/cache.py` - download and list via
+  `huggingface_hub`; `pull_model(..., offline=True)` and `serve
+  --offline` together guarantee a genuinely offline demo after an online
+  `model pull`.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
   recipes or `serve` so far (see "Explicitly deferred").

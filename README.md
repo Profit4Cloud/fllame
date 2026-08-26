@@ -44,9 +44,11 @@ Then:
 fllame hardware scan                           # what this box can run
 fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved compose service, as YAML
-fllame pull llama-3-8b-instruct                # download into the HF cache, standalone
+fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
+fllame model list                              # what's actually cached locally
 fllame serve llama-3-8b-instruct               # pulls if needed, then runs in the foreground
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
+fllame serve llama-3-8b-instruct --offline     # never touch the network - fail if not cached
 fllame status                                  # docker compose ps
 fllame stop llama-3-8b-instruct                # docker compose stop
 ```
@@ -63,6 +65,14 @@ there) before starting the container - vLLM's own auto-download inside
 the container is never relied on. That same cache directory (wherever
 `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into the container,
 so the download only ever happens once, on the host.
+
+For a fully offline demo: run `fllame model pull <handle>` while online,
+then `fllame serve <handle> --offline` later with no network at all.
+`--offline` forces `local_files_only` on the download check (fails fast
+with a clear error if the model isn't fully cached, rather than hoping a
+plain download call happens to fall back to cache quickly on a
+genuinely offline machine) and sets `HF_HUB_OFFLINE=1` on the container
+itself, so vLLM doesn't attempt any network call either.
 
 `fllame serve`/`status`/`stop` all regenerate
 `$FLLAME_STATE_DIR/docker-compose.yml` (default
