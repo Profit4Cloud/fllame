@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -333,3 +334,24 @@ def test_ranking_weighs_params_closeness_only_when_max_params_given(monkeypatch)
     results = search_models(quantizations=["awq"], max_size_gb=100.0, max_params_billion=2.0)
 
     assert results[0].repo_id == "org/at-params-ceiling-AWQ"
+
+
+def test_quantization_searches_run_concurrently(monkeypatch):
+    # Each quantization's Hub search is an independent network call;
+    # simulating per-call latency and asserting on the total elapsed
+    # time is a regression test that they run concurrently, not one
+    # after another - sequential would take roughly 5x as long as any
+    # one of them.
+    per_call_delay = 0.2
+
+    def fake_list_models(*, search, expand, limit):
+        time.sleep(per_call_delay)
+        return []
+
+    monkeypatch.setattr(discovery, "list_models", fake_list_models)
+
+    start = time.monotonic()
+    search_models(quantizations=["awq", "gptq", "fp8", "fp4", "nvfp4"], max_size_gb=100.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < per_call_delay * 3

@@ -36,6 +36,7 @@ fllame's vLLM-only scope: no training/LoRA headroom.
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -129,8 +130,9 @@ def search_models(
     query: str | None = None,
     max_results: int = 20,
 ) -> list[ModelCandidate]:
-    """One Hub search per entry in `quantizations`, ranked and capped at
-    `max_results` overall.
+    """One Hub search per entry in `quantizations` - run concurrently
+    (see `_fetch_quantization`), since each is an independent network
+    call - ranked and capped at `max_results` overall.
 
     `max_size_gb` always caps a candidate whose estimated VRAM is known.
     `exclude_unknown_size` decides what happens to one that isn't (no
@@ -156,9 +158,16 @@ def search_models(
     seen_ids: set[str] = set()
     search_limit = max_results * _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER
 
-    for q in quantizations:
-        search_term = q if query is None else f"{q} {query}"
-        for info in list_models(search=search_term, expand=_EXPAND, limit=search_limit):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(quantizations), 1)) as executor:
+        infos_per_quantization = list(
+            executor.map(
+                lambda q: _fetch_quantization(q, query=query, search_limit=search_limit),
+                quantizations,
+            )
+        )
+
+    for q, infos in zip(quantizations, infos_per_quantization, strict=True):
+        for info in infos:
             if info.id in seen_ids:
                 continue
             if not _matches_quantization(info.id, info.tags, q):
@@ -197,6 +206,20 @@ def search_models(
 
     ranked = _rank(found, max_size_gb=max_size_gb, max_params_billion=max_params_billion)
     return ranked[:max_results]
+
+
+def _fetch_quantization(q: str, *, query: str | None, search_limit: int) -> list[ModelInfo]:
+    """One Hub search for a single quantization, fully consumed here -
+    not handed back as `list_models`'s own lazy, paginating generator -
+    since `search_models` runs this inside a worker thread precisely to
+    get the network calls themselves to happen concurrently. Returning
+    the generator unconsumed would silently defeat that: the actual HTTP
+    requests fire on whichever thread iterates it, so leaving it lazy
+    would just move all the requests back onto the caller's thread,
+    right where `search_models` used to run them one after another.
+    """
+    search_term = q if query is None else f"{q} {query}"
+    return list(list_models(search=search_term, expand=_EXPAND, limit=search_limit))
 
 
 def _matches_quantization(repo_id: str, tags: list[str] | None, quantization: str) -> bool:
