@@ -2,6 +2,9 @@
 per-quantization size ceiling, ranked best-first - a coarse pre-filter
 and heuristic, not a benchmarked guarantee that a candidate actually
 fits. See `fllame/models/sizing.py` for where the ceiling comes from.
+A candidate's param count comes from the Hub's own safetensors metadata
+where available (see `_params_billion`), falling back to a unit-aware
+guess from the repo_id's naming convention only when it isn't.
 Adapted from Profit4Cloud's brainzz-documents admin UI, trimmed to
 fllame's vLLM-only scope: no model-weight-format (GGUF/MLX) filtering,
 since fllame only ever serves via vLLM.
@@ -13,9 +16,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from huggingface_hub import list_models
+from huggingface_hub import ModelInfo, list_models
 
-_DECLARED_SIZE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)B", re.IGNORECASE)
+_MULTIPLIER_BILLION_PARAMS = {"T": 1000.0, "B": 1.0, "M": 0.001}
+_SIZE_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)([TBM])", re.IGNORECASE)
 
 # `list_models(search=...)` is a paginated Hub API call; without a
 # `limit` it transparently fetches every matching page before this
@@ -30,7 +34,11 @@ _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER = 10
 # Only properties in this list come back populated at all (verified
 # against the installed huggingface_hub: `expand` is exclusive, not
 # additive - omitting a field here means it's None on every result).
-_EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified"]
+# "safetensors" rides along in the same search call (no extra request
+# per candidate) and gives the real total tensor element count the Hub
+# itself computes - the same figure shown as a repo's "Model size" - so
+# it's preferred over guessing from the repo_id below.
+_EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified", "safetensors"]
 
 # Ranking weights - a rough heuristic: reward a candidate for being
 # close to (but under) its quantization's size ceiling, recently
@@ -41,9 +49,10 @@ _DOWNLOADS_ALL_TIME_WEIGHT = 0.2
 _DOWNLOADS_RECENT_WEIGHT = 0.2
 _RECENCY_WEIGHT = 0.2
 
-# Size-closeness score for a candidate whose declared size couldn't be
-# parsed from its repo_id. Deliberately 0.0, not a neutral average: an
-# unparseable size is missing evidence, not a known middling fit.
+# Size-closeness score for a candidate whose param count couldn't be
+# determined (no safetensors metadata and no parseable repo_id).
+# Deliberately 0.0, not a neutral average: missing evidence isn't a
+# known middling fit.
 _UNKNOWN_SIZE_SCORE = 0.0
 
 
@@ -79,9 +88,9 @@ def search_models(
     intent always wins over the estimate.
 
     Leaving both `min_params_billion` and `max_params_billion` unset
-    means "no size constraint": a candidate whose size couldn't be
-    parsed from its repo_id still passes, since nothing was asked of
-    it. The moment either bound is given, an unparseable size no longer
+    means "no size constraint": a candidate whose param count couldn't
+    be determined still passes, since nothing was asked of it. The
+    moment either bound is given, an undetermined size no longer
     passes - it can't be shown to satisfy a range that was explicitly
     asked for.
     """
@@ -104,7 +113,7 @@ def search_models(
             if not _matches_quantization(info.id, info.tags, q):
                 continue
 
-            declared_size = _declared_size_billion_params(info.id)
+            declared_size = _params_billion(info)
             if declared_size is None:
                 if exclude_unknown_size:
                     continue
@@ -142,9 +151,30 @@ def _matches_quantization(repo_id: str, tags: list[str] | None, quantization: st
     return upper_id.endswith((f"-{upper_quantization}", f"_{upper_quantization}"))
 
 
-def _declared_size_billion_params(repo_id: str) -> float | None:
-    match = _DECLARED_SIZE_PATTERN.search(repo_id)
-    return float(match.group(1)) if match else None
+def _params_billion(info: ModelInfo) -> float | None:
+    """The candidate's real parameter count where the Hub can supply
+    one, falling back to guessing from the repo_id's naming convention
+    only when it can't.
+
+    `info.safetensors.total` is the Hub's own tensor-element count for
+    the repo (the same figure shown on the model page as "Model size"),
+    populated by requesting `"safetensors"` in `_EXPAND` - authoritative
+    where present, unlike anything derivable from the repo_id. It's
+    unavailable for repos with no safetensors weights (e.g. GGUF-only
+    exports), which is the only case the repo_id guess below exists for.
+    A repo_id often carries more than one size-shaped number - a version
+    (`Qwen3.8`), a total parameter count (`2.4T`), an active-parameter
+    count for an MoE model (`A95B`) - so even the improved unit-aware
+    guess stays a heuristic, not a guarantee.
+    """
+    if info.safetensors is not None:
+        return info.safetensors.total / 1_000_000_000
+
+    match = _SIZE_UNIT_PATTERN.search(info.id)
+    if not match:
+        return None
+    value, unit = float(match.group(1)), match.group(2).upper()
+    return value * _MULTIPLIER_BILLION_PARAMS[unit]
 
 
 def _rank(scored: list[_Scored]) -> list[_Scored]:

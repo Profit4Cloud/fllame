@@ -6,12 +6,19 @@ from fllame.models.discovery import search_models
 
 
 @dataclass
+class _FakeSafeTensorsInfo:
+    total: int
+    parameters: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
 class _FakeModelInfo:
     id: str
     tags: list[str] = field(default_factory=list)
     downloads: int | None = 0
     downloads_all_time: int | None = 0
     last_modified: datetime | None = None
+    safetensors: _FakeSafeTensorsInfo | None = None
 
 
 def _patch_list_models(monkeypatch, by_search_term: dict[str, list[_FakeModelInfo]]):
@@ -64,6 +71,57 @@ def test_unknown_size_excluded_once_a_bound_is_given(monkeypatch):
     )
 
     assert results == []
+
+
+def test_safetensors_total_wins_over_misleading_repo_id_number(monkeypatch):
+    # Regression: "nvidia/Qwen3.8-2.4T-A95B-NVFP4" was parsed as 95B (its
+    # active-parameter count) by the old repo_id-only regex, when the
+    # Hub's own safetensors metadata reports the real total.
+    _patch_list_models(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _FakeModelInfo(
+                    id="nvidia/Qwen3.8-2.4T-A95B-NVFP4",
+                    tags=["nvfp4"],
+                    safetensors=_FakeSafeTensorsInfo(total=1_300_000_000_000),
+                )
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], ceiling_billion={"nvfp4": 2000.0})
+
+    assert results[0].params_billion == 1300.0
+
+
+def test_falls_back_to_repo_id_when_no_safetensors_metadata(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {"awq": [_FakeModelInfo(id="org/mid-7B-AWQ", tags=["awq"], safetensors=None)]},
+    )
+
+    results = search_models(quantizations=["awq"], ceiling_billion={"awq": 100.0})
+
+    assert results[0].params_billion == 7.0
+
+
+def test_repo_id_fallback_understands_trillion_and_million_units(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _FakeModelInfo(id="org/huge-2.4T-NVFP4", tags=["nvfp4"], safetensors=None),
+                _FakeModelInfo(id="org/tiny-500M-NVFP4", tags=["nvfp4"], safetensors=None),
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], ceiling_billion={"nvfp4": 3000.0})
+
+    by_id = {c.repo_id: c.params_billion for c in results}
+    assert by_id["org/huge-2.4T-NVFP4"] == 2400.0
+    assert by_id["org/tiny-500M-NVFP4"] == 0.5
 
 
 def test_quantization_match_via_tag_or_repo_id_suffix(monkeypatch):
