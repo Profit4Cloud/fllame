@@ -319,7 +319,14 @@ def model_list() -> None:
 @model_app.command("scan")
 def model_scan(
     query: str | None = typer.Option(
-        None, "--query", "-q", help="Free-text filter, e.g. a model family name."
+        None,
+        "--query",
+        "-q",
+        help=(
+            'Free-text filter, e.g. a model family name - quote multi-word queries '
+            '(-q "qwen 3.8"). Matches like the Hub\'s own search box: every word just '
+            "needs to appear somewhere in the repo id, not as one exact phrase."
+        ),
     ),
     quantization: str | None = typer.Option(
         None,
