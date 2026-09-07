@@ -322,20 +322,22 @@ def model_scan(
         None,
         "--query",
         "-q",
+        show_default=False,
         help=(
-            'Free-text filter, e.g. a model family name - quote multi-word queries '
-            '(-q "qwen 3.8"). Matches like the Hub\'s own search box: every word just '
-            "needs to appear somewhere in the repo id, not as one exact phrase."
+            "Free-text filter, e.g. a model family name. Place multi-word queries "
+            'between quotes (-q "qwen 3.8").'
         ),
     ),
     quantization: str | None = typer.Option(
         None,
         "--quant",
+        show_default=False,
         help="Search only this quantization, ignoring the hardware scan's supported list.",
     ),
     max_size: float | None = typer.Option(
         None,
         "--max-size",
+        show_default=False,
         help=(
             "Maximum estimated VRAM usage, in GB (see the EST. VRAM column) - "
             "defaults to this machine's hardware scan budget when not given, "
@@ -343,11 +345,15 @@ def model_scan(
         ),
     ),
     min_params: float | None = typer.Option(
-        None, "--min-params", help="Minimum size, in billions of parameters."
+        None,
+        "--min-params",
+        show_default=False,
+        help="Minimum size, in billions of parameters.",
     ),
     max_params: float | None = typer.Option(
         None,
         "--max-params",
+        show_default=False,
         help=(
             "Maximum size, in billions of parameters. Independent of --max-size "
             "and not applied unless given - there's no hardware-based default for it."
