@@ -236,6 +236,36 @@ def test_quantization_match_via_tag_or_repo_id_suffix(monkeypatch):
     assert {c.repo_id for c in results} == {"org/tagged-7B", "org/suffix-7B-GPTQ"}
 
 
+def test_gguf_excluded_via_tag(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _FakeModelInfo(
+                    id="cdiamond/Qwen3.8-27B-iMatrix-NVFP4-MTP-GGUF",
+                    tags=["nvfp4", "gguf"],
+                ),
+                _FakeModelInfo(id="org/real-27B-NVFP4", tags=["nvfp4"]),
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=100.0)
+
+    assert {c.repo_id for c in results} == {"org/real-27B-NVFP4"}
+
+
+def test_gguf_excluded_via_repo_id_suffix_without_tag(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {"nvfp4": [_FakeModelInfo(id="org/model-27B-NVFP4-GGUF", tags=["nvfp4"])]},
+    )
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=100.0)
+
+    assert results == []
+
+
 def test_deduplicates_across_quantization_searches(monkeypatch):
     same = _FakeModelInfo(id="org/dual-tagged-7B", tags=["awq", "gptq"])
     _patch_list_models(monkeypatch, {"awq": [same], "gptq": [same]})

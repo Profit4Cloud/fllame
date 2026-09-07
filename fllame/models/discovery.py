@@ -22,9 +22,16 @@ declared param count doesn't tell you how a specific quantization
 format packs its bits on disk, but the Hub's own per-dtype element
 counts do, directly.
 
+GGUF results are excluded outright (see `_is_gguf`): fllame is
+vLLM-only, and GGUF-via-vLLM now needs a separate out-of-tree plugin
+with no per-model compatibility guarantee, on top of carrying no
+safetensors metadata for the size estimate above to work with anyway.
+MLX isn't filtered - fllame has no MLX serving story at all, unlike
+GGUF's (limited, unreliable) one, so it wasn't the case that motivated
+this and hasn't been evaluated on its own merits.
+
 Adapted from Profit4Cloud's brainzz-documents admin UI, trimmed to
-fllame's vLLM-only scope: no model-weight-format (GGUF/MLX) filtering,
-since fllame only ever serves via vLLM.
+fllame's vLLM-only scope: no training/LoRA headroom.
 """
 
 from __future__ import annotations
@@ -156,6 +163,8 @@ def search_models(
                 continue
             if not _matches_quantization(info.id, info.tags, q):
                 continue
+            if _is_gguf(info.id, info.tags):
+                continue
 
             declared_params = _params_billion(info)
             if declared_params is None:
@@ -200,6 +209,27 @@ def _matches_quantization(repo_id: str, tags: list[str] | None, quantization: st
     upper_id = repo_id.upper()
     upper_quantization = quantization.upper()
     return upper_id.endswith((f"-{upper_quantization}", f"_{upper_quantization}"))
+
+
+def _is_gguf(repo_id: str, tags: list[str] | None) -> bool:
+    """A GGUF Hub tag where present, falling back to the repo_id's
+    common "-GGUF" naming convention - same dual-check shape as
+    `_matches_quantization`.
+
+    Excluded outright rather than merely deprioritized: GGUF-via-vLLM
+    now requires a separate out-of-tree plugin fllame doesn't manage,
+    is documented by vLLM itself as experimental with no per-model
+    compatibility guarantee even with that plugin installed, and (being
+    what motivated this filter) has no safetensors metadata for
+    `_params_billion`/`_estimated_vram_gb` to size in the first place.
+    A repo offering both a GGUF and a real (safetensors) release isn't
+    lost here - only the GGUF listing itself is excluded, the other one
+    still matches the quantization search on its own tags/name.
+    """
+    tag_set = {tag.lower() for tag in (tags or [])}
+    if "gguf" in tag_set:
+        return True
+    return repo_id.upper().endswith(("-GGUF", "_GGUF"))
 
 
 def _params_billion(info: ModelInfo) -> float | None:
