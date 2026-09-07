@@ -124,6 +124,61 @@ def test_repo_id_fallback_understands_trillion_and_million_units(monkeypatch):
     assert by_id["org/tiny-500M-NVFP4"] == 0.5
 
 
+def test_estimated_vram_computed_from_dtype_byte_breakdown(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _FakeModelInfo(
+                    id="nvidia/Qwen3.8-2.4T-A95B-NVFP4",
+                    tags=["nvfp4"],
+                    safetensors=_FakeSafeTensorsInfo(
+                        total=1_300_000_000_000,
+                        # 1 GiB of U8 (1 byte each) + 1 GiB of F16 (2 bytes each).
+                        parameters={"U8": 1024**3, "F16": (1024**3) // 2},
+                    ),
+                )
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], ceiling_billion={"nvfp4": 2000.0})
+
+    assert results[0].estimated_vram_gb == 2.0
+
+
+def test_estimated_vram_unknown_without_safetensors_metadata(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {"awq": [_FakeModelInfo(id="org/mid-7B-AWQ", tags=["awq"], safetensors=None)]},
+    )
+
+    results = search_models(quantizations=["awq"], ceiling_billion={"awq": 100.0})
+
+    assert results[0].estimated_vram_gb is None
+
+
+def test_estimated_vram_unknown_for_unrecognized_dtype(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {
+            "awq": [
+                _FakeModelInfo(
+                    id="org/mid-7B-AWQ",
+                    tags=["awq"],
+                    safetensors=_FakeSafeTensorsInfo(
+                        total=7_000_000_000, parameters={"SOME_NEW_DTYPE": 7_000_000_000}
+                    ),
+                )
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["awq"], ceiling_billion={"awq": 100.0})
+
+    assert results[0].estimated_vram_gb is None
+
+
 def test_quantization_match_via_tag_or_repo_id_suffix(monkeypatch):
     _patch_list_models(
         monkeypatch,

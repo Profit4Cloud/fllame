@@ -348,12 +348,13 @@ def model_scan(
         raise typer.Exit(code=0)
 
     _print_table(
-        ["REPO_ID", "QUANT", "PARAMS"],
+        ["REPO_ID", "QUANT", "PARAMS", "EST. VRAM"],
         [
             [
                 c.repo_id,
                 c.quantization,
                 f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
+                f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
             ]
             for c in candidates
         ],

@@ -5,6 +5,10 @@ fits. See `fllame/models/sizing.py` for where the ceiling comes from.
 A candidate's param count comes from the Hub's own safetensors metadata
 where available (see `_params_billion`), falling back to a unit-aware
 guess from the repo_id's naming convention only when it isn't.
+`_estimated_vram_gb` derives a separate, independent minimum
+weights-only VRAM figure straight from that same safetensors metadata's
+per-dtype byte breakdown, for display alongside `params_billion` - not
+a substitute for it, and not the deferred recipe-level VRAM estimator.
 Adapted from Profit4Cloud's brainzz-documents admin UI, trimmed to
 fllame's vLLM-only scope: no model-weight-format (GGUF/MLX) filtering,
 since fllame only ever serves via vLLM.
@@ -20,6 +24,31 @@ from huggingface_hub import ModelInfo, list_models
 
 _MULTIPLIER_BILLION_PARAMS = {"T": 1000.0, "B": 1.0, "M": 0.001}
 _SIZE_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)([TBM])", re.IGNORECASE)
+
+# Byte width of every dtype the safetensors format itself defines (a
+# fixed spec, not something that grows with new quantization methods -
+# a quantization scheme with no dtype of its own, e.g. 4-bit formats
+# packing two values per byte, reuses one of these container dtypes for
+# its tensors and is sized correctly here precisely because this counts
+# physical stored bytes, not logical parameters).
+_SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "F8_E4M3": 1,
+    "F8_E5M2": 1,
+    "F8_E8M0": 1,
+    "I16": 2,
+    "U16": 2,
+    "F16": 2,
+    "BF16": 2,
+    "I32": 4,
+    "U32": 4,
+    "F32": 4,
+    "I64": 8,
+    "U64": 8,
+    "F64": 8,
+}
 
 # `list_models(search=...)` is a paginated Hub API call; without a
 # `limit` it transparently fetches every matching page before this
@@ -61,6 +90,7 @@ class ModelCandidate:
     repo_id: str
     quantization: str
     params_billion: float | None
+    estimated_vram_gb: float | None
     downloads: int | None
     downloads_all_time: int | None
     last_modified: datetime | None
@@ -127,6 +157,7 @@ def search_models(
                         repo_id=info.id,
                         quantization=q,
                         params_billion=declared_size,
+                        estimated_vram_gb=_estimated_vram_gb(info),
                         downloads=info.downloads,
                         downloads_all_time=info.downloads_all_time,
                         last_modified=info.last_modified,
@@ -175,6 +206,38 @@ def _params_billion(info: ModelInfo) -> float | None:
         return None
     value, unit = float(match.group(1)), match.group(2).upper()
     return value * _MULTIPLIER_BILLION_PARAMS[unit]
+
+
+def _estimated_vram_gb(info: ModelInfo) -> float | None:
+    """A minimum weights-only VRAM estimate - the checkpoint's real
+    on-disk byte size, summed directly from `safetensors.parameters`
+    (a `{dtype: element_count}` breakdown) rather than going through
+    `params_billion` and a per-quantization bytes-per-param guess.
+
+    This sidesteps the ambiguity `_params_billion` can't fully resolve
+    for packed quantization formats (see its docstring): a dtype tag
+    and its element count together give the exact stored byte size for
+    that group of tensors regardless of how many logical parameters
+    happen to be packed into each stored element, so no per-quantization
+    assumption is needed here at all.
+
+    Deliberately not the recipe-level VRAM estimator tracked as
+    still-deferred in CLAUDE.md: weights only, no KV cache/activations/
+    concurrency, and it exists for `model scan`'s display only - `serve`
+    doesn't consult it. `None` when there's no safetensors metadata to
+    sum, or when a tensor's dtype isn't one this module knows the byte
+    width of - a partial sum would silently understate the real size.
+    """
+    if info.safetensors is None:
+        return None
+    try:
+        total_bytes = sum(
+            count * _SAFETENSORS_DTYPE_BYTES[dtype.upper()]
+            for dtype, count in info.safetensors.parameters.items()
+        )
+    except KeyError:
+        return None
+    return total_bytes / (1024**3)
 
 
 def _rank(scored: list[_Scored]) -> list[_Scored]:

@@ -374,7 +374,7 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
 
     def fake_search_models(**kwargs):
         captured.update(kwargs)
-        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 100, 1000, None)]
+        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 14.0, 100, 1000, None)]
 
     monkeypatch.setattr(cli, "search_models", fake_search_models)
 
@@ -382,6 +382,7 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
 
     assert result.exit_code == 0
     assert "org/demo-7B-AWQ" in result.stdout
+    assert "14.0 GB" in result.stdout
     assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
     assert captured["max_params_billion"] is None
 
