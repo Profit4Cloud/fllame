@@ -97,7 +97,11 @@ separate, optional restriction on declared parameter count with no
 hardware-derived default of their own - give neither and only
 `--max-size` applies; give `--max-params` and ranking weighs closeness
 to both equally alongside popularity/recency. `-q`/`--query` (free text)
-narrows further regardless of any of the above.
+narrows further regardless of any of the above. Alongside PARAMS and EST.
+VRAM, results show DOWNLOADS (recent) and UPDATED (relative time) - both
+of which also feed the ranking, same as size fit does; QUANT is only
+shown when more than one quantization is being searched (see
+`fllame model scan -h` for the full column breakdown).
 
 `fllame recipe add` creates a recipe from whatever you'd typically copy
 off a model card or vLLM's own docs: prompts for the Docker image (warns

@@ -11,6 +11,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 import click
 import typer
@@ -92,6 +93,49 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     for row in all_rows:
         padded = [cell.ljust(width) for cell, width in zip(row[:-1], widths[:-1], strict=False)]
         typer.echo("  ".join([*padded, row[-1]]))
+
+
+def _format_count(n: int | None) -> str:
+    """A compact form of a download count - "12.3k", "1.2M" - so the
+    column stays narrow regardless of magnitude. Not locale-aware; this
+    is a terminal table, not user-facing prose."""
+    if n is None:
+        return "unknown"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+# (label, seconds-per-unit, largest value still shown in this unit
+# before rolling up to the next one - `None` for the last, open-ended
+# unit). Mirrors huggingface_hub's own `CachedRepoInfo.last_modified_str`
+# (used by `fllame model list`) for a consistent "3 days ago" feel
+# across both tables, without depending on that library's private
+# formatter.
+_RELATIVE_TIME_UNITS = (
+    ("second", 1, 59),
+    ("minute", 60, 59),
+    ("hour", 60 * 60, 23),
+    ("day", 60 * 60 * 24, 6),
+    ("week", 60 * 60 * 24 * 7, 3),
+    ("month", 60 * 60 * 24 * 30, 11),
+    ("year", 60 * 60 * 24 * 365, None),
+)
+
+
+def _format_relative_time(dt: datetime | None) -> str:
+    if dt is None:
+        return "unknown"
+    delta_seconds = (datetime.now(UTC) - dt).total_seconds()
+    if delta_seconds < 20:
+        return "a few seconds ago"
+    for label, divider, max_value in _RELATIVE_TIME_UNITS:  # noqa: B007 - used after the loop
+        value = round(delta_seconds / divider)
+        if max_value is not None and value <= max_value:
+            break
+    return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
 def _run_compose(*args: str) -> int:
@@ -325,6 +369,17 @@ def model_scan(
 
     --quant searches only that quantization, still ignoring the hardware
     scan's supported list either way.
+
+    Columns: PARAMS is the Hub's own reported parameter count where
+    known (falling back to a guess from the repo_id otherwise); EST.
+    VRAM is a separate, independent minimum weights-only VRAM estimate
+    computed directly from the checkpoint's real on-disk byte layout -
+    not derived from PARAMS, so the two can disagree for quantization
+    formats that pack multiple values into one stored byte. DOWNLOADS is
+    the Hub's recent (~30-day) download count, and UPDATED is how long
+    ago the repo was last modified - both also feed the ranking, along
+    with all-time downloads (not separately shown). QUANT is omitted
+    when every result already shares one quantization.
     """
     profile = scan_hardware() if quantization is None or max_size is None else None
 
@@ -369,18 +424,21 @@ def model_scan(
         typer.echo("No matching models found.")
         raise typer.Exit(code=0)
 
-    _print_table(
-        ["REPO_ID", "QUANT", "PARAMS", "EST. VRAM"],
+    show_quant_column = len(quantizations) > 1
+    headers = ["REPO_ID", *(["QUANT"] if show_quant_column else []), "PARAMS", "EST. VRAM"]
+    headers += ["DOWNLOADS", "UPDATED"]
+    rows = [
         [
-            [
-                c.repo_id,
-                c.quantization,
-                f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
-                f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
-            ]
-            for c in candidates
-        ],
-    )
+            c.repo_id,
+            *([c.quantization] if show_quant_column else []),
+            f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
+            f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
+            _format_count(c.downloads),
+            _format_relative_time(c.last_modified),
+        ]
+        for c in candidates
+    ]
+    _print_table(headers, rows)
 
 
 @app.command()
