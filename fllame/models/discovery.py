@@ -1,14 +1,27 @@
 """Searches the HF Hub for models plausibly servable within a given
-per-quantization size ceiling, ranked best-first - a coarse pre-filter
-and heuristic, not a benchmarked guarantee that a candidate actually
-fits. See `fllame/models/sizing.py` for where the ceiling comes from.
+estimated-VRAM ceiling, ranked best-first - a coarse pre-filter and
+heuristic, not a benchmarked guarantee that a candidate actually fits.
+See `fllame/models/sizing.py` for where the default ceiling comes from.
+
+Two independent restrictions can narrow a search further: `max_size_gb`
+(always given - explicit, or defaulted from a hardware scan by the
+caller; see `exclude_unknown_size` for what "explicit" changes) caps
+`_estimated_vram_gb`; `min_params_billion`/`max_params_billion` (only
+active when given - no hardware-derived default) cap `_params_billion`.
+Both are pass/fail filters; both also feed the ranking's fit score,
+weighted evenly when both are active.
+
 A candidate's param count comes from the Hub's own safetensors metadata
 where available (see `_params_billion`), falling back to a unit-aware
 guess from the repo_id's naming convention only when it isn't.
 `_estimated_vram_gb` derives a separate, independent minimum
 weights-only VRAM figure straight from that same safetensors metadata's
-per-dtype byte breakdown, for display alongside `params_billion` - not
-a substitute for it, and not the deferred recipe-level VRAM estimator.
+per-dtype byte breakdown - deliberately not derived from
+`params_billion` via a per-quantization bytes-per-param guess, since a
+declared param count doesn't tell you how a specific quantization
+format packs its bits on disk, but the Hub's own per-dtype element
+counts do, directly.
+
 Adapted from Profit4Cloud's brainzz-documents admin UI, trimmed to
 fllame's vLLM-only scope: no model-weight-format (GGUF/MLX) filtering,
 since fllame only ever serves via vLLM.
@@ -70,18 +83,21 @@ _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER = 10
 _EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified", "safetensors"]
 
 # Ranking weights - a rough heuristic: reward a candidate for being
-# close to (but under) its quantization's size ceiling, recently
-# updated, and widely downloaded. Downloads also stand in for
-# reputation, which isn't otherwise derivable from Hub metadata.
-_SIZE_CLOSENESS_WEIGHT = 0.4
+# close to (but under) the active size ceiling(s), recently updated, and
+# widely downloaded. Downloads also stand in for reputation, which isn't
+# otherwise derivable from Hub metadata. _FIT_WEIGHT is a budget split
+# between VRAM-closeness and params-closeness when both are active (see
+# `_fit_score`), not two separate weights - so the two together never
+# out-weigh popularity/recency just because a params bound was given.
+_FIT_WEIGHT = 0.4
 _DOWNLOADS_ALL_TIME_WEIGHT = 0.2
 _DOWNLOADS_RECENT_WEIGHT = 0.2
 _RECENCY_WEIGHT = 0.2
 
-# Size-closeness score for a candidate whose param count couldn't be
-# determined (no safetensors metadata and no parseable repo_id).
-# Deliberately 0.0, not a neutral average: missing evidence isn't a
-# known middling fit.
+# Closeness score for a candidate whose relevant size couldn't be
+# determined (and wasn't already excluded by `exclude_unknown_size`/an
+# explicit params bound - see `search_models`). Deliberately 0.0, not a
+# neutral average: missing evidence isn't a known middling fit.
 _UNKNOWN_SIZE_SCORE = 0.0
 
 
@@ -96,42 +112,40 @@ class ModelCandidate:
     last_modified: datetime | None
 
 
-@dataclass(frozen=True)
-class _Scored:
-    candidate: ModelCandidate
-    ceiling_billion: float
-
-
 def search_models(
     *,
     quantizations: list[str],
-    ceiling_billion: dict[str, float],
+    max_size_gb: float,
+    exclude_unknown_size: bool = False,
     min_params_billion: float | None = None,
     max_params_billion: float | None = None,
     query: str | None = None,
     max_results: int = 20,
 ) -> list[ModelCandidate]:
     """One Hub search per entry in `quantizations`, ranked and capped at
-    `max_results` overall. `ceiling_billion` is this search's
-    per-quantization size ceiling (see `fllame/models/sizing.py`);
-    `max_params_billion`, if given, tightens it further - explicit
-    intent always wins over the estimate.
+    `max_results` overall.
 
-    Leaving both `min_params_billion` and `max_params_billion` unset
-    means "no size constraint": a candidate whose param count couldn't
-    be determined still passes, since nothing was asked of it. The
-    moment either bound is given, an undetermined size no longer
-    passes - it can't be shown to satisfy a range that was explicitly
+    `max_size_gb` always caps a candidate whose estimated VRAM is known.
+    `exclude_unknown_size` decides what happens to one that isn't (no
+    safetensors metadata at all): pass `True` when `max_size_gb` is the
+    caller's own explicit ask - it can't be shown to satisfy a bound
+    that was explicitly asked for. Leave it `False` (the default) when
+    `max_size_gb` is merely a hardware-scan default nobody asked this
+    candidate to be measured against - excluding it here as if it were
+    an explicit ask would make repos with no safetensors metadata (e.g.
+    GGUF-only exports) disappear from every default, unfiltered search.
+
+    `min_params_billion`/`max_params_billion` are a separate, optional
+    restriction with no implicit default and exactly the same rule:
+    leaving both unset means "no params constraint" and an undetermined
+    param count still passes; the moment either is given, it no longer
+    does - it can't be shown to satisfy a range that was explicitly
     asked for.
     """
-    exclude_unknown_size = min_params_billion is not None or max_params_billion is not None
-    effective_min = min_params_billion if min_params_billion is not None else 0.0
-    effective_max = {
-        q: (ceiling if max_params_billion is None else min(ceiling, max_params_billion))
-        for q, ceiling in ceiling_billion.items()
-    }
+    exclude_unknown_params = min_params_billion is not None or max_params_billion is not None
+    effective_min_params = min_params_billion if min_params_billion is not None else 0.0
 
-    found: list[_Scored] = []
+    found: list[ModelCandidate] = []
     seen_ids: set[str] = set()
     search_limit = max_results * _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER
 
@@ -143,31 +157,37 @@ def search_models(
             if not _matches_quantization(info.id, info.tags, q):
                 continue
 
-            declared_size = _params_billion(info)
-            if declared_size is None:
+            declared_params = _params_billion(info)
+            if declared_params is None:
+                if exclude_unknown_params:
+                    continue
+            elif declared_params < effective_min_params or (
+                max_params_billion is not None and declared_params > max_params_billion
+            ):
+                continue
+
+            estimated_vram = _estimated_vram_gb(info)
+            if estimated_vram is None:
                 if exclude_unknown_size:
                     continue
-            elif declared_size < effective_min or declared_size > effective_max[q]:
+            elif estimated_vram > max_size_gb:
                 continue
 
             seen_ids.add(info.id)
             found.append(
-                _Scored(
-                    candidate=ModelCandidate(
-                        repo_id=info.id,
-                        quantization=q,
-                        params_billion=declared_size,
-                        estimated_vram_gb=_estimated_vram_gb(info),
-                        downloads=info.downloads,
-                        downloads_all_time=info.downloads_all_time,
-                        last_modified=info.last_modified,
-                    ),
-                    ceiling_billion=effective_max[q],
+                ModelCandidate(
+                    repo_id=info.id,
+                    quantization=q,
+                    params_billion=declared_params,
+                    estimated_vram_gb=estimated_vram,
+                    downloads=info.downloads,
+                    downloads_all_time=info.downloads_all_time,
+                    last_modified=info.last_modified,
                 )
             )
 
-    ranked = _rank(found)
-    return [scored.candidate for scored in ranked[:max_results]]
+    ranked = _rank(found, max_size_gb=max_size_gb, max_params_billion=max_params_billion)
+    return ranked[:max_results]
 
 
 def _matches_quantization(repo_id: str, tags: list[str] | None, quantization: str) -> bool:
@@ -240,36 +260,42 @@ def _estimated_vram_gb(info: ModelInfo) -> float | None:
     return total_bytes / (1024**3)
 
 
-def _rank(scored: list[_Scored]) -> list[_Scored]:
-    if not scored:
+def _rank(
+    candidates: list[ModelCandidate], *, max_size_gb: float, max_params_billion: float | None
+) -> list[ModelCandidate]:
+    if not candidates:
         return []
 
-    downloads_recent = _normalize([s.candidate.downloads or 0 for s in scored])
-    downloads_all_time = _normalize([s.candidate.downloads_all_time or 0 for s in scored])
+    downloads_recent = _normalize([c.downloads or 0 for c in candidates])
+    downloads_all_time = _normalize([c.downloads_all_time or 0 for c in candidates])
     recency = _normalize(
-        [
-            s.candidate.last_modified.timestamp() if s.candidate.last_modified else 0.0
-            for s in scored
-        ]
+        [c.last_modified.timestamp() if c.last_modified else 0.0 for c in candidates]
     )
 
-    def size_closeness(s: _Scored) -> float:
-        if s.candidate.params_billion is None or s.ceiling_billion <= 0:
+    def closeness(value: float | None, ceiling: float | None) -> float:
+        if value is None or ceiling is None or ceiling <= 0:
             return _UNKNOWN_SIZE_SCORE
-        return min(1.0, s.candidate.params_billion / s.ceiling_billion)
+        return min(1.0, value / ceiling)
+
+    def fit_score(c: ModelCandidate) -> float:
+        size_closeness = closeness(c.estimated_vram_gb, max_size_gb)
+        if max_params_billion is None:
+            return size_closeness
+        params_closeness = closeness(c.params_billion, max_params_billion)
+        return 0.5 * size_closeness + 0.5 * params_closeness
 
     weighted = [
         (
-            _SIZE_CLOSENESS_WEIGHT * size_closeness(s)
+            _FIT_WEIGHT * fit_score(c)
             + _DOWNLOADS_ALL_TIME_WEIGHT * downloads_all_time[i]
             + _DOWNLOADS_RECENT_WEIGHT * downloads_recent[i]
             + _RECENCY_WEIGHT * recency[i],
-            s,
+            c,
         )
-        for i, s in enumerate(scored)
+        for i, c in enumerate(candidates)
     ]
     weighted.sort(key=lambda pair: pair[0], reverse=True)
-    return [s for _, s in weighted]
+    return [c for _, c in weighted]
 
 
 def _normalize(values: list[float]) -> list[float]:

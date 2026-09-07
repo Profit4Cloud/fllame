@@ -385,6 +385,9 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
     assert "14.0 GB" in result.stdout
     assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
     assert captured["max_params_billion"] is None
+    # NVIDIA A100 80GB, discrete (no unified-memory OS reserve): 80 * 0.85.
+    assert captured["max_size_gb"] == 68.0
+    assert captured["exclude_unknown_size"] is False
 
 
 def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
@@ -400,11 +403,51 @@ def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
 
     monkeypatch.setattr(cli, "search_models", fake_search_models)
 
-    result = runner.invoke(app, ["model", "scan", "--quant", "gptq", "--max-params", "13"])
+    result = runner.invoke(
+        app, ["model", "scan", "--quant", "gptq", "--max-size", "40", "--max-params", "13"]
+    )
 
     assert result.exit_code == 0
     assert captured["quantizations"] == ["gptq"]
-    assert captured["ceiling_billion"] == {"gptq": 13.0}
+    assert captured["max_size_gb"] == 40.0
+    assert captured["exclude_unknown_size"] is True
+    assert captured["max_params_billion"] == 13.0
+
+
+def test_model_scan_max_size_alone_still_needs_hardware_for_quantizations(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--max-size", "40"])
+
+    assert result.exit_code == 0
+    assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
+    assert captured["max_size_gb"] == 40.0
+    assert captured["exclude_unknown_size"] is True
+
+
+def test_model_scan_quant_alone_still_needs_hardware_for_max_size(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--quant", "gptq"])
+
+    assert result.exit_code == 0
+    assert captured["quantizations"] == ["gptq"]
+    assert captured["max_size_gb"] == 68.0
+    assert captured["exclude_unknown_size"] is False
 
 
 def test_model_scan_no_supported_quantizations_gives_friendly_error(monkeypatch):

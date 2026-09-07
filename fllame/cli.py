@@ -26,7 +26,7 @@ from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import list_cached_models
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
-from fllame.models.sizing import max_params_billion, memory_budget_gb
+from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore
@@ -282,27 +282,51 @@ def model_scan(
         "--quant",
         help="Search only this quantization, ignoring the hardware scan's supported list.",
     ),
+    max_size: float | None = typer.Option(
+        None,
+        "--max-size",
+        help=(
+            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column) - "
+            "defaults to this machine's hardware scan budget when not given, "
+            "but is enforced either way."
+        ),
+    ),
     min_params: float | None = typer.Option(
         None, "--min-params", help="Minimum size, in billions of parameters."
     ),
     max_params: float | None = typer.Option(
         None,
         "--max-params",
-        help="Maximum size, in billions of parameters - ignoring the hardware-based estimate.",
+        help=(
+            "Maximum size, in billions of parameters. Independent of --max-size "
+            "and not applied unless given - there's no hardware-based default for it."
+        ),
     ),
     limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
 ) -> None:
     """Search the Hugging Face Hub for models, ranked by fit and popularity.
 
-    With no filters, searches the quantizations this machine's hardware
-    scan reports as supported, capped by a coarse VRAM/RAM-based size
-    estimate - a starting point, not a benchmarked guarantee a result
-    actually fits (see CLAUDE.md for why there's no stronger guarantee
-    yet). --quant and/or --max-params override that default
-    independently, ignoring the hardware scan entirely for whichever is
-    given.
+    --max-size is the primary size gate and is always in effect: give it
+    explicitly, or it defaults to a coarse VRAM/RAM-based budget from
+    this machine's hardware scan - a starting point, not a benchmarked
+    guarantee a result actually fits (see CLAUDE.md for why there's no
+    stronger guarantee yet). A result with no Hub-reported size at all
+    (no safetensors metadata - e.g. a GGUF-only export) is excluded only
+    when --max-size was given explicitly; against the hardware-scan
+    default it's left in, unpenalized, rather than judged against a
+    number nobody asked it to satisfy.
+
+    --min-params/--max-params are a separate, optional restriction on
+    declared parameter count layered on top, with no hardware-derived
+    default of their own and the same explicit-only exclusion rule for
+    an unknown value. Give neither and only --max-size applies; give
+    --max-params and both restrictions apply, and ranking then weighs
+    closeness to each equally alongside popularity/recency.
+
+    --quant searches only that quantization, still ignoring the hardware
+    scan's supported list either way.
     """
-    profile = scan_hardware() if quantization is None or max_params is None else None
+    profile = scan_hardware() if quantization is None or max_size is None else None
 
     quantizations = [quantization] if quantization is not None else profile.supported_quantizations
     if not quantizations:
@@ -313,27 +337,25 @@ def model_scan(
         )
         raise typer.Exit(code=1)
 
-    if max_params is not None:
-        ceiling_billion = dict.fromkeys(quantizations, max_params)
+    if max_size is not None:
+        max_size_gb = max_size
     else:
         budget_gb = memory_budget_gb(profile)
         if budget_gb is None:
             typer.echo(
                 "Could not determine available VRAM/RAM for this hardware - "
-                "pass --max-params explicitly to search anyway.",
+                "pass --max-size explicitly to search anyway.",
                 err=True,
             )
             raise typer.Exit(code=1)
         unified = profile.chip_family == "grace_blackwell"
-        ceiling_billion = {
-            q: max_params_billion(budget_gb=budget_gb, unified_memory=unified, quantization=q)
-            for q in quantizations
-        }
+        max_size_gb = usable_memory_gb(budget_gb=budget_gb, unified_memory=unified)
 
     try:
         candidates = search_models(
             quantizations=quantizations,
-            ceiling_billion=ceiling_billion,
+            max_size_gb=max_size_gb,
+            exclude_unknown_size=max_size is not None,
             min_params_billion=min_params,
             max_params_billion=max_params,
             query=query,

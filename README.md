@@ -64,7 +64,7 @@ Then:
 fllame hardware scan                           # what this box can run
 fllame model scan                              # models that plausibly fit, ranked
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
-fllame model scan --quant gptq --max-params 30       # ignore hardware entirely
+fllame model scan --quant gptq --max-size 40         # this box's quant list, a smaller budget
 fllame recipe add                              # paste export/vllm serve lines to create one
 fllame recipe add --image vllm/vllm-openai:v0.27.1 \
   vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or as trailing args
@@ -81,19 +81,23 @@ fllame status                                  # docker compose ps
 fllame stop llama-3-8b-instruct                # docker compose stop
 ```
 
-`fllame model scan` searches the HF Hub, ranked by size fit, downloads,
-and recency (top 20 by default, `--limit` to change it). With no flags
-it searches this machine's `hardware scan`-detected quantizations,
-capped by a coarse VRAM/RAM-based size ceiling per quantization - a
-starting point for "what can I run," not a benchmarked guarantee (see
-CLAUDE.md for the difference between this estimate and the stronger,
-still-unbuilt per-recipe one). `--quant` and/or `--max-params`
-each independently override that default and ignore the hardware scan
-entirely for whichever is given - useful for looking at a format or size
-your current box doesn't support, e.g. because you're scanning from a
-laptop for a model you'll actually serve elsewhere. `--min-params`,
-`--max-params`, and `-q`/`--query` (free text) all narrow further
-regardless of source.
+`fllame model scan` searches the HF Hub, ranked by estimated-VRAM fit,
+downloads, and recency (top 20 by default, `--limit` to change it).
+`--max-size` (in GB, the same figure shown in the EST. VRAM column) is
+the primary size gate and is always enforced: give it explicitly, or it
+defaults to a coarse VRAM/RAM-based budget from this machine's
+`hardware scan` - a starting point for "what can I run," not a
+benchmarked guarantee (see CLAUDE.md for the difference between this
+estimate and the stronger, still-unbuilt per-recipe one). `--quant`
+independently overrides the hardware scan's detected quantization list -
+useful for looking at a format your current box doesn't support, e.g.
+because you're scanning from a laptop for a model you'll actually serve
+elsewhere. `--min-params`/`--max-params` are a
+separate, optional restriction on declared parameter count with no
+hardware-derived default of their own - give neither and only
+`--max-size` applies; give `--max-params` and ranking weighs closeness
+to both equally alongside popularity/recency. `-q`/`--query` (free text)
+narrows further regardless of any of the above.
 
 `fllame recipe add` creates a recipe from whatever you'd typically copy
 off a model card or vLLM's own docs: prompts for the Docker image (warns

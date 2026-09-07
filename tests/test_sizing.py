@@ -1,5 +1,5 @@
 from fllame.domain.hardware import HardwareProfile
-from fllame.models.sizing import max_params_billion, memory_budget_gb
+from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 
 
 def _profile(**overrides) -> HardwareProfile:
@@ -42,21 +42,16 @@ def test_memory_budget_none_when_nothing_known():
     assert memory_budget_gb(profile) is None
 
 
-def test_max_params_billion_discrete_no_os_reserve():
-    ceiling = max_params_billion(budget_gb=80.0, unified_memory=False, quantization="awq")
-    assert ceiling == (80.0 * 0.85) / 0.5
+def test_usable_memory_discrete_no_os_reserve():
+    usable = usable_memory_gb(budget_gb=80.0, unified_memory=False)
+    assert usable == 80.0 * 0.85
 
 
-def test_max_params_billion_unified_subtracts_os_reserve():
-    ceiling = max_params_billion(budget_gb=128.0, unified_memory=True, quantization="awq")
-    assert ceiling == ((128.0 - 8.0) * 0.85) / 0.5
+def test_usable_memory_unified_subtracts_os_reserve():
+    usable = usable_memory_gb(budget_gb=128.0, unified_memory=True)
+    assert usable == (128.0 - 8.0) * 0.85
 
 
-def test_max_params_billion_unknown_quantization_uses_default_bytes_per_param():
-    ceiling = max_params_billion(budget_gb=80.0, unified_memory=False, quantization="int4")
-    assert ceiling == (80.0 * 0.85) / 1.0
-
-
-def test_max_params_billion_never_goes_negative_on_tiny_unified_budget():
-    ceiling = max_params_billion(budget_gb=2.0, unified_memory=True, quantization="awq")
-    assert ceiling == 0.0
+def test_usable_memory_never_goes_negative_on_tiny_unified_budget():
+    usable = usable_memory_gb(budget_gb=2.0, unified_memory=True)
+    assert usable == 0.0
