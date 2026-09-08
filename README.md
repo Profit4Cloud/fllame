@@ -67,9 +67,9 @@ fllame model scan                              # models that plausibly fit, rank
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
 fllame model scan --quant gptq --max-size 40         # this box's quant list, a smaller budget
 fllame config set-default-image vllm/vllm-openai:v0.27.1   # skip --image below from now on
-fllame recipe add                              # paste export/vllm serve lines to create one
+fllame recipe add                              # guided dialogue: image, preinstall, env, command
 fllame recipe add --image vllm/vllm-openai:v0.27.1 \
-  vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or as trailing args
+  vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or a quick one-liner
 fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved recipe (image/env/preinstall/command), as YAML
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
@@ -105,30 +105,43 @@ of which also feed the ranking, same as size fit does; QUANT is only
 shown when more than one quantization is being searched (see
 `fllame model scan -h` for the full column breakdown).
 
-`fllame recipe add` creates a recipe from whatever you'd typically copy
-off a model card or vLLM's own docs: resolves the Docker image (an
-explicit `--image` wins; otherwise the configured default from `fllame
-config set-default-image`; only prompts, same as before, when neither
-exists - warning either way if the resolved tag looks unpinned, e.g.
-`:latest`), then takes the `vllm serve
-<repo_id> <args...>` line either as trailing arguments on the command
-itself (handy for a one-liner you already have on your clipboard as a
-single command - shell quoting/escaping applies as normal, e.g. wrap a
-value with spaces in quotes) or, if none are given, reads a pasted block
-of zero or more `export KEY=VALUE` lines, zero or more `RUN <command>`
-lines, and that one `vllm serve` line from stdin until EOF (Ctrl-D) - the
-only way to set env vars or a preinstall step, since those aren't
-something you'd type as trailing arguments. A `RUN` line captures a
-preinstall command some recipes need on top of the base image (e.g. `RUN
-uv pip install -U "transformers>=5.8.0"`, the kind of extra step
-vLLM's own recipe site sometimes lists alongside the `vllm serve`
-command) - unlike an `export` value or a `vllm serve` flag, it's taken
-verbatim as shell text, `&&` and all, rather than rejected for looking
-like one. Everything else is parsed and sanitized, not evaluated as
-shell - anything that isn't one of those three line shapes, or a shell
-metacharacter/substitution (`;`, `&`, `|`, `` ` ``, `$(...)`) in an
-`export`/`vllm serve` value, is a hard error and nothing gets written.
-The handle is derived from the repo id (the part
+`fllame recipe add`, given trailing arguments, treats them as a quick
+one-liner: the whole `vllm serve <repo_id> <args...>` line, handy for
+something you already have on your clipboard as a single command
+(shell quoting/escaping applies as normal, e.g. wrap a value with
+spaces in quotes) - the Docker image resolves the same way either way
+(an explicit `--image` wins; otherwise the configured default from
+`fllame config set-default-image`; only prompts when neither exists),
+warning if the resolved tag looks unpinned (e.g. `:latest`). Env vars
+and preinstall commands aren't spellable as trailing arguments at all.
+
+With no trailing arguments, `recipe add` instead walks through a short
+dialogue - the shape a recipe typically comes in from a model card or
+vLLM's own docs, broken into labeled steps instead of one undifferentiated
+paste:
+
+1. **Docker image** - prompted with the configured default (or
+   `vllm/vllm-openai:latest` if none is set) prefilled; press Enter to
+   keep following that default (so a later `fllame config
+   set-default-image` change still applies to this recipe), or type a
+   different image to pin this recipe to it specifically.
+2. **Preinstall commands** - paste one or more shell commands run
+   before `vllm serve` (e.g. `pip install -U transformers`), one per
+   line; a blank line or Ctrl-D moves on (immediately, to skip this
+   step entirely).
+3. **Environment variables** - paste one or more `KEY=VALUE` lines,
+   same blank-line-or-Ctrl-D convention.
+4. **The `vllm serve` command** - required; paste it verbatim,
+   including any trailing `\` line continuations exactly as shown on a
+   model card or recipes.vllm.ai - they're joined into one line
+   automatically.
+
+Preinstall commands are taken verbatim as shell text (`&&` and all,
+same as a real shell command) since that's what they genuinely are;
+env var values and the `vllm serve` command are parsed and sanitized,
+not evaluated as shell - a shell metacharacter/substitution (`;`, `&`,
+`|`, `` ` ``, `$(...)`) in either is a hard error and nothing gets
+written. The handle is derived from the repo id (the part
 after the last `/`, lowercased and slugified, e.g.
 `meta-llama/Meta-Llama-3-8B-Instruct` -> `meta-llama-3-8b-instruct`); a
 second recipe for a repo that already has one gets `_2`, `_3`, etc.

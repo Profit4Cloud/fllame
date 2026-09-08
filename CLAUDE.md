@@ -71,19 +71,27 @@ writes them: `save()` (used by `recipe add`), `remove()`, and
 overwrites, even for a second recipe on the same repo_id, since that's
 a legitimate way to keep more than one tuning of a model around).
 `fllame/recipes/parser.py` turns that same text - zero or more `export
-KEY=VALUE` lines, exactly one `vllm serve <repo_id> <args...>` line, the
-shape a recipe typically comes in from a model card - into that data,
-regardless of whether `recipe add` got it from stdin (the only path
-that supports `export` lines) or joined it from trailing CLI arguments
-via `shlex.join` (`ignore_unknown_options=True` on that one command's
-`context_settings`, so a pasted `vllm serve ... --flag value` works
-verbatim as trailing args without every flag needing to be a
-recognized fllame option - the exact case that motivated adding this
-second path: a user tried the natural "run this as if it were a shell
-command" shape first). Anything else on a line, or a shell
-metacharacter/substitution in a value, is a hard parse error either
+KEY=VALUE` lines, zero or more `RUN <command>` lines, exactly one `vllm
+serve <repo_id> <args...>` line, the shape a recipe typically comes in
+from a model card - into that data, when `recipe add` gets it as
+trailing CLI arguments joined via `shlex.join`
+(`ignore_unknown_options=True` on that one command's `context_settings`,
+so a pasted `vllm serve ... --flag value` works verbatim as trailing
+args without every flag needing to be a recognized fllame option - the
+exact case that motivated adding this path: a user tried the natural
+"run this as if it were a shell command" shape first). With no trailing
+arguments instead, `recipe add` walks through a guided dialogue instead
+of parsing a single pasted blob - image, then preinstall commands, then
+env vars, then the `vllm serve` command, each its own labeled step
+(`cli.py`'s `_read_block`/`_read_command`, plus `parser.py`'s
+`parse_env_line` for the bare `KEY=VALUE` shape that step collects, no
+`export` keyword needed since the step is unambiguous on its own).
+Anything else on a line, or a shell metacharacter/substitution in an
+`export` value or the `vllm serve` line, is a hard parse error either
 way - fllame parses this text itself rather than handing it to a real
-shell, so it never silently evaluates something dangerous.
+shell, so it never silently evaluates something dangerous; a `RUN`
+line/the dialogue's preinstall step are the deliberate exception, taken
+verbatim as shell text since that's what they genuinely are.
 `fllame/recipes/naming.py`
 derives the handle recipe `add` uses from the repo_id (the part after
 the last `/`, slugified). `ServingBackend`
@@ -214,14 +222,19 @@ headroom.
   `--offline`), `status`, `stop` - `-h` works as a `--help` alias at
   every level (set via `context_settings` on each `Typer()` instance;
   Click only binds `--help` by default).
-- `recipe add`: recipe creation from a `vllm serve` line, either pasted
-  interactively (stdin until Ctrl-D, the only path that also accepts
-  `export` lines) or as trailing CLI arguments (`recipes/parser.py` +
-  `recipes/naming.py` + `RecipeStore.save`/`next_available_handle`).
-  `recipe edit` opens `$EDITOR` (`click.edit(filename=...)`, edits the
-  file in place) and re-validates on save without reverting a
-  now-invalid edit. `recipe remove` deletes with a confirmation prompt
-  (`-y` to skip it).
+- `recipe add`: recipe creation from a `vllm serve` line, either as
+  trailing CLI arguments (a quick one-liner, `recipes/parser.py` +
+  `recipes/naming.py` + `RecipeStore.save`/`next_available_handle`) or,
+  with no trailing arguments, a guided dialogue (image, then preinstall
+  commands, then env vars, then the `vllm serve` command - each its own
+  labeled step, not one undifferentiated stdin paste). `recipe edit`
+  opens `$EDITOR` (`click.edit(filename=...)`, edits the file in place)
+  and re-validates on save - a narrow whitespace autofix runs first
+  (CRLF, tab indentation, trailing whitespace; `recipes/store.py`'s
+  `autofix_whitespace`), and anything still invalid offers a choice to
+  reopen `$EDITOR` or revert to the pre-edit version (kept in memory,
+  not a backup file - the recipes directory is git-tracked already).
+  `recipe remove` deletes with a confirmation prompt (`-y` to skip it).
 - **Install with `pipx install .`, not `poetry install`, for everyday
   use.** `poetry install` only creates a project-local venv; the `fllame`
   command it produces isn't on `PATH` outside `poetry run`/`poetry

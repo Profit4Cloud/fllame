@@ -35,6 +35,7 @@ from fllame.domain.vllm_command import (
 
 _EXPORT_PATTERN = re.compile(r"^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _RUN_PATTERN = re.compile(r"^RUN\s+(.+)$")
+_ENV_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 class RecipePasteError(ValueError):
@@ -92,6 +93,19 @@ def parse_pasted_recipe(text: str) -> ParsedRecipe:
         raise RecipePasteError("no `vllm serve <repo_id> ...` line found in the paste")
 
     return ParsedRecipe(repo_id=repo_id, command=command, env=env, preinstall=preinstall)
+
+
+def parse_env_line(line: str) -> tuple[str, str]:
+    """Parses a bare `KEY=VALUE` line - the shape `recipe add`'s guided
+    dialogue collects env vars in, no `export` keyword needed since
+    that step is only ever env vars, unlike the mixed-line paste grammar
+    `parse_pasted_recipe` handles.
+    """
+    match = _ENV_PATTERN.match(line)
+    if not match:
+        raise RecipePasteError(f"not a KEY=VALUE line: {line!r}")
+    key, value = match.groups()
+    return key, _parse_single_token(f"env var '{key}'", value)
 
 
 def _parse_single_token(where: str, value: str) -> str:

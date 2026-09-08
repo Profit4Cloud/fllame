@@ -24,6 +24,15 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FLLAME_CONFIG_FILE", str(tmp_path / "config.yaml"))
 
 
+def _dialogue_input(*parts: str) -> str:
+    """Builds stdin input for `recipe add`'s guided dialogue: each part
+    is one line. A blank ("") part accepts the image prompt's prefilled
+    default, or ends whichever of the preinstall/env/command blocks is
+    currently being read.
+    """
+    return "\n".join(parts) + "\n"
+
+
 class _FakeCompletedProcess:
     returncode = 0
 
@@ -107,9 +116,14 @@ def test_recipe_show_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
-def test_recipe_add_from_pasted_block(tmp_path: Path, monkeypatch):
+def test_recipe_add_dialogue_collects_env_and_command(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = "export FOO=bar\nvllm serve meta-llama/Llama-3-8B-Instruct --port 8000\n"
+    pasted = _dialogue_input(
+        "",  # no preinstall commands
+        "FOO=bar",
+        "",  # end env vars
+        "vllm serve meta-llama/Llama-3-8B-Instruct --port 8000",
+    )
 
     result = runner.invoke(
         app,
@@ -166,7 +180,7 @@ def test_recipe_add_trailing_args_bad_paste_still_validates(tmp_path: Path, monk
 
 def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = "vllm serve org/demo\n"
+    pasted = _dialogue_input("", "", "vllm serve org/demo")
 
     runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
     result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
@@ -182,7 +196,7 @@ def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
-        input="vllm serve org/demo\n",
+        input=_dialogue_input("", "", "vllm serve org/demo"),
     )
 
     assert "unpinned" not in result.output
@@ -194,28 +208,46 @@ def test_recipe_add_unpinned_image_warns(tmp_path: Path, monkeypatch):
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "vllm/vllm-openai:latest"],
-        input="vllm serve org/demo\n",
+        input=_dialogue_input("", "", "vllm serve org/demo"),
     )
 
     assert "unpinned" in result.output
 
 
-def test_recipe_add_rejects_bad_paste(tmp_path: Path, monkeypatch):
+def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "img:v1"],
-        input="docker run img:v1\n",
+        input=_dialogue_input("", "", "docker run img:v1"),
     )
 
     assert result.exit_code == 1
     assert list(tmp_path.glob("*.yaml")) == []
 
 
-def test_recipe_add_captures_preinstall_run_lines(tmp_path: Path, monkeypatch):
+def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = 'RUN uv pip install -U "transformers>=5.8.0"\nvllm serve org/demo\n'
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1"],
+        input=_dialogue_input("", ""),
+    )
+
+    assert result.exit_code == 1
+    assert list(tmp_path.glob("*.yaml")) == []
+
+
+def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        'uv pip install -U "transformers>=5.8.0"',
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
 
     result = runner.invoke(
         app,
@@ -340,13 +372,15 @@ def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
-def test_recipe_add_without_image_prompts_when_no_default_configured(tmp_path: Path, monkeypatch):
+def test_recipe_add_dialogue_prompts_for_image_when_no_default_configured(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(
         app,
         ["recipe", "add"],
-        input="vllm/vllm-openai:v0.27.1\nvllm serve org/demo\n",
+        input=_dialogue_input("vllm/vllm-openai:v0.27.1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 0
@@ -354,11 +388,17 @@ def test_recipe_add_without_image_prompts_when_no_default_configured(tmp_path: P
     assert "image: vllm/vllm-openai:v0.27.1" in saved.read_text()
 
 
-def test_recipe_add_without_image_uses_configured_default_silently(tmp_path: Path, monkeypatch):
+def test_recipe_add_dialogue_accepting_configured_default_leaves_image_unset(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
-    result = runner.invoke(app, ["recipe", "add"], input="vllm serve org/demo\n")
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input("", "", "", "vllm serve org/demo"),  # accept the prefilled default
+    )
 
     assert result.exit_code == 0
     saved = tmp_path / "demo.yaml"
@@ -367,14 +407,31 @@ def test_recipe_add_without_image_uses_configured_default_silently(tmp_path: Pat
     assert "image:" not in saved.read_text()
 
 
-def test_recipe_add_explicit_image_overrides_configured_default(tmp_path: Path, monkeypatch):
+def test_recipe_add_dialogue_overriding_configured_default_pins_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input(
+            "vllm/vllm-openai:v0.28.0", "", "", "vllm serve org/demo"
+        ),  # typed something different from the prefilled default
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo.yaml"
+    assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
+
+
+def test_recipe_add_explicit_image_flag_overrides_configured_default(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "vllm/vllm-openai:v0.28.0"],
-        input="vllm serve org/demo\n",
+        input=_dialogue_input("", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 0
@@ -386,7 +443,11 @@ def test_recipe_add_warns_when_configured_default_is_unpinned(tmp_path: Path, mo
     _isolate(tmp_path, monkeypatch)
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
 
-    result = runner.invoke(app, ["recipe", "add"], input="vllm serve org/demo\n")
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input("", "", "", "vllm serve org/demo"),  # accept the unpinned default
+    )
 
     assert "unpinned" in result.output
 

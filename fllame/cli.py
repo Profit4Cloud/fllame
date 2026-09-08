@@ -24,13 +24,18 @@ from fllame import config, config_file
 from fllame.backends.vllm import VllmServingBackend
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
+from fllame.domain.vllm_command import (
+    VllmCommandError,
+    join_line_continuations,
+    parse_vllm_serve_command,
+)
 from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import list_cached_models
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.recipes.naming import derive_handle
-from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
+from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
@@ -200,13 +205,58 @@ def recipe_show(handle: str) -> None:
     typer.echo(recipe.to_yaml().rstrip())
 
 
+def _read_block(prompt_text: str) -> list[str]:
+    """Reads lines from stdin until a blank line or EOF (Ctrl-D) -
+    works the same whether stdin is an interactive terminal or
+    redirected/piped input, unlike `sys.stdin.read()` (which consumes
+    to the *first* EOF and leaves nothing for a later step). `#` comment
+    lines are skipped; everything else is collected verbatim, in order.
+    """
+    typer.echo(prompt_text)
+    lines: list[str] = []
+    while True:
+        raw = sys.stdin.readline()
+        if raw == "" or raw.strip() == "":
+            break
+        stripped = raw.rstrip("\n")
+        if stripped.strip().startswith("#"):
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _read_command() -> str:
+    lines = _read_block(
+        "vllm serve command (required) - paste it, ending a continued line "
+        "with \\ if needed, then a blank line or Ctrl-D:"
+    )
+    if not lines:
+        typer.echo("no `vllm serve <repo_id> ...` command given", err=True)
+        raise typer.Exit(code=1)
+    joined = join_line_continuations("\n".join(lines)).strip()
+    if "\n" in joined:
+        typer.echo(
+            "expected a single `vllm serve` command - continue a long one "
+            "with a trailing \\ instead of a new, unrelated line",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        parse_vllm_serve_command(joined)
+    except VllmCommandError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    return joined
+
+
 @recipe_app.command("add", context_settings={**_CONTEXT_SETTINGS, "ignore_unknown_options": True})
 def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
         None,
         help="Optionally, the whole `vllm serve <repo_id> ...` line as trailing "
-        "arguments instead of pasting it - e.g. `fllame recipe add vllm serve "
-        "org/repo --max-model-len 8192`. Env vars still need the interactive paste.",
+        "arguments instead of the guided dialogue - e.g. `fllame recipe add vllm "
+        "serve org/repo --max-model-len 8192`. A quick one-liner only - env vars/"
+        "preinstall commands need the dialogue (run with no trailing arguments).",
     ),
     image: str | None = typer.Option(
         None,
@@ -219,17 +269,56 @@ def recipe_add(
     ),
     gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
 ) -> None:
-    """Create a recipe from a `vllm serve ...` line - and optionally
-    `export ...`/`RUN ...` lines - either as trailing arguments or pasted
-    interactively. This is the shape a recipe typically comes in from a
-    model card or vLLM's own docs.
+    """Create a recipe.
+
+    Given trailing arguments, treats them as a quick one-liner: the
+    whole `vllm serve <repo_id> <args...>` line, same as today, no
+    prompts beyond the Docker image if neither `--image` nor a
+    configured default exists. With no trailing arguments, walks
+    through a short dialogue instead - Docker image, then preinstall
+    commands, then env vars, then the `vllm serve` command - the shape
+    a recipe typically comes in from a model card or vLLM's own docs.
     """
-    if image is None and config_file.get_default_image() is None:
-        image = typer.prompt(
-            "Docker image (e.g. vllm/vllm-openai:v0.27.1) - or set a default "
-            "with `fllame config set-default-image` to skip this next time",
-            default=_FALLBACK_IMAGE,
+    if vllm_serve_line:
+        pasted = shlex.join(vllm_serve_line)
+        try:
+            parsed = parse_pasted_recipe(pasted)
+        except RecipePasteError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from e
+        command, env, preinstall = parsed.command, parsed.env, parsed.preinstall
+
+        if image is None and config_file.get_default_image() is None:
+            image = typer.prompt(
+                "Docker image (e.g. vllm/vllm-openai:v0.27.1) - or set a default "
+                "with `fllame config set-default-image` to skip this next time",
+                default=_FALLBACK_IMAGE,
+            )
+    else:
+        if image is None:
+            configured_default = config_file.get_default_image()
+            image = typer.prompt("Docker image", default=configured_default or _FALLBACK_IMAGE)
+            if configured_default is not None and image == configured_default:
+                image = None  # follow the configured default rather than pin it
+
+        preinstall = _read_block(
+            "Preinstall commands to run before `vllm serve`, one per line "
+            "(e.g. `pip install -U transformers`) - blank line or Ctrl-D to skip:"
         )
+
+        env = {}
+        for line in _read_block(
+            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D "
+            "to skip:"
+        ):
+            try:
+                key, value = parse_env_line(line)
+            except RecipePasteError as e:
+                typer.echo(str(e), err=True)
+                raise typer.Exit(code=1) from e
+            env[key] = value
+
+        command = _read_command()
 
     warn_image = image if image is not None else config_file.get_default_image()
     if warn_image is not None and (warn_image.endswith(":latest") or ":" not in warn_image):
@@ -239,32 +328,18 @@ def recipe_add(
             err=True,
         )
 
-    if vllm_serve_line:
-        pasted = shlex.join(vllm_serve_line)
-    else:
-        typer.echo(
-            "Paste the recipe's `export ...`/`RUN ...` lines and `vllm serve ...` "
-            "line, then press Ctrl-D."
-        )
-        pasted = sys.stdin.read()
-
-    try:
-        parsed = parse_pasted_recipe(pasted)
-    except RecipePasteError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(code=1) from e
-
+    repo_id, _ = parse_vllm_serve_command(command)
     store = _recipe_store()
-    handle = store.next_available_handle(derive_handle(parsed.repo_id))
+    handle = store.next_available_handle(derive_handle(repo_id))
     try:
         recipe = Recipe.from_dict(
             handle,
             {
-                "command": parsed.command,
+                "command": command,
                 "image": image,
                 "gpus": gpus,
-                "env": parsed.env,
-                "preinstall": parsed.preinstall,
+                "env": env,
+                "preinstall": preinstall,
             },
         )
     except RecipeError as e:

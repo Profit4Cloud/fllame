@@ -1,6 +1,6 @@
 import pytest
 
-from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
+from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 
 
 def test_parses_env_and_command():
@@ -135,3 +135,33 @@ def test_run_line_shell_metacharacters_allowed():
     text = "RUN pip install foo && pip install bar\nvllm serve org/repo"
     parsed = parse_pasted_recipe(text)
     assert parsed.preinstall == ["pip install foo && pip install bar"]
+
+
+def test_parse_env_line_bare_key_value():
+    assert parse_env_line("FOO=bar") == ("FOO", "bar")
+
+
+def test_parse_env_line_quoted_value_with_spaces():
+    assert parse_env_line('BAZ="quoted value"') == ("BAZ", "quoted value")
+
+
+def test_parse_env_line_rejects_export_prefix():
+    """The dialogue's env step collects bare KEY=VALUE lines - unlike
+    the mixed paste grammar, `export ` isn't part of this shape."""
+    with pytest.raises(RecipePasteError):
+        parse_env_line("export FOO=bar")
+
+
+def test_parse_env_line_rejects_multi_token_value():
+    with pytest.raises(RecipePasteError, match="single token"):
+        parse_env_line("FOO=bar baz")
+
+
+def test_parse_env_line_rejects_shell_metacharacters():
+    with pytest.raises(RecipePasteError, match="won't evaluate"):
+        parse_env_line("FOO=$(cat /etc/passwd)")
+
+
+def test_parse_env_line_rejects_non_kv_line():
+    with pytest.raises(RecipePasteError):
+        parse_env_line("not an env line")
