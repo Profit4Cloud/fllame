@@ -19,6 +19,7 @@ def _write_recipe(tmp_path: Path, handle: str = "demo") -> None:
 def _isolate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FLLAME_RECIPES_DIR", str(tmp_path))
     monkeypatch.setenv("FLLAME_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("FLLAME_CONFIG_FILE", str(tmp_path / "config.yaml"))
 
 
 class _FakeCompletedProcess:
@@ -238,7 +239,7 @@ def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
     _write_recipe(tmp_path)
 
     def fake_edit(filename):
-        Path(filename).write_text("repo_id: org/demo\n")  # image now missing
+        Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # repo_id now missing
         return None
 
     monkeypatch.setattr(cli.click, "edit", fake_edit)
@@ -275,6 +276,110 @@ def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "nope", "--yes"])
 
     assert result.exit_code == 1
+
+
+def test_recipe_add_without_image_prompts_when_no_default_configured(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input="vllm/vllm-openai:v0.27.1\nvllm serve org/demo\n",
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo.yaml"
+    assert "image: vllm/vllm-openai:v0.27.1" in saved.read_text()
+
+
+def test_recipe_add_without_image_uses_configured_default_silently(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(app, ["recipe", "add"], input="vllm serve org/demo\n")
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo.yaml"
+    # Not written into the recipe - it should keep following the
+    # configured default even if that default changes later.
+    assert "image:" not in saved.read_text()
+
+
+def test_recipe_add_explicit_image_overrides_configured_default(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.28.0"],
+        input="vllm serve org/demo\n",
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo.yaml"
+    assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
+
+
+def test_recipe_add_warns_when_configured_default_is_unpinned(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
+
+    result = runner.invoke(app, ["recipe", "add"], input="vllm serve org/demo\n")
+
+    assert "unpinned" in result.output
+
+
+def test_config_show_unset(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert "unset" in result.stdout
+    assert "vllm/vllm-openai:latest" in result.stdout
+
+
+def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert "unpinned" not in set_result.output
+    assert show_result.exit_code == 0
+    assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
+
+
+def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
+
+    assert "unpinned" in result.output
+
+
+def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\n")
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(app, ["recipe", "show", "demo"])
+
+    assert result.exit_code == 0
+    assert "vllm/vllm-openai:v0.27.1" in result.stdout
+
+
+def test_recipe_show_falls_back_to_hardcoded_image_when_nothing_configured(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\n")
+
+    result = runner.invoke(app, ["recipe", "show", "demo"])
+
+    assert result.exit_code == 0
+    assert "vllm/vllm-openai:latest" in result.stdout
 
 
 def test_hardware_scan_with_gpu(monkeypatch):

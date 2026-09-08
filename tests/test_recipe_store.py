@@ -79,6 +79,24 @@ def test_save_omits_empty_env_and_serve_args(tmp_path: Path):
     assert "serve_args:" not in text
 
 
+def test_save_omits_image_when_unset(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(handle="demo", repo_id="org/demo")
+
+    store.save(recipe)
+
+    text = (tmp_path / "demo.yaml").read_text()
+    assert "image:" not in text
+    assert store.load("demo").image is None
+
+
+def test_load_recipe_without_image_key(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\n")
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").image is None
+
+
 def test_remove_deletes_file(tmp_path: Path):
     (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nimage: img\n")
     store = RecipeStore(tmp_path)

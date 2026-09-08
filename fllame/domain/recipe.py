@@ -18,7 +18,12 @@ class RecipeError(ValueError):
 class Recipe:
     handle: str
     repo_id: str
-    image: str
+    # `None` means "use fllame's configured default image" (`fllame
+    # config`), resolved at the point a Recipe becomes a compose service -
+    # not persisted into the recipe file, so a later `fllame config
+    # set-default-image` change applies to every recipe that didn't pin
+    # its own.
+    image: str | None = None
     backend: str = "vllm"
     description: str | None = None
     port: int = 8000
@@ -33,11 +38,6 @@ class Recipe:
     def from_dict(handle: str, data: dict) -> Recipe:
         if "repo_id" not in data:
             raise RecipeError(f"recipe '{handle}': missing required field 'repo_id'")
-        if "image" not in data:
-            raise RecipeError(
-                f"recipe '{handle}': missing required field 'image' "
-                "(the Docker image to run, e.g. 'vllm/vllm-openai:v0.27.1')"
-            )
 
         declared_handle = data.get("handle")
         if declared_handle is not None and declared_handle != handle:
@@ -69,7 +69,7 @@ class Recipe:
         return Recipe(
             handle=handle,
             repo_id=data["repo_id"],
-            image=data["image"],
+            image=data.get("image"),
             backend=backend,
             description=data.get("description"),
             port=data.get("port", 8000),

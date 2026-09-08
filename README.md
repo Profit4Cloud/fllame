@@ -65,6 +65,7 @@ fllame hardware scan                           # what this box can run
 fllame model scan                              # models that plausibly fit, ranked
 fllame model scan -q llama --min-params 7 --max-params 13   # narrower search
 fllame model scan --quant gptq --max-size 40         # this box's quant list, a smaller budget
+fllame config set-default-image vllm/vllm-openai:v0.27.1   # skip --image below from now on
 fllame recipe add                              # paste export/vllm serve lines to create one
 fllame recipe add --image vllm/vllm-openai:v0.27.1 \
   vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or as trailing args
@@ -104,8 +105,11 @@ shown when more than one quantization is being searched (see
 `fllame model scan -h` for the full column breakdown).
 
 `fllame recipe add` creates a recipe from whatever you'd typically copy
-off a model card or vLLM's own docs: prompts for the Docker image (warns
-if the tag looks unpinned, e.g. `:latest`), then takes the `vllm serve
+off a model card or vLLM's own docs: resolves the Docker image (an
+explicit `--image` wins; otherwise the configured default from `fllame
+config set-default-image`; only prompts, same as before, when neither
+exists - warning either way if the resolved tag looks unpinned, e.g.
+`:latest`), then takes the `vllm serve
 <repo_id> <args...>` line either as trailing arguments on the command
 itself (handy for a one-liner you already have on your clipboard as a
 single command - shell quoting/escaping applies as normal, e.g. wrap a
@@ -126,6 +130,13 @@ YAML file directly in `$EDITOR` and re-validates on save (reporting an
 error but leaving your edit in place if it's now invalid, never silently
 reverting it); `recipe remove` deletes a recipe, asking first unless
 `-y`/`--yes`.
+
+`fllame config` holds fllame's own persisted settings - today just
+`default_image`, the Docker image a recipe falls back to when it doesn't
+pin its own (`fllame config set-default-image ...` / `fllame config
+show`), stored in `$FLLAME_CONFIG_FILE` (default
+`~/.config/fllame/config.yaml`). Changing it applies to every recipe
+that doesn't set its own `image` - nothing needs re-adding.
 
 `fllame hardware scan` detects NVIDIA GPU(s) via `nvidia-smi` (name, count,
 VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
@@ -160,7 +171,7 @@ recipe instead.
 | Field         | Required | Meaning |
 |---------------|----------|---------|
 | `repo_id`     | yes      | HF repo id (or local path) - what's passed to `vllm serve` and downloaded via `fllame model pull`/`serve` |
-| `image`       | yes      | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` |
+| `image`       | no       | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use fllame's configured default (`fllame config`), falling back to `vllm/vllm-openai:latest` if none is configured |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
 | `port`        | no       | default `8000`; used for both the container's `--port` and the host port mapping |

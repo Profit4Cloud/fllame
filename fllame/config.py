@@ -31,6 +31,19 @@ def compose_file_path() -> Path:
     return state_dir() / "docker-compose.yml"
 
 
+def config_file_path() -> Path:
+    """A small persisted settings file for cross-invocation CLI defaults
+    that aren't per-recipe data (`recipes_dir`) or generated container
+    state (`state_dir`) - today just the fallback Docker image (see
+    `fllame/config_file.py`, `fllame config`). Read/written directly by
+    that module, not hand-edited.
+    """
+    override = os.environ.get("FLLAME_CONFIG_FILE")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "fllame" / "config.yaml"
+
+
 def hf_cache_dir() -> Path:
     """Wherever huggingface_hub itself resolves its cache to (honoring
     HF_HOME/HF_HUB_CACHE) - fllame deliberately has no opinion of its own

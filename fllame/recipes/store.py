@@ -47,7 +47,9 @@ class RecipeStore:
     def save(self, recipe: Recipe) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{recipe.handle}.yaml"
-        data: dict = {"repo_id": recipe.repo_id, "image": recipe.image}
+        data: dict = {"repo_id": recipe.repo_id}
+        if recipe.image:
+            data["image"] = recipe.image
         if recipe.description:
             data["description"] = recipe.description
         data["port"] = recipe.port

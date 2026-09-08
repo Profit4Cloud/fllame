@@ -18,9 +18,9 @@ def test_from_dict_missing_repo_id():
         Recipe.from_dict("demo", {"image": "vllm/vllm-openai:v0.27.1"})
 
 
-def test_from_dict_missing_image():
-    with pytest.raises(RecipeError):
-        Recipe.from_dict("demo", {"repo_id": "org/demo"})
+def test_from_dict_missing_image_defaults_to_none():
+    recipe = Recipe.from_dict("demo", {"repo_id": "org/demo"})
+    assert recipe.image is None
 
 
 def test_from_dict_handle_mismatch():

@@ -8,6 +8,7 @@ for the architecture this sits on.
 
 from __future__ import annotations
 
+import dataclasses
 import shlex
 import subprocess
 import sys
@@ -19,7 +20,7 @@ import yaml
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from requests.exceptions import RequestException
 
-from fllame import config
+from fllame import config, config_file
 from fllame.backends.vllm import VllmServingBackend
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
@@ -43,12 +44,29 @@ hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTI
 app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
+config_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
+app.add_typer(config_app, name="config", help="View and change fllame's persisted settings.")
 
 BACKEND = VllmServingBackend()
+
+# The image used when a recipe doesn't pin its own and no default has
+# been configured via `fllame config set-default-image` - the last resort,
+# not something an operator is expected to rely on long-term.
+_FALLBACK_IMAGE = "vllm/vllm-openai:latest"
 
 
 def _recipe_store() -> RecipeStore:
     return RecipeStore(config.recipes_dir())
+
+
+def _resolve_image(recipe: Recipe) -> Recipe:
+    """A recipe whose `image` is unset means "use fllame's configured
+    default" - resolved here, at the point a Recipe is turned into a
+    compose service, rather than baked into the recipe file itself.
+    """
+    if recipe.image is not None:
+        return recipe
+    return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
 
 
 def _load_or_exit(handle: str) -> Recipe:
@@ -73,7 +91,7 @@ def _write_compose_file(*, offline_handle: str | None = None) -> None:
     recipes = []
     for handle in store.list_handles():
         try:
-            recipes.append(store.load(handle))
+            recipes.append(_resolve_image(store.load(handle)))
         except RecipeError as e:
             typer.echo(f"warning: {e}", err=True)
     compose = generate_compose(recipes, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
@@ -174,7 +192,7 @@ def recipe_list() -> None:
 def recipe_show(handle: str) -> None:
     """Print the resolved docker-compose service for HANDLE."""
     recipe = _load_or_exit(handle)
-    service = BACKEND.build_service(recipe, hf_cache_dir=config.hf_cache_dir())
+    service = BACKEND.build_service(_resolve_image(recipe), hf_cache_dir=config.hf_cache_dir())
     typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
 
 
@@ -186,10 +204,14 @@ def recipe_add(
         "arguments instead of pasting it - e.g. `fllame recipe add vllm serve "
         "org/repo --max-model-len 8192`. Env vars still need the interactive paste.",
     ),
-    image: str = typer.Option(
-        "vllm/vllm-openai:latest",
+    image: str | None = typer.Option(
+        None,
         "--image",
-        prompt="Docker image (e.g. vllm/vllm-openai:v0.27.1)",
+        show_default=False,
+        help="Docker image to pin this recipe to, overriding fllame's configured "
+        "default (`fllame config show`) - e.g. vllm/vllm-openai:v0.27.1. Omit to "
+        "let this recipe follow the configured default, whatever it is later "
+        "changed to.",
     ),
     gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
 ) -> None:
@@ -198,7 +220,15 @@ def recipe_add(
     interactively. This is the shape a recipe typically comes in from a
     model card or vLLM's own docs.
     """
-    if image.endswith(":latest") or ":" not in image:
+    if image is None and config_file.get_default_image() is None:
+        image = typer.prompt(
+            "Docker image (e.g. vllm/vllm-openai:v0.27.1) - or set a default "
+            "with `fllame config set-default-image` to skip this next time",
+            default=_FALLBACK_IMAGE,
+        )
+
+    warn_image = image if image is not None else config_file.get_default_image()
+    if warn_image is not None and (warn_image.endswith(":latest") or ":" not in warn_image):
         typer.echo(
             "warning: using an unpinned image tag - pin it to a specific "
             "version once you've confirmed this recipe works.",
@@ -272,6 +302,29 @@ def recipe_remove(
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"removed '{handle}'")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print fllame's current persisted settings."""
+    default_image = config_file.get_default_image()
+    if default_image is not None:
+        typer.echo(f"default_image: {default_image}")
+    else:
+        typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
+
+
+@config_app.command("set-default-image")
+def config_set_default_image(image: str) -> None:
+    """Set the Docker image recipes fall back to when they don't pin their own."""
+    if image.endswith(":latest") or ":" not in image:
+        typer.echo(
+            "warning: using an unpinned image tag - pin it to a specific "
+            "version once you've confirmed recipes work with it.",
+            err=True,
+        )
+    config_file.set_default_image(image)
+    typer.echo(f"default image set to '{image}'")
 
 
 @hardware_app.command("scan")
