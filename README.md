@@ -198,12 +198,22 @@ plain download call happens to fall back to cache quickly on a
 genuinely offline machine) and sets `HF_HUB_OFFLINE=1` on the container
 itself, so vLLM doesn't attempt any network call either.
 
-`fllame serve`/`status`/`stop` all regenerate
-`$FLLAME_STATE_DIR/docker-compose.yml` (default
-`~/.local/state/fllame/docker-compose.yml`) from every recipe on file
-before running a `docker compose` command against it. That file is a
-generated artifact fllame fully owns - don't hand-edit it, edit the
-recipe instead.
+Each recipe gets its own self-contained compose folder,
+`$FLLAME_STATE_DIR/recipes/<handle>/` (default
+`~/.local/state/fllame/recipes/<handle>/`) - a `docker-compose.yml`,
+plus a `Dockerfile` when the recipe has a `preinstall` step - as its
+own compose project (`fllame-<handle>`), entirely independent of every
+other recipe's. `fllame serve`/`status`/`stop` regenerate HANDLE's
+folder before running a `docker compose` command against it (`status`
+loops over every recipe, one `docker compose ps` each, under a
+`== <handle> ==` header); `serve` always adds `--build` when a
+`Dockerfile` is present (Docker's own layer cache makes a no-op rebuild
+cheap). These files are generated artifacts fllame fully owns and
+overwrites - don't hand-edit them, edit the recipe instead - and being
+self-contained, each folder can also be copied elsewhere and driven
+with plain `docker compose up -d`, no fllame involved. `recipe remove`
+deletes a recipe's folder along with its YAML file (not a container
+already running under it - `fllame stop` that first if it matters).
 
 ## Recipe format
 

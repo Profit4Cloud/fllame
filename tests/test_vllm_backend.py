@@ -53,3 +53,43 @@ def test_build_service_without_gpus():
     service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
 
     assert "deploy" not in service
+
+
+def test_render_dockerfile_none_without_preinstall():
+    backend = VllmServingBackend()
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    assert backend.render_dockerfile(recipe) is None
+
+
+def test_render_dockerfile_with_preinstall():
+    backend = VllmServingBackend()
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo",
+        image="vllm/vllm-openai:v0.27.1",
+        preinstall=["pip install -U transformers", "pip install foo"],
+    )
+
+    dockerfile = backend.render_dockerfile(recipe)
+
+    assert dockerfile == (
+        "FROM vllm/vllm-openai:v0.27.1\n"
+        "RUN pip install -U transformers\n"
+        "RUN pip install foo\n"
+    )
+
+
+def test_build_service_with_preinstall_builds_instead_of_bare_image():
+    backend = VllmServingBackend()
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo",
+        image="vllm/vllm-openai:v0.27.1",
+        preinstall=["pip install -U transformers"],
+    )
+
+    service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
+
+    assert service["build"] == {"context": "."}
+    assert service["image"] == "fllame-demo:latest"

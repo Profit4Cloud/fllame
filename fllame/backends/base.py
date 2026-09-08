@@ -18,3 +18,9 @@ class ServingBackend(Protocol):
         """A docker-compose service definition (the value under
         `services.<handle>`) for running this recipe."""
         ...
+
+    def render_dockerfile(self, recipe: Recipe) -> str | None:
+        """Dockerfile content to build a custom image for this recipe,
+        or `None` if it can run from its `image` directly - a recipe
+        with no preinstall step needs no Dockerfile at all."""
+        ...

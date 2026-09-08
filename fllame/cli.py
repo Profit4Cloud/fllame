@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -82,27 +83,32 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_compose_file(*, offline_handle: str | None = None) -> None:
-    """Regenerates the compose file from every valid recipe on file. An
-    invalid recipe is skipped with a warning rather than blocking every
-    other recipe from being served.
+def _write_recipe_compose(recipe: Recipe, *, offline: bool = False) -> None:
+    """Regenerates HANDLE's own self-contained compose folder
+    (`docker-compose.yml`, plus a `Dockerfile` when its preinstall step
+    needs one - removed if a stale one is left over from before
+    preinstall was dropped).
 
-    `offline_handle`, when set, forces that one service to run with
+    `offline`, when set, forces this one service to run with
     HF_HUB_OFFLINE=1 - an invocation-time concern (`fllame serve
     --offline`), not a property of the recipe itself, so it's applied
     here rather than threaded through `Recipe`/`ServingBackend`.
     """
-    store = _recipe_store()
-    recipes = []
-    for handle in store.list_handles():
-        try:
-            recipes.append(_resolve_image(store.load(handle)))
-        except RecipeError as e:
-            typer.echo(f"warning: {e}", err=True)
-    compose = generate_compose(recipes, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
-    if offline_handle is not None and offline_handle in compose["services"]:
-        compose["services"][offline_handle]["environment"]["HF_HUB_OFFLINE"] = "1"
-    write_compose_file(compose, config.compose_file_path())
+    resolved = _resolve_image(recipe)
+    directory = config.recipe_state_dir(resolved.handle)
+    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    if offline:
+        compose["services"][resolved.handle]["environment"]["HF_HUB_OFFLINE"] = "1"
+
+    directory.mkdir(parents=True, exist_ok=True)
+    dockerfile_path = directory / "Dockerfile"
+    dockerfile_content = BACKEND.render_dockerfile(resolved)
+    if dockerfile_content is not None:
+        dockerfile_path.write_text(dockerfile_content)
+    elif dockerfile_path.is_file():
+        dockerfile_path.unlink()
+
+    write_compose_file(compose, directory / "docker-compose.yml")
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -161,14 +167,14 @@ def _format_relative_time(dt: datetime | None) -> str:
     return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
-def _run_compose(*args: str) -> int:
+def _run_compose(handle: str, *args: str) -> int:
     command = [
         "docker",
         "compose",
         "-f",
-        str(config.compose_file_path()),
+        str(config.recipe_state_dir(handle) / "docker-compose.yml"),
         "-p",
-        config.COMPOSE_PROJECT_NAME,
+        config.compose_project_name(handle),
         *args,
     ]
     try:
@@ -415,7 +421,12 @@ def recipe_remove(
     handle: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
-    """Delete HANDLE's recipe file."""
+    """Delete HANDLE's recipe file and its generated compose folder.
+
+    Doesn't stop a container that's still running under it - only the
+    files fllame generated (`docker-compose.yml`, any built image's
+    Dockerfile); if `fllame stop HANDLE` matters, run it first.
+    """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
     try:
@@ -423,6 +434,7 @@ def recipe_remove(
     except RecipeError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
+    shutil.rmtree(config.recipe_state_dir(handle), ignore_errors=True)
     typer.echo(f"removed '{handle}'")
 
 
@@ -640,10 +652,16 @@ def serve(
         "(pull it first with `fllame model pull`).",
     ),
 ) -> None:
-    """Launch the recipe for HANDLE as a Docker container via `docker compose`.
+    """Launch the recipe for HANDLE as a Docker container via `docker
+    compose`, from HANDLE's own self-contained compose folder
+    (`fllame config` aside, entirely independent of every other
+    recipe's).
 
     Always downloads the model first (see `model pull`) - vLLM's own
-    auto-download inside the container is never relied on.
+    auto-download inside the container is never relied on. A recipe
+    with a preinstall step always builds (`--build`) before starting -
+    Docker's own layer cache makes a no-op rebuild cheap when nothing
+    changed, so this needs no bookkeeping of fllame's own.
     """
     recipe = _load_or_exit(handle)
     if offline:
@@ -660,24 +678,47 @@ def serve(
         )
         raise typer.Exit(code=1) from e
 
-    _write_compose_file(offline_handle=handle if offline else None)
-    args = ["up", "-d", handle] if detach else ["up", handle]
-    raise typer.Exit(code=_run_compose(*args))
+    _write_recipe_compose(recipe, offline=offline)
+    args = ["up"]
+    if detach:
+        args.append("-d")
+    if recipe.preinstall:
+        args.append("--build")
+    args.append(handle)
+    raise typer.Exit(code=_run_compose(handle, *args))
 
 
 @app.command()
 def status() -> None:
-    """Show the state of fllame-managed containers via `docker compose ps`."""
-    _write_compose_file()
-    raise typer.Exit(code=_run_compose("ps"))
+    """Show the state of every recipe's container via `docker compose
+    ps`, one recipe at a time (each is its own compose project)."""
+    store = _recipe_store()
+    handles = store.list_handles()
+    if not handles:
+        typer.echo(f"No recipes found in {config.recipes_dir()}")
+        raise typer.Exit(code=0)
+
+    exit_code = 0
+    for handle in handles:
+        try:
+            recipe = store.load(handle)
+        except RecipeError as e:
+            typer.echo(f"warning: {e}", err=True)
+            continue
+        _write_recipe_compose(recipe)
+        typer.echo(f"== {handle} ==")
+        code = _run_compose(handle, "ps")
+        if code != 0:
+            exit_code = code
+    raise typer.Exit(code=exit_code)
 
 
 @app.command()
 def stop(handle: str) -> None:
     """Stop HANDLE's container via `docker compose stop`."""
-    _load_or_exit(handle)
-    _write_compose_file()
-    raise typer.Exit(code=_run_compose("stop", handle))
+    recipe = _load_or_exit(handle)
+    _write_recipe_compose(recipe)
+    raise typer.Exit(code=_run_compose(handle, "stop", handle))
 
 
 if __name__ == "__main__":

@@ -45,6 +45,14 @@ def _capturing_run(captured: dict):
     return fake_run
 
 
+def _capturing_run_all(commands: list):
+    def fake_run(command):
+        commands.append(command)
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
 def test_print_table_pads_columns_to_widest_cell(capsys):
     cli._print_table(
         ["REPO_ID", "QUANT", "PARAMS"],
@@ -419,6 +427,19 @@ def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert (tmp_path / "demo.yaml").exists()
+
+
+def test_recipe_remove_deletes_its_generated_compose_folder(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    state_folder = tmp_path / "state" / "recipes" / "demo"
+    state_folder.mkdir(parents=True)
+    (state_folder / "docker-compose.yml").write_text("services: {}\n")
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert not state_folder.exists()
 
 
 def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
@@ -827,6 +848,60 @@ def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch)
     assert captured["command"][-3:] == ["up", "-d", "demo"]
 
 
+def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    command = captured["command"]
+    assert command[command.index("-f") + 1] == str(
+        tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml"
+    )
+    assert command[command.index("-p") + 1] == "fllame-demo"
+
+
+def test_serve_without_preinstall_omits_build_flag(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "--build" not in captured["command"]
+    assert not (tmp_path / "state" / "recipes" / "demo" / "Dockerfile").is_file()
+
+
+def test_serve_with_preinstall_builds_and_writes_dockerfile(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "preinstall:\n"
+        "- pip install -U transformers\n"
+        "command: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo", "--detach"])
+
+    assert result.exit_code == 0
+    assert "--build" in captured["command"]
+    dockerfile = tmp_path / "state" / "recipes" / "demo" / "Dockerfile"
+    assert dockerfile.is_file()
+    assert dockerfile.read_text() == (
+        "FROM vllm/vllm-openai:v0.27.1\nRUN pip install -U transformers\n"
+    )
+
+
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
@@ -866,7 +941,7 @@ def test_serve_offline_passes_offline_to_pull_and_sets_container_env(tmp_path: P
 
     assert result.exit_code == 0
     assert pulled == [("org/demo", True)]
-    compose_text = config.compose_file_path().read_text()
+    compose_text = (config.recipe_state_dir("demo") / "docker-compose.yml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
 
 
@@ -898,6 +973,48 @@ def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert captured["command"][-1] == "ps"
+
+
+def test_status_shows_a_header_and_ps_per_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path, handle="demo-a")
+    _write_recipe(tmp_path, handle="demo-b")
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "== demo-a ==" in result.output
+    assert "== demo-b ==" in result.output
+    assert len(commands) == 2
+    projects = {command[command.index("-p") + 1] for command in commands}
+    assert projects == {"fllame-demo-a", "fllame-demo-b"}
+
+
+def test_status_no_recipes(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "No recipes found" in result.stdout
+
+
+def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path, handle="good")
+    (tmp_path / "bad.yaml").write_text("image: img\n")  # missing command
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "warning" in result.output
+    assert "== good ==" in result.output
+    assert "== bad ==" not in result.output
+    assert len(commands) == 1
 
 
 def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):

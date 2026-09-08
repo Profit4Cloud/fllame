@@ -21,7 +21,6 @@ class VllmServingBackend:
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
         service: dict = {
-            "image": recipe.image,
             # Set explicitly rather than relying on the image's own
             # ENTRYPOINT/CMD, whatever a given vllm/vllm-openai tag
             # happens to bake in - this way behavior doesn't depend on
@@ -37,6 +36,15 @@ class VllmServingBackend:
             "environment": {"HF_HOME": _CONTAINER_HF_HOME, **recipe.env},
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
         }
+        if recipe.preinstall:
+            # Built from the Dockerfile written alongside this compose
+            # file (see `render_dockerfile`) - `image` just names the
+            # tag compose gives the result, so `docker images`/`ps`
+            # show something meaningful instead of an anonymous hash.
+            service["build"] = {"context": "."}
+            service["image"] = f"fllame-{recipe.handle}:latest"
+        else:
+            service["image"] = recipe.image
         if recipe.gpus == "all":
             service["deploy"] = {
                 "resources": {
@@ -46,3 +54,10 @@ class VllmServingBackend:
                 }
             }
         return service
+
+    def render_dockerfile(self, recipe: Recipe) -> str | None:
+        if not recipe.preinstall:
+            return None
+        lines = [f"FROM {recipe.image}"]
+        lines.extend(f"RUN {step}" for step in recipe.preinstall)
+        return "\n".join(lines) + "\n"
