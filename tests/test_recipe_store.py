@@ -51,6 +51,74 @@ def test_load_empty_file_raises_missing_command(tmp_path: Path):
         store.load("demo")
 
 
+def test_load_tolerates_stripped_leading_whitespace_on_command_block(tmp_path: Path):
+    """The exact mistake that's easy to make hand-editing a recipe:
+    the command block's leading indentation looks meaningless and gets
+    deleted - which would otherwise break the YAML literal block scalar
+    outright, not just this field."""
+    (tmp_path / "demo.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "vllm serve org/demo \\\n"
+        "--tensor-parallel-size 1 \\\n"
+        "--enable-auto-tool-choice\n"
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.repo_id == "org/demo"
+    assert recipe.serve_args == ["--tensor-parallel-size", "1", "--enable-auto-tool-choice"]
+
+
+def test_load_tolerates_missing_trailing_backslash_on_command_lines(tmp_path: Path):
+    """Some model cards/recipes.vllm.ai examples show one flag per line
+    with no continuation marker at all - fllame shouldn't require one."""
+    (tmp_path / "demo.yaml").write_text(
+        "command: |-\n"
+        "  vllm serve org/demo\n"
+        "  --tensor-parallel-size 1\n"
+        "  --enable-auto-tool-choice\n"
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.serve_args == ["--tensor-parallel-size", "1", "--enable-auto-tool-choice"]
+
+
+def test_load_command_block_stops_at_next_top_level_key(tmp_path: Path):
+    """`command` doesn't strictly have to be last - a following
+    unindented `key:` line (no blank line needed) still ends its
+    section correctly."""
+    (tmp_path / "demo.yaml").write_text(
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1\n"
+        "gpus: none\n"
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.serve_args == ["--tensor-parallel-size", "1"]
+    assert recipe.gpus == "none"
+
+
+def test_load_flat_single_line_command_without_block_marker(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text("command: vllm serve org/demo --port 9000\n")
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").port == 9000
+
+
+def test_load_quoted_flat_command(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text('command: "vllm serve org/demo"\n')
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").repo_id == "org/demo"
+
+
 def test_autofix_whitespace_expands_tabs_and_normalizes_line_endings():
     text = "image: img\r\nenv:\r\n\tFOO: bar  \r\ncommand: vllm serve org/demo\r\n"
 

@@ -26,7 +26,7 @@ from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
     VllmCommandError,
-    join_line_continuations,
+    join_command_lines,
     parse_vllm_serve_command,
 )
 from fllame.hardware.scanner import scan_hardware
@@ -227,20 +227,13 @@ def _read_block(prompt_text: str) -> list[str]:
 
 def _read_command() -> str:
     lines = _read_block(
-        "vllm serve command (required) - paste it, ending a continued line "
-        "with \\ if needed, then a blank line or Ctrl-D:"
+        "vllm serve command (required) - one flag per line works fine, "
+        "with or without a trailing \\ - then a blank line or Ctrl-D:"
     )
     if not lines:
         typer.echo("no `vllm serve <repo_id> ...` command given", err=True)
         raise typer.Exit(code=1)
-    joined = join_line_continuations("\n".join(lines)).strip()
-    if "\n" in joined:
-        typer.echo(
-            "expected a single `vllm serve` command - continue a long one "
-            "with a trailing \\ instead of a new, unrelated line",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    joined = join_command_lines(lines)
     try:
         parse_vllm_serve_command(joined)
     except VllmCommandError as e:
@@ -350,15 +343,17 @@ def recipe_add(
     typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
 
 
-def _validate_after_edit(handle: str, path: Path) -> RecipeError | None:
+def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
     """Validates HANDLE's just-edited recipe file, trying a narrow
     whitespace autofix (see `autofix_whitespace`) once before giving up -
     catches a stray tab/CRLF from an editor without ever guessing at the
-    file's intended structure. `None` means valid.
+    file's intended structure (`RecipeStore.load`'s own leniency about a
+    `command` block's indentation/trailing `\\` handles the far more
+    common edit mistake before this is even needed). Returns the loaded
+    Recipe on success.
     """
     try:
-        _recipe_store().load(handle)
-        return None
+        return _recipe_store().load(handle)
     except RecipeError as first_error:
         raw = path.read_text()
         fixed = autofix_whitespace(raw)
@@ -367,8 +362,7 @@ def _validate_after_edit(handle: str, path: Path) -> RecipeError | None:
 
     path.write_text(fixed)
     try:
-        _recipe_store().load(handle)
-        return None
+        return _recipe_store().load(handle)
     except RecipeError as second_error:
         return second_error
 
@@ -377,12 +371,16 @@ def _validate_after_edit(handle: str, path: Path) -> RecipeError | None:
 def recipe_edit(handle: str) -> None:
     """Open HANDLE's recipe file in $EDITOR, then re-validate it.
 
-    A stray tab or CRLF line ending is fixed automatically before
-    anything is reported. Anything else invalid offers a choice: reopen
-    $EDITOR to fix it, or revert to the version from before this edit
-    (kept in memory for the length of this command, not written to a
-    backup file - the recipes directory is meant to be git-tracked
-    already, which is the real backup).
+    Lenient about how the `command` block ends up formatted (missing
+    indentation, a missing trailing `\\`, ...) and about a stray tab or
+    CRLF line ending elsewhere - fixed automatically before anything is
+    reported, and the file is re-saved in fllame's own canonical
+    rendering once it validates, regardless of which of those kicked in.
+    Anything else invalid offers a choice: reopen $EDITOR to fix it, or
+    revert to the version from before this edit (kept in memory for the
+    length of this command, not written to a backup file - the recipes
+    directory is meant to be git-tracked already, which is the real
+    backup).
     """
     path = config.recipes_dir() / f"{handle}.yaml"
     if not path.is_file():
@@ -393,12 +391,13 @@ def recipe_edit(handle: str) -> None:
     click.edit(filename=str(path))
 
     while True:
-        error = _validate_after_edit(handle, path)
-        if error is None:
+        result = _validate_after_edit(handle, path)
+        if isinstance(result, Recipe):
+            _recipe_store().save(result)
             typer.echo(f"'{handle}' saved and valid.")
             return
 
-        typer.echo(f"'{handle}' is no longer a valid recipe: {error}", err=True)
+        typer.echo(f"'{handle}' is no longer a valid recipe: {result}", err=True)
         if typer.confirm(
             "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
             default=True,

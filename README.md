@@ -136,10 +136,12 @@ paste:
    step entirely).
 3. **Environment variables** - paste one or more `KEY=VALUE` lines,
    same blank-line-or-Ctrl-D convention.
-4. **The `vllm serve` command** - required; paste it verbatim,
-   including any trailing `\` line continuations exactly as shown on a
-   model card or recipes.vllm.ai - they're joined into one line
-   automatically.
+4. **The `vllm serve` command** - required; paste it verbatim, one flag
+   per line works fine either with or without a trailing `\` line
+   continuation - plenty of real examples show one flag per line with
+   no continuation marker at all, relying on the code block's own line
+   breaks rather than real shell syntax, and fllame doesn't require one
+   either.
 
 Preinstall commands are taken verbatim as shell text (`&&` and all,
 same as a real shell command) since that's what they genuinely are;
@@ -152,15 +154,21 @@ after the last `/`, lowercased and slugified, e.g.
 second recipe for a repo that already has one gets `_2`, `_3`, etc.
 rather than overwriting - useful for keeping
 more than one tuning of the same model around. `recipe edit` opens the
-YAML file directly in `$EDITOR` and re-validates on save. A stray tab or
-CRLF line ending - the most common way a text editor breaks YAML - is
-fixed automatically first; anything else invalid (malformed YAML
-entirely, a missing `command`, ...) offers a choice: reopen `$EDITOR` to
-fix it, or revert to the version from before this edit (kept in memory
-for the length of the command - the recipes directory is meant to be
-git-tracked already, which is the real backup, not a `.bak` file on
-disk). `recipe remove` deletes a recipe, asking first unless
-`-y`/`--yes`.
+YAML file directly in `$EDITOR` and re-validates on save. `command`'s
+formatting is read leniently - its own multi-line rendering never goes
+through YAML's own (indentation-sensitive) parser at all, so deleting
+what looks like meaningless leading whitespace, or a missing trailing
+`\` on a continuation line (plenty of real examples don't use one),
+doesn't break it. A stray tab or CRLF line ending elsewhere - the most
+common way a text editor breaks YAML - is fixed automatically too;
+anything still invalid (malformed YAML entirely, a missing `command`,
+...) offers a choice: reopen `$EDITOR` to fix it, or revert to the
+version from before this edit (kept in memory for the length of the
+command - the recipes directory is meant to be git-tracked already,
+which is the real backup, not a `.bak` file on disk). Either way, once
+the file validates it's re-saved in fllame's own canonical rendering,
+regardless of how it was actually formatted. `recipe remove` deletes a
+recipe, asking first unless `-y`/`--yes`.
 
 `fllame config` holds fllame's own persisted settings - today just
 `default_image`, the Docker image a recipe falls back to when it doesn't

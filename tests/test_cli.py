@@ -227,6 +227,27 @@ def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
     assert list(tmp_path.glob("*.yaml")) == []
 
 
+def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, monkeypatch):
+    """Some model card/recipes.vllm.ai examples show one flag per line
+    with no `\\` continuation marker at all - the dialogue shouldn't
+    require one."""
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        "",
+        "",
+        "vllm serve org/demo",
+        "--tensor-parallel-size 1",
+        "--enable-auto-tool-choice",
+    )
+
+    result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+
+    assert result.exit_code == 0
+    text = (tmp_path / "demo.yaml").read_text()
+    assert "--tensor-parallel-size" in text
+    assert "--enable-auto-tool-choice" in text
+
+
 def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
@@ -282,6 +303,42 @@ def test_recipe_edit_revalidates_after_editing(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert "valid" in result.output
+
+
+def test_recipe_edit_tolerates_stripped_command_indentation_and_renormalizes(
+    tmp_path: Path, monkeypatch
+):
+    """The exact mistake reported: hand-editing strips what looks like
+    meaningless leading whitespace from the command block, which would
+    otherwise break the YAML literal block scalar outright. Not only
+    should this load fine (RecipeStore.load's own leniency), the file
+    should come back out re-normalized to fllame's canonical rendering,
+    not left in the technically-fragile shape the edit left it in."""
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1\n"
+    )
+
+    def fake_edit(filename):
+        p = Path(filename)
+        p.write_text("\n".join(line.lstrip() for line in p.read_text().splitlines()) + "\n")
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    text = (tmp_path / "demo.yaml").read_text()
+    assert text == (
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1\n"
+    )
 
 
 def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(

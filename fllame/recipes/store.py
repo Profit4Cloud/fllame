@@ -4,11 +4,72 @@ directory is meant to live in the operator's own git repo, not fllame's.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
 
 from fllame.domain.recipe import Recipe, RecipeError
+from fllame.domain.vllm_command import join_command_lines
+
+# A top-level `key:` line - used to find where a `command:` section
+# ends when it isn't followed by a blank line or EOF first (see
+# `_extract_command_section`).
+_TOP_LEVEL_KEY = re.compile(r"^[A-Za-z_][\w-]*:(\s|$)")
+_QUOTED = re.compile(r"^(['\"]).*\1$")
+_BLOCK_SCALAR_INDICATOR = re.compile(r"^[|>][+-]?$")
+
+
+def _extract_command_section(text: str) -> tuple[str, str | None]:
+    """Splits raw recipe file text into (everything else, the `command`
+    field's raw value) at the first line starting with `command:`.
+
+    `command` is deliberately never handed to `yaml.safe_load` as part
+    of the rest of the document: its own multi-line rendering (see
+    `Recipe.to_dict`) is a YAML literal block scalar, which requires
+    consistent, sufficient indentation on every continuation line to
+    remain valid YAML at all - an easy thing to break by hand (e.g.
+    stripping what looks like meaningless leading whitespace) that
+    would otherwise fail YAML parsing outright, not just this one
+    field. Extracting it here and parsing it with `join_command_lines`
+    instead sidesteps that fragility entirely: only its own line-based
+    grammar applies, indentation and trailing `\\` continuations optional.
+
+    The command section runs from the `command:` line to the next
+    blank line, the next unindented `key:` line, or EOF - so `command`
+    doesn't strictly have to be the last field (though `RecipeStore.save`
+    always writes it last), just not interrupted by another field
+    without a blank line separating them.
+    """
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("command:")), None)
+    if start is None:
+        return text, None
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if not line.strip() or _TOP_LEVEL_KEY.match(line):
+            end = i
+            break
+
+    command_lines = lines[start:end]
+    remaining = lines[:start] + lines[end:]
+    return "\n".join(remaining), _parse_lenient_command(command_lines)
+
+
+def _parse_lenient_command(command_lines: list[str]) -> str:
+    first_line_value = command_lines[0][len("command:") :].strip()
+    rest = command_lines[1:]
+
+    if first_line_value == "" or _BLOCK_SCALAR_INDICATOR.match(first_line_value):
+        content_lines = rest
+    else:
+        if _QUOTED.match(first_line_value):
+            first_line_value = first_line_value[1:-1]
+        content_lines = [first_line_value, *rest]
+
+    return join_command_lines(content_lines)
 
 
 def autofix_whitespace(text: str) -> str:
@@ -43,8 +104,10 @@ class RecipeStore:
         path = self.directory / f"{handle}.yaml"
         if not path.is_file():
             raise RecipeError(f"no recipe found for '{handle}' (expected {path})")
+
+        yaml_text, command = _extract_command_section(path.read_text())
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(yaml_text)
         except yaml.YAMLError as e:
             raise RecipeError(f"recipe '{handle}': invalid YAML: {e}") from e
         if data is None:
@@ -54,6 +117,8 @@ class RecipeStore:
                 f"recipe '{handle}': must be a YAML mapping (key: value pairs), "
                 f"got {type(data).__name__}"
             )
+        if command is not None:
+            data["command"] = command
         return Recipe.from_dict(handle, data)
 
     def load_all(self) -> list[Recipe]:

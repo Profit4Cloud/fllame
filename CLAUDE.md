@@ -64,7 +64,16 @@ per-line block (`domain/vllm_command.py`'s `render_multiline_command`)
 regardless of how it was originally authored, so it's exactly what gets
 copied out and run by hand. `repo_id`/`serve_args`/`port` are derived
 properties parsed from it on access (`fllame/domain/vllm_command.py`),
-not stored a second time. Recipes are loaded
+not stored a second time. `RecipeStore.load` never hands `command`'s
+raw text to `yaml.safe_load` at all (`_extract_command_section`
+carves it out first, from the `command:` line to the next blank
+line/unindented key/EOF) - a YAML literal block scalar needs
+consistent, sufficient indentation on every line to stay valid YAML at
+all, which is exactly what's easy to break by hand (deleting what
+looks like meaningless leading whitespace); parsing it instead with
+`domain/vllm_command.py`'s own `join_command_lines` (leading/trailing
+whitespace and a trailing `\` all optional, blank/`#`-comment lines
+dropped) avoids that fragility entirely. Recipes are loaded
 from plain YAML files (`fllame/recipes/store.py`) that live in the
 *operator's* own directory, not inside fllame - they're meant to be
 hand-edited and git-tracked the same way a Helm `values.yaml` or an
@@ -232,12 +241,16 @@ headroom.
   commands, then env vars, then the `vllm serve` command - each its own
   labeled step, not one undifferentiated stdin paste). `recipe edit`
   opens `$EDITOR` (`click.edit(filename=...)`, edits the file in place)
-  and re-validates on save - a narrow whitespace autofix runs first
-  (CRLF, tab indentation, trailing whitespace; `recipes/store.py`'s
-  `autofix_whitespace`), and anything still invalid offers a choice to
-  reopen `$EDITOR` or revert to the pre-edit version (kept in memory,
-  not a backup file - the recipes directory is git-tracked already).
-  `recipe remove` deletes with a confirmation prompt (`-y` to skip it).
+  and re-validates on save - `command`'s own indentation/trailing-`\`
+  leniency (`RecipeStore.load`/`_extract_command_section`) handles the
+  most common breakage on its own; a narrow whitespace autofix runs
+  next for anything else (CRLF, tab indentation, trailing whitespace;
+  `recipes/store.py`'s `autofix_whitespace`), and anything still invalid
+  offers a choice to reopen `$EDITOR` or revert to the pre-edit version
+  (kept in memory, not a backup file - the recipes directory is
+  git-tracked already). Either way, a successful revalidation re-saves
+  the file in fllame's own canonical rendering. `recipe remove` deletes
+  with a confirmation prompt (`-y` to skip it).
 - **Install with `pipx install .`, not `poetry install`, for everyday
   use.** `poetry install` only creates a project-local venv; the `fllame`
   command it produces isn't on `PATH` outside `poetry run`/`poetry

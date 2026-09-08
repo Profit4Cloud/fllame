@@ -40,6 +40,32 @@ def join_line_continuations(text: str) -> str:
     return _LINE_CONTINUATION.sub(" ", text)
 
 
+def join_command_lines(lines: list[str]) -> str:
+    r"""Joins lines that together represent one `vllm serve` invocation
+    into a single logical line - one caller-supplied line per `--flag`,
+    typically. Lenient on purpose, unlike `join_line_continuations`:
+    each line's leading/trailing whitespace is stripped (recipe files
+    get hand-edited, and stripping what looks like meaningless leading
+    indentation is an easy mistake once `command`'s multi-line YAML
+    block scalar is bypassed - see `recipes/store.py` - so whatever
+    indentation is left over here doesn't matter), and a trailing `\`
+    is stripped where present but not required - plenty of real
+    examples (a model card, recipes.vllm.ai) show one flag per line
+    with no continuation marker at all, relying on the code block's own
+    line breaks rather than real shell continuation syntax. Blank and
+    `#`-comment lines are dropped.
+    """
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            stripped = stripped[:-1].rstrip()
+        cleaned.append(stripped)
+    return " ".join(cleaned)
+
+
 def split_shell_safe(where: str, text: str) -> list[str]:
     """Tokenizes `text` with `shlex`, rejecting shell metacharacters
     (`;`, `&`, `|`, `` ` ``, `$(...)`) first - used for anything that's
