@@ -11,6 +11,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 import click
 import typer
@@ -26,7 +27,7 @@ from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import list_cached_models
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
-from fllame.models.sizing import max_params_billion, memory_budget_gb
+from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore
@@ -92,6 +93,49 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     for row in all_rows:
         padded = [cell.ljust(width) for cell, width in zip(row[:-1], widths[:-1], strict=False)]
         typer.echo("  ".join([*padded, row[-1]]))
+
+
+def _format_count(n: int | None) -> str:
+    """A compact form of a download count - "12.3k", "1.2M" - so the
+    column stays narrow regardless of magnitude. Not locale-aware; this
+    is a terminal table, not user-facing prose."""
+    if n is None:
+        return "unknown"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+# (label, seconds-per-unit, largest value still shown in this unit
+# before rolling up to the next one - `None` for the last, open-ended
+# unit). Mirrors huggingface_hub's own `CachedRepoInfo.last_modified_str`
+# (used by `fllame model list`) for a consistent "3 days ago" feel
+# across both tables, without depending on that library's private
+# formatter.
+_RELATIVE_TIME_UNITS = (
+    ("second", 1, 59),
+    ("minute", 60, 59),
+    ("hour", 60 * 60, 23),
+    ("day", 60 * 60 * 24, 6),
+    ("week", 60 * 60 * 24 * 7, 3),
+    ("month", 60 * 60 * 24 * 30, 11),
+    ("year", 60 * 60 * 24 * 365, None),
+)
+
+
+def _format_relative_time(dt: datetime | None) -> str:
+    if dt is None:
+        return "unknown"
+    delta_seconds = (datetime.now(UTC) - dt).total_seconds()
+    if delta_seconds < 20:
+        return "a few seconds ago"
+    for label, divider, max_value in _RELATIVE_TIME_UNITS:  # noqa: B007 - used after the loop
+        value = round(delta_seconds / divider)
+        if max_value is not None and value <= max_value:
+            break
+    return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
 def _run_compose(*args: str) -> int:
@@ -275,34 +319,82 @@ def model_list() -> None:
 @model_app.command("scan")
 def model_scan(
     query: str | None = typer.Option(
-        None, "--query", "-q", help="Free-text filter, e.g. a model family name."
+        None,
+        "--query",
+        "-q",
+        show_default=False,
+        help=(
+            "Free-text filter, e.g. a model family name. Place multi-word queries "
+            'between quotes (-q "qwen 3.8").'
+        ),
     ),
     quantization: str | None = typer.Option(
         None,
         "--quant",
+        show_default=False,
         help="Search only this quantization, ignoring the hardware scan's supported list.",
     ),
+    max_size: float | None = typer.Option(
+        None,
+        "--max-size",
+        show_default=False,
+        help=(
+            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column) - "
+            "defaults to this machine's hardware scan budget when not given, "
+            "but is enforced either way."
+        ),
+    ),
     min_params: float | None = typer.Option(
-        None, "--min-params", help="Minimum size, in billions of parameters."
+        None,
+        "--min-params",
+        show_default=False,
+        help="Minimum size, in billions of parameters.",
     ),
     max_params: float | None = typer.Option(
         None,
         "--max-params",
-        help="Maximum size, in billions of parameters - ignoring the hardware-based estimate.",
+        show_default=False,
+        help=(
+            "Maximum size, in billions of parameters. Independent of --max-size "
+            "and not applied unless given - there's no hardware-based default for it."
+        ),
     ),
     limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
 ) -> None:
     """Search the Hugging Face Hub for models, ranked by fit and popularity.
 
-    With no filters, searches the quantizations this machine's hardware
-    scan reports as supported, capped by a coarse VRAM/RAM-based size
-    estimate - a starting point, not a benchmarked guarantee a result
-    actually fits (see CLAUDE.md for why there's no stronger guarantee
-    yet). --quant and/or --max-params override that default
-    independently, ignoring the hardware scan entirely for whichever is
-    given.
+    --max-size is the primary size gate and is always in effect: give it
+    explicitly, or it defaults to a coarse VRAM/RAM-based budget from
+    this machine's hardware scan - a starting point, not a benchmarked
+    guarantee a result actually fits (see CLAUDE.md for why there's no
+    stronger guarantee yet). A result with no Hub-reported size at all
+    (no safetensors metadata - e.g. a GGUF-only export) is excluded only
+    when --max-size was given explicitly; against the hardware-scan
+    default it's left in, unpenalized, rather than judged against a
+    number nobody asked it to satisfy.
+
+    --min-params/--max-params are a separate, optional restriction on
+    declared parameter count layered on top, with no hardware-derived
+    default of their own and the same explicit-only exclusion rule for
+    an unknown value. Give neither and only --max-size applies; give
+    --max-params and both restrictions apply, and ranking then weighs
+    closeness to each equally alongside popularity/recency.
+
+    --quant searches only that quantization, still ignoring the hardware
+    scan's supported list either way.
+
+    Columns: PARAMS is the Hub's own reported parameter count where
+    known (falling back to a guess from the repo_id otherwise); EST.
+    VRAM is a separate, independent minimum weights-only VRAM estimate
+    computed directly from the checkpoint's real on-disk byte layout -
+    not derived from PARAMS, so the two can disagree for quantization
+    formats that pack multiple values into one stored byte. DOWNLOADS is
+    the Hub's recent (~30-day) download count, and UPDATED is how long
+    ago the repo was last modified - both also feed the ranking, along
+    with all-time downloads (not separately shown). QUANT is omitted
+    when every result already shares one quantization.
     """
-    profile = scan_hardware() if quantization is None or max_params is None else None
+    profile = scan_hardware() if quantization is None or max_size is None else None
 
     quantizations = [quantization] if quantization is not None else profile.supported_quantizations
     if not quantizations:
@@ -313,27 +405,25 @@ def model_scan(
         )
         raise typer.Exit(code=1)
 
-    if max_params is not None:
-        ceiling_billion = dict.fromkeys(quantizations, max_params)
+    if max_size is not None:
+        max_size_gb = max_size
     else:
         budget_gb = memory_budget_gb(profile)
         if budget_gb is None:
             typer.echo(
                 "Could not determine available VRAM/RAM for this hardware - "
-                "pass --max-params explicitly to search anyway.",
+                "pass --max-size explicitly to search anyway.",
                 err=True,
             )
             raise typer.Exit(code=1)
         unified = profile.chip_family == "grace_blackwell"
-        ceiling_billion = {
-            q: max_params_billion(budget_gb=budget_gb, unified_memory=unified, quantization=q)
-            for q in quantizations
-        }
+        max_size_gb = usable_memory_gb(budget_gb=budget_gb, unified_memory=unified)
 
     try:
         candidates = search_models(
             quantizations=quantizations,
-            ceiling_billion=ceiling_billion,
+            max_size_gb=max_size_gb,
+            exclude_unknown_size=max_size is not None,
             min_params_billion=min_params,
             max_params_billion=max_params,
             query=query,
@@ -347,17 +437,21 @@ def model_scan(
         typer.echo("No matching models found.")
         raise typer.Exit(code=0)
 
-    _print_table(
-        ["REPO_ID", "QUANT", "PARAMS"],
+    show_quant_column = len(quantizations) > 1
+    headers = ["REPO_ID", *(["QUANT"] if show_quant_column else []), "PARAMS", "EST. VRAM"]
+    headers += ["DOWNLOADS", "UPDATED"]
+    rows = [
         [
-            [
-                c.repo_id,
-                c.quantization,
-                f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
-            ]
-            for c in candidates
-        ],
-    )
+            c.repo_id,
+            *([c.quantization] if show_quant_column else []),
+            f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
+            f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
+            _format_count(c.downloads),
+            _format_relative_time(c.last_modified),
+        ]
+        for c in candidates
+    ]
+    _print_table(headers, rows)
 
 
 @app.command()

@@ -44,6 +44,31 @@ def test_print_table_pads_columns_to_widest_cell(capsys):
     assert lines[0].index("QUANT") == lines[1].index("awq") == lines[2].index("gptq")
 
 
+def test_format_count_compact_thousands_and_millions():
+    assert cli._format_count(None) == "unknown"
+    assert cli._format_count(999) == "999"
+    assert cli._format_count(12_345) == "12.3k"
+    assert cli._format_count(1_234_567) == "1.2M"
+
+
+def test_format_relative_time_buckets(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(cli, "datetime", _FixedDatetime)
+
+    assert cli._format_relative_time(None) == "unknown"
+    assert cli._format_relative_time(now - timedelta(seconds=5)) == "a few seconds ago"
+    assert cli._format_relative_time(now - timedelta(days=3)) == "3 days ago"
+    assert cli._format_relative_time(now - timedelta(days=1)) == "1 day ago"
+
+
 def test_help_flag_short_alias():
     result = runner.invoke(app, ["-h"])
 
@@ -374,7 +399,7 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
 
     def fake_search_models(**kwargs):
         captured.update(kwargs)
-        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 100, 1000, None)]
+        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 14.0, 100, 1000, None)]
 
     monkeypatch.setattr(cli, "search_models", fake_search_models)
 
@@ -382,8 +407,28 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
 
     assert result.exit_code == 0
     assert "org/demo-7B-AWQ" in result.stdout
+    assert "14.0 GB" in result.stdout
+    assert "100" in result.stdout  # DOWNLOADS
+    assert "unknown" in result.stdout  # UPDATED, since last_modified=None
+    assert "QUANT" in result.stdout  # multiple quantizations searched, so shown
     assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
     assert captured["max_params_billion"] is None
+    # NVIDIA A100 80GB, discrete (no unified-memory OS reserve): 80 * 0.85.
+    assert captured["max_size_gb"] == 68.0
+    assert captured["exclude_unknown_size"] is False
+
+
+def test_model_scan_omits_quant_column_for_single_quantization(monkeypatch):
+    def fake_search_models(**kwargs):
+        return [ModelCandidate("org/demo-7B-AWQ", "awq", 7.0, 14.0, 100, 1000, None)]
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--quant", "awq", "--max-size", "40"])
+
+    assert result.exit_code == 0
+    assert "QUANT" not in result.stdout
+    assert "org/demo-7B-AWQ" in result.stdout
 
 
 def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
@@ -399,11 +444,51 @@ def test_model_scan_explicit_overrides_never_touch_hardware(monkeypatch):
 
     monkeypatch.setattr(cli, "search_models", fake_search_models)
 
-    result = runner.invoke(app, ["model", "scan", "--quant", "gptq", "--max-params", "13"])
+    result = runner.invoke(
+        app, ["model", "scan", "--quant", "gptq", "--max-size", "40", "--max-params", "13"]
+    )
 
     assert result.exit_code == 0
     assert captured["quantizations"] == ["gptq"]
-    assert captured["ceiling_billion"] == {"gptq": 13.0}
+    assert captured["max_size_gb"] == 40.0
+    assert captured["exclude_unknown_size"] is True
+    assert captured["max_params_billion"] == 13.0
+
+
+def test_model_scan_max_size_alone_still_needs_hardware_for_quantizations(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--max-size", "40"])
+
+    assert result.exit_code == 0
+    assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
+    assert captured["max_size_gb"] == 40.0
+    assert captured["exclude_unknown_size"] is True
+
+
+def test_model_scan_quant_alone_still_needs_hardware_for_max_size(monkeypatch):
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _hardware_profile())
+    captured = {}
+
+    def fake_search_models(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "search_models", fake_search_models)
+
+    result = runner.invoke(app, ["model", "scan", "--quant", "gptq"])
+
+    assert result.exit_code == 0
+    assert captured["quantizations"] == ["gptq"]
+    assert captured["max_size_gb"] == 68.0
+    assert captured["exclude_unknown_size"] is False
 
 
 def test_model_scan_no_supported_quantizations_gives_friendly_error(monkeypatch):

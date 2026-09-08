@@ -30,7 +30,7 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
   models/cache.py    # Lists what's in that cache - a filesystem scan, no network.
   models/discovery.py # Searches the HF Hub for candidate models, ranked.
-  models/sizing.py   # The coarse per-quantization size ceiling `discovery.py` searches within.
+  models/sizing.py   # The coarse hardware memory budget `--max-size` defaults to.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -115,20 +115,38 @@ result of a live scan (`fllame/hardware/scanner.py`, NVIDIA GPU via
 time it's needed rather than persist and risk going stale.
 
 `fllame model scan` composes two independent pieces: `models/sizing.py`
-turns a `HardwareProfile` into a coarse, per-quantization ceiling on
-servable model size (declared params only - no context length or
-concurrency in this estimate, see "Explicitly deferred" below), and
-`models/discovery.py` searches the HF Hub within that ceiling and ranks
-results by size fit, downloads, and recency. `discovery.py` takes
-already-resolved quantizations and a ceiling dict as plain arguments -
-it has no dependency on `HardwareProfile` or hardware scanning at all,
-which is what lets `cli.py` bypass hardware entirely when
-`--quant`/`--max-params` are both given explicitly (verified live:
-that path never calls `scan_hardware()`, going straight to the Hub
-search). Adapted from the same admin-ui project's Hub-search logic
-mentioned above, trimmed to fllame's scope: no training/LoRA headroom,
-no GGUF/MLX weight-format filtering (a scan result isn't guaranteed to
-actually be vLLM-servable - some GGUF-only repos may still show up).
+turns a `HardwareProfile` into a coarse memory budget (no context length
+or concurrency in this estimate, see "Explicitly deferred" below), and
+`models/discovery.py` searches the HF Hub within a `--max-size` (GB)
+ceiling defaulted from that budget, ranked by estimated-VRAM fit,
+downloads, and recency. A candidate's param count and estimated VRAM
+both come from the Hub's own safetensors metadata where available
+(`ModelInfo.safetensors.total` for params - the same figure shown on
+the model page as "Model size"; a direct sum of
+`ModelInfo.safetensors.parameters`' per-dtype byte widths for VRAM, not
+a per-quantization bytes-per-param guess, since a declared param count
+alone doesn't reveal how a given quantization format packs its bits on
+disk) - falling back to a unit-aware guess from the repo_id's naming
+convention for params only (there's no repo_id-based fallback for VRAM)
+when safetensors metadata is absent. `--min-params`/`--max-params` are
+a second, independent restriction on top with no hardware-derived
+default of their own. Either restriction excludes a candidate it can't
+verify (no safetensors metadata at all) only when given explicitly, not
+when merely defaulted - see `discovery.search_models`'s
+`exclude_unknown_size` for why. `discovery.py` takes already-resolved
+quantizations and a plain `max_size_gb` float as arguments - it has no
+dependency on `HardwareProfile` or hardware scanning at all, which is
+what lets `cli.py` bypass hardware entirely when `--quant`/`--max-size`
+are both given explicitly (verified live: that path never calls
+`scan_hardware()`, going straight to the Hub search). GGUF results are
+excluded outright (`discovery._is_gguf`): GGUF-via-vLLM now needs a
+separate out-of-tree plugin with no per-model compatibility guarantee,
+on top of carrying no safetensors metadata for either estimate above to
+work with. MLX isn't filtered - fllame has no MLX serving story at all,
+unlike GGUF's (limited, unreliable) one, so it hasn't been evaluated on
+its own merits. Adapted from the same admin-ui project's Hub-search
+logic mentioned above, trimmed to fllame's scope: no training/LoRA
+headroom.
 
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
@@ -224,8 +242,14 @@ actually be vLLM-servable - some GGUF-only repos may still show up).
   `model pull`.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
   recipes or `serve` so far (see "Explicitly deferred").
-- `fllame model scan` - `models/sizing.py` (a coarse per-quantization
-  size ceiling from a `HardwareProfile`) + `models/discovery.py` (Hub
-  search, ranked by size fit/downloads/recency) via `cli.py`.
-  `--quant`/`--max-params` each independently opt out of the
-  hardware-driven default.
+- `fllame model scan` - `models/sizing.py` (a coarse hardware memory
+  budget from a `HardwareProfile`) + `models/discovery.py` (Hub search,
+  ranked by estimated-VRAM fit/downloads/recency) via `cli.py`.
+  `--max-size` (GB) is the always-enforced size gate, defaulted from
+  that budget unless given explicitly; `--quant` independently opts out
+  of the hardware-detected quantization list; `--min-params`/
+  `--max-params` are a separate, optional restriction with no
+  hardware-derived default of their own. A candidate's params/VRAM come
+  from the Hub's own safetensors metadata where available, not a
+  per-quantization bytes-per-param guess (see the architecture
+  paragraph above). GGUF results are excluded outright; MLX isn't.
