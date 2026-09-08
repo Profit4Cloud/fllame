@@ -1,11 +1,18 @@
-"""Parses a pasted `export KEY=VALUE` + `vllm serve <repo_id> <args...>`
-block - the shape a recipe typically comes in when copied from a model
-card or vLLM's own docs - into the pieces a Recipe needs. Rejects
-anything that isn't literally one of those two line shapes, and rejects
-shell metacharacters in any value: fllame parses this text itself
-rather than handing it to a real shell to evaluate, so a pasted
-`$(cat /etc/passwd)` must never become a literal wrong string silently
-baked into a recipe.
+"""Parses a pasted `export KEY=VALUE` + `RUN <command>` +
+`vllm serve <repo_id> <args...>` block - the shape a recipe typically
+comes in when copied from a model card or vLLM's own docs - into the
+pieces a Recipe needs. Rejects anything that isn't literally one of
+those three line shapes.
+
+`export`/`vllm serve` values are rejected if they contain a shell
+metacharacter: those are meant to become a single argv token/env var
+value, so fllame parses this text itself rather than handing it to a
+real shell, and a pasted `$(cat /etc/passwd)` there must never become a
+literal wrong string silently baked into a recipe. A `RUN` line is
+different in kind - it's meant to genuinely be a shell command (a
+preinstall step run before `vllm serve`, e.g. `RUN pip install -U
+transformers`) - so it's stored and later run verbatim, not rejected for
+containing shell syntax that would be perfectly legitimate there.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import shlex
 from dataclasses import dataclass, field
 
 _EXPORT_PATTERN = re.compile(r"^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_RUN_PATTERN = re.compile(r"^RUN\s+(.+)$")
 _FLAG_PATTERN = re.compile(r"^--[A-Za-z][\w-]*(=.*)?$")
 _DANGEROUS_CHARS = re.compile(r"[;&|`\n\r]|\$\(")
 
@@ -30,12 +38,14 @@ class ParsedRecipe:
     repo_id: str
     env: dict[str, str] = field(default_factory=dict)
     serve_args: list[str] = field(default_factory=list)
+    preinstall: list[str] = field(default_factory=list)
 
 
 def parse_pasted_recipe(text: str) -> ParsedRecipe:
     env: dict[str, str] = {}
     repo_id: str | None = None
     serve_args: list[str] = []
+    preinstall: list[str] = []
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -46,6 +56,11 @@ def parse_pasted_recipe(text: str) -> ParsedRecipe:
         if export_match:
             key, value = export_match.groups()
             env[key] = _parse_single_token(f"env var '{key}'", value)
+            continue
+
+        run_match = _RUN_PATTERN.match(line)
+        if run_match:
+            preinstall.append(run_match.group(1))
             continue
 
         if line == "vllm serve" or line.startswith("vllm serve "):
@@ -59,8 +74,8 @@ def parse_pasted_recipe(text: str) -> ParsedRecipe:
             continue
 
         raise RecipePasteError(
-            "unrecognized line (only `export KEY=VALUE` lines and one "
-            f"`vllm serve ...` line are accepted): {line!r}"
+            "unrecognized line (only `export KEY=VALUE` lines, `RUN <command>` "
+            f"lines, and one `vllm serve ...` line are accepted): {line!r}"
         )
 
     if repo_id is None:
@@ -70,7 +85,7 @@ def parse_pasted_recipe(text: str) -> ParsedRecipe:
         if token.startswith("-") and not _FLAG_PATTERN.match(token):
             raise RecipePasteError(f"malformed flag: {token!r}")
 
-    return ParsedRecipe(repo_id=repo_id, env=env, serve_args=serve_args)
+    return ParsedRecipe(repo_id=repo_id, env=env, serve_args=serve_args, preinstall=preinstall)
 
 
 def _parse_single_token(where: str, value: str) -> str:

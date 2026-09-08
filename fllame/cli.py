@@ -216,7 +216,7 @@ def recipe_add(
     gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
 ) -> None:
     """Create a recipe from a `vllm serve ...` line - and optionally
-    `export ...` lines - either as trailing arguments or pasted
+    `export ...`/`RUN ...` lines - either as trailing arguments or pasted
     interactively. This is the shape a recipe typically comes in from a
     model card or vLLM's own docs.
     """
@@ -239,7 +239,8 @@ def recipe_add(
         pasted = shlex.join(vllm_serve_line)
     else:
         typer.echo(
-            "Paste the recipe's `export ...` lines and `vllm serve ...` line, " "then press Ctrl-D."
+            "Paste the recipe's `export ...`/`RUN ...` lines and `vllm serve ...` "
+            "line, then press Ctrl-D."
         )
         pasted = sys.stdin.read()
 
@@ -260,6 +261,7 @@ def recipe_add(
                 "gpus": gpus,
                 "env": parsed.env,
                 "serve_args": parsed.serve_args,
+                "preinstall": parsed.preinstall,
             },
         )
     except RecipeError as e:

@@ -80,3 +80,32 @@ def test_rejects_malformed_flag():
 def test_bare_value_tokens_allowed_after_a_flag():
     parsed = parse_pasted_recipe("vllm serve org/repo --port 8000")
     assert parsed.serve_args == ["--port", "8000"]
+
+
+def test_parses_run_lines_as_preinstall():
+    text = """
+    RUN uv pip install -U "transformers>=5.8.0"
+    vllm serve org/repo
+    """
+    parsed = parse_pasted_recipe(text)
+    assert parsed.preinstall == ['uv pip install -U "transformers>=5.8.0"']
+
+
+def test_no_run_lines_is_fine():
+    parsed = parse_pasted_recipe("vllm serve org/repo")
+    assert parsed.preinstall == []
+
+
+def test_multiple_run_lines_preserve_order():
+    text = "RUN pip install foo\nRUN pip install bar\nvllm serve org/repo"
+    parsed = parse_pasted_recipe(text)
+    assert parsed.preinstall == ["pip install foo", "pip install bar"]
+
+
+def test_run_line_shell_metacharacters_allowed():
+    """Unlike an export value or a vllm serve flag, a RUN line is genuinely
+    meant to be a shell command - chaining two installs with && is normal,
+    not a smuggled command where a plain token was expected."""
+    text = "RUN pip install foo && pip install bar\nvllm serve org/repo"
+    parsed = parse_pasted_recipe(text)
+    assert parsed.preinstall == ["pip install foo && pip install bar"]

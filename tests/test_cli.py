@@ -211,6 +211,22 @@ def test_recipe_add_rejects_bad_paste(tmp_path: Path, monkeypatch):
     assert list(tmp_path.glob("*.yaml")) == []
 
 
+def test_recipe_add_captures_preinstall_run_lines(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pasted = 'RUN uv pip install -U "transformers>=5.8.0"\nvllm serve org/demo\n'
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    text = (tmp_path / "demo.yaml").read_text()
+    assert "preinstall:" in text
+    assert "transformers>=5.8.0" in text
+
+
 def test_recipe_edit_missing_handle(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 

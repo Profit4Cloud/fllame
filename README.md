@@ -114,13 +114,20 @@ exists - warning either way if the resolved tag looks unpinned, e.g.
 itself (handy for a one-liner you already have on your clipboard as a
 single command - shell quoting/escaping applies as normal, e.g. wrap a
 value with spaces in quotes) or, if none are given, reads a pasted block
-of zero or more `export KEY=VALUE` lines plus that one `vllm serve` line
-from stdin until EOF (Ctrl-D) - the only way to set env vars, since
-those aren't something you'd type as trailing arguments. Either way the
-input is parsed and sanitized, not evaluated as shell - anything that
-isn't one of those line shapes, or a shell metacharacter/substitution
-(`;`, `&`, `|`, `` ` ``, `$(...)`) in a value, is a hard error and
-nothing gets written. The handle is derived from the repo id (the part
+of zero or more `export KEY=VALUE` lines, zero or more `RUN <command>`
+lines, and that one `vllm serve` line from stdin until EOF (Ctrl-D) - the
+only way to set env vars or a preinstall step, since those aren't
+something you'd type as trailing arguments. A `RUN` line captures a
+preinstall command some recipes need on top of the base image (e.g. `RUN
+uv pip install -U "transformers>=5.8.0"`, the kind of extra step
+vLLM's own recipe site sometimes lists alongside the `vllm serve`
+command) - unlike an `export` value or a `vllm serve` flag, it's taken
+verbatim as shell text, `&&` and all, rather than rejected for looking
+like one. Everything else is parsed and sanitized, not evaluated as
+shell - anything that isn't one of those three line shapes, or a shell
+metacharacter/substitution (`;`, `&`, `|`, `` ` ``, `$(...)`) in an
+`export`/`vllm serve` value, is a hard error and nothing gets written.
+The handle is derived from the repo id (the part
 after the last `/`, lowercased and slugified, e.g.
 `meta-llama/Meta-Llama-3-8B-Instruct` -> `meta-llama-3-8b-instruct`); a
 second recipe for a repo that already has one gets `_2`, `_3`, etc.
@@ -178,6 +185,7 @@ recipe instead.
 | `gpus`        | no       | `all` (default) or `none` - whether the container gets a GPU reservation |
 | `env`         | no       | environment variables set on the container; must not set `HF_HOME`, which fllame manages itself |
 | `serve_args`  | no       | extra flags appended to `vllm serve <repo_id>` verbatim - don't include `--port` here, use the `port` field |
+| `preinstall`  | no       | shell commands run, in order, before `vllm serve` (e.g. `pip install -U transformers`) - a preinstall step some recipes need on top of the base image |
 
 ## Development
 

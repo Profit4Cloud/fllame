@@ -58,6 +58,8 @@ class RecipeStore:
             data["env"] = recipe.env
         if recipe.serve_args:
             data["serve_args"] = recipe.serve_args
+        if recipe.preinstall:
+            data["preinstall"] = recipe.preinstall
         path.write_text(yaml.safe_dump(data, sort_keys=False))
 
     def remove(self, handle: str) -> None:

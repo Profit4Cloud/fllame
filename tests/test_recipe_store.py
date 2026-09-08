@@ -97,6 +97,31 @@ def test_load_recipe_without_image_key(tmp_path: Path):
     assert store.load("demo").image is None
 
 
+def test_save_then_load_round_trips_preinstall(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(
+        handle="demo",
+        repo_id="org/demo",
+        image="img",
+        preinstall=["pip install -U transformers"],
+    )
+
+    store.save(recipe)
+    loaded = store.load("demo")
+
+    assert loaded == recipe
+
+
+def test_save_omits_empty_preinstall(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(handle="demo", repo_id="org/demo", image="img")
+
+    store.save(recipe)
+
+    text = (tmp_path / "demo.yaml").read_text()
+    assert "preinstall:" not in text
+
+
 def test_remove_deletes_file(tmp_path: Path):
     (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nimage: img\n")
     store = RecipeStore(tmp_path)

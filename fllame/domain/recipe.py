@@ -33,6 +33,14 @@ class Recipe:
     gpus: str = "all"
     env: dict[str, str] = field(default_factory=dict)
     serve_args: list[str] = field(default_factory=list)
+    # Shell commands run, in order, before `vllm serve` - e.g. the "extra
+    # install" step some recipes need on top of the base image (a newer
+    # `transformers`, a plugin package). Each entry is a whole command
+    # line, not a token list like `serve_args`: unlike a `vllm serve`
+    # flag value, a preinstall command is genuinely meant to be shell
+    # text (it may legitimately contain its own quoting, `&&`, etc.), so
+    # it's stored and later run verbatim rather than tokenized.
+    preinstall: list[str] = field(default_factory=list)
 
     @staticmethod
     def from_dict(handle: str, data: dict) -> Recipe:
@@ -66,6 +74,14 @@ class Recipe:
                 "cache mount and its in-container path itself"
             )
 
+        preinstall = list(data.get("preinstall") or [])
+        for command in preinstall:
+            if not isinstance(command, str) or not command.strip():
+                raise RecipeError(
+                    f"recipe '{handle}': 'preinstall' entries must be non-empty strings, "
+                    f"got {command!r}"
+                )
+
         return Recipe(
             handle=handle,
             repo_id=data["repo_id"],
@@ -76,4 +92,5 @@ class Recipe:
             gpus=gpus,
             env=env,
             serve_args=list(data.get("serve_args") or []),
+            preinstall=preinstall,
         )
