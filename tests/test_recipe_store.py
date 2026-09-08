@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from fllame.domain.recipe import Recipe, RecipeError
-from fllame.recipes.store import RecipeStore
+from fllame.recipes.store import RecipeStore, autofix_whitespace
 
 
 def test_list_and_load(tmp_path: Path):
@@ -23,6 +23,49 @@ def test_missing_recipe_raises(tmp_path: Path):
 
     with pytest.raises(RecipeError):
         store.load("nope")
+
+
+def test_load_malformed_yaml_raises_recipe_error_not_yaml_error(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n\tcommand: vllm serve org/demo\n"
+    )
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="invalid YAML"):
+        store.load("demo")
+
+
+def test_load_non_mapping_content_raises_recipe_error(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text("- just\n- a\n- list\n")
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="mapping"):
+        store.load("demo")
+
+
+def test_load_empty_file_raises_missing_command(tmp_path: Path):
+    (tmp_path / "demo.yaml").write_text("")
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="command"):
+        store.load("demo")
+
+
+def test_autofix_whitespace_expands_tabs_and_normalizes_line_endings():
+    text = "image: img\r\nenv:\r\n\tFOO: bar  \r\ncommand: vllm serve org/demo\r\n"
+
+    fixed = autofix_whitespace(text)
+
+    assert "\t" not in fixed
+    assert "\r" not in fixed
+    assert "  \n" not in fixed  # trailing whitespace stripped
+    assert fixed == "image: img\nenv:\n  FOO: bar\ncommand: vllm serve org/demo\n"
+
+
+def test_autofix_whitespace_is_noop_on_clean_text():
+    text = "image: img\ncommand: vllm serve org/demo\n"
+
+    assert autofix_whitespace(text) == text
 
 
 def test_missing_directory_lists_nothing(tmp_path: Path):

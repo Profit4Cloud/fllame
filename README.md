@@ -134,9 +134,14 @@ after the last `/`, lowercased and slugified, e.g.
 second recipe for a repo that already has one gets `_2`, `_3`, etc.
 rather than overwriting - useful for keeping
 more than one tuning of the same model around. `recipe edit` opens the
-YAML file directly in `$EDITOR` and re-validates on save (reporting an
-error but leaving your edit in place if it's now invalid, never silently
-reverting it); `recipe remove` deletes a recipe, asking first unless
+YAML file directly in `$EDITOR` and re-validates on save. A stray tab or
+CRLF line ending - the most common way a text editor breaks YAML - is
+fixed automatically first; anything else invalid (malformed YAML
+entirely, a missing `command`, ...) offers a choice: reopen `$EDITOR` to
+fix it, or revert to the version from before this edit (kept in memory
+for the length of the command - the recipes directory is meant to be
+git-tracked already, which is the real backup, not a `.bak` file on
+disk). `recipe remove` deletes a recipe, asking first unless
 `-y`/`--yes`.
 
 `fllame config` holds fllame's own persisted settings - today just

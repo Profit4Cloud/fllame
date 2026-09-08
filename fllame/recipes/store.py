@@ -11,6 +11,25 @@ import yaml
 from fllame.domain.recipe import Recipe, RecipeError
 
 
+def autofix_whitespace(text: str) -> str:
+    r"""A narrow cleanup pass for the most common accidental YAML
+    breakage from a text editor - CRLF line endings, tab indentation
+    (which YAML forbids outright - most often introduced when an
+    editor auto-indents a pasted block with tabs standing in for
+    spaces at the same intended depth, the case this is really for),
+    and trailing whitespace. Deliberately not a structural fix that
+    changes a key's indentation *level* to what it "should" be - that
+    would mean guessing the file's intended nesting. Full schema
+    validation (`Recipe.from_dict`) still runs after this either way,
+    so the rare case where tab-expansion happens to shift structure
+    (e.g. a stray leading tab on an otherwise unindented line) is still
+    caught rather than silently accepted - this isn't a guarantee of a
+    correct parse, just a better shot at one before giving up.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(2)
+    return "\n".join(line.rstrip() for line in text.split("\n"))
+
+
 class RecipeStore:
     def __init__(self, directory: Path):
         self.directory = directory
@@ -24,7 +43,17 @@ class RecipeStore:
         path = self.directory / f"{handle}.yaml"
         if not path.is_file():
             raise RecipeError(f"no recipe found for '{handle}' (expected {path})")
-        data = yaml.safe_load(path.read_text()) or {}
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as e:
+            raise RecipeError(f"recipe '{handle}': invalid YAML: {e}") from e
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise RecipeError(
+                f"recipe '{handle}': must be a YAML mapping (key: value pairs), "
+                f"got {type(data).__name__}"
+            )
         return Recipe.from_dict(handle, data)
 
     def load_all(self) -> list[Recipe]:

@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import click
 import typer
@@ -30,7 +31,7 @@ from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
-from fllame.recipes.store import RecipeStore
+from fllame.recipes.store import RecipeStore, autofix_whitespace
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
 # top of it - wired in explicitly since Click doesn't bind it by default.
@@ -274,22 +275,65 @@ def recipe_add(
     typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
 
 
+def _validate_after_edit(handle: str, path: Path) -> RecipeError | None:
+    """Validates HANDLE's just-edited recipe file, trying a narrow
+    whitespace autofix (see `autofix_whitespace`) once before giving up -
+    catches a stray tab/CRLF from an editor without ever guessing at the
+    file's intended structure. `None` means valid.
+    """
+    try:
+        _recipe_store().load(handle)
+        return None
+    except RecipeError as first_error:
+        raw = path.read_text()
+        fixed = autofix_whitespace(raw)
+        if fixed == raw:
+            return first_error
+
+    path.write_text(fixed)
+    try:
+        _recipe_store().load(handle)
+        return None
+    except RecipeError as second_error:
+        return second_error
+
+
 @recipe_app.command("edit")
 def recipe_edit(handle: str) -> None:
-    """Open HANDLE's recipe file in $EDITOR, then re-validate it."""
+    """Open HANDLE's recipe file in $EDITOR, then re-validate it.
+
+    A stray tab or CRLF line ending is fixed automatically before
+    anything is reported. Anything else invalid offers a choice: reopen
+    $EDITOR to fix it, or revert to the version from before this edit
+    (kept in memory for the length of this command, not written to a
+    backup file - the recipes directory is meant to be git-tracked
+    already, which is the real backup).
+    """
     path = config.recipes_dir() / f"{handle}.yaml"
     if not path.is_file():
         typer.echo(f"no recipe found for '{handle}' (expected {path})", err=True)
         raise typer.Exit(code=1)
 
+    original_text = path.read_text()
     click.edit(filename=str(path))
 
-    try:
-        _recipe_store().load(handle)
-    except RecipeError as e:
-        typer.echo(f"'{handle}' is no longer a valid recipe: {e}", err=True)
-        raise typer.Exit(code=1) from e
-    typer.echo(f"'{handle}' saved and valid.")
+    while True:
+        error = _validate_after_edit(handle, path)
+        if error is None:
+            typer.echo(f"'{handle}' saved and valid.")
+            return
+
+        typer.echo(f"'{handle}' is no longer a valid recipe: {error}", err=True)
+        if typer.confirm(
+            "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
+            default=True,
+        ):
+            click.edit(filename=str(path))
+            continue
+
+        path.write_text(original_text)
+        typer.echo(f"reverted '{handle}' to its previous version")
+        raise typer.Exit(code=1)
 
 
 @recipe_app.command("remove")

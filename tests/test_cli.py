@@ -252,9 +252,12 @@ def test_recipe_edit_revalidates_after_editing(tmp_path: Path, monkeypatch):
     assert "valid" in result.output
 
 
-def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
+def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    original = (tmp_path / "demo.yaml").read_text()
 
     def fake_edit(filename):
         Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # command now missing
@@ -262,10 +265,51 @@ def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(cli.click, "edit", fake_edit)
 
-    result = runner.invoke(app, ["recipe", "edit", "demo"])
+    result = runner.invoke(app, ["recipe", "edit", "demo"], input="n\n")
 
     assert result.exit_code == 1
     assert "no longer a valid recipe" in result.output
+    assert "reverted" in result.output
+    assert (tmp_path / "demo.yaml").read_text() == original
+
+
+def test_recipe_edit_reopens_editor_and_succeeds_when_accepted(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    calls = []
+
+    def fake_edit(filename):
+        calls.append(None)
+        if len(calls) == 1:
+            Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # invalid
+        else:
+            Path(filename).write_text("command: vllm serve org/demo\n")  # now fixed
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    assert len(calls) == 2
+
+
+def test_recipe_edit_autofixes_tab_indentation_without_prompting(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    def fake_edit(filename):
+        Path(filename).write_text(
+            "image: vllm/vllm-openai:v0.27.1\nenv:\n\tFOO: bar\ncommand: vllm serve org/demo\n"
+        )
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    assert "\t" not in (tmp_path / "demo.yaml").read_text()
 
 
 def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
