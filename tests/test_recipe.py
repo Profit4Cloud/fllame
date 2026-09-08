@@ -129,4 +129,13 @@ def test_to_dict_omits_unset_optional_fields():
     assert "env" not in data
     assert "preinstall" not in data
     assert "description" not in data
+    assert "gpus" not in data
     assert data["command"] == "vllm serve org/demo"
+
+
+def test_to_dict_includes_gpus_only_when_not_default():
+    recipe = Recipe.from_dict(
+        "demo", {"command": "vllm serve org/demo", "gpus": "none"}
+    )
+
+    assert recipe.to_dict()["gpus"] == "none"

@@ -50,7 +50,6 @@ Recipes live in `~/.config/fllame/recipes/<handle>.yaml` by default
 # ~/.config/fllame/recipes/llama-3-8b-instruct.yaml
 image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
-gpus: all
 command: vllm serve meta-llama/Meta-Llama-3-8B-Instruct --gpu-memory-utilization=0.9 --max-model-len=8192
 ```
 

@@ -139,7 +139,8 @@ class Recipe:
             data["description"] = self.description
         if self.image:
             data["image"] = self.image
-        data["gpus"] = self.gpus
+        if self.gpus != "all":
+            data["gpus"] = self.gpus
         if self.env:
             data["env"] = self.env
         if self.preinstall:
