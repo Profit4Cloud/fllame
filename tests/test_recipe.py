@@ -106,6 +106,13 @@ def test_from_dict_rejects_non_string_preinstall_entry():
 
 
 def test_to_dict_round_trips_through_from_dict():
+    """`to_dict()` canonicalizes `command` into a multi-line block (see
+    `test_to_dict_renders_command_as_multiline_block`), so it's not
+    byte-identical to whatever `command` was originally authored as -
+    re-parsing that canonical form should still be semantically
+    unchanged, which is what this checks via `to_dict()` again rather
+    than raw dataclass equality.
+    """
     recipe = Recipe.from_dict(
         "demo",
         {
@@ -117,7 +124,22 @@ def test_to_dict_round_trips_through_from_dict():
         },
     )
 
-    assert Recipe.from_dict("demo", recipe.to_dict()) == recipe
+    reloaded = Recipe.from_dict("demo", recipe.to_dict())
+
+    assert reloaded.to_dict() == recipe.to_dict()
+    assert reloaded.repo_id == recipe.repo_id
+    assert reloaded.serve_args == recipe.serve_args
+
+
+def test_to_dict_renders_command_as_multiline_block():
+    recipe = Recipe.from_dict(
+        "demo",
+        {"command": "vllm serve org/demo --tensor-parallel-size 1 --enable-auto-tool-choice"},
+    )
+
+    assert recipe.to_dict()["command"] == (
+        "vllm serve org/demo \\\n--tensor-parallel-size 1 \\\n--enable-auto-tool-choice"
+    )
 
 
 def test_to_dict_omits_unset_optional_fields():

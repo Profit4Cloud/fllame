@@ -57,9 +57,12 @@ examples/recipes/   # Sample recipe files, for reference - not loaded at runtime
 A `Recipe` (`fllame/domain/recipe.py`) is a validated, immutable record
 of how to serve one model handle: a Docker image, GPU reservation, env
 vars, a preinstall step, and - as one field, `command` - the whole
-`vllm serve <repo_id> <args...>` invocation, kept verbatim rather than
-split into `repo_id`/args/port keys so it's exactly what gets copied
-out and run by hand; `repo_id`/`serve_args`/`port` are derived
+`vllm serve <repo_id> <args...>` invocation, not split into
+`repo_id`/args/port keys - rendered (`Recipe.to_dict`/`to_yaml`, used by
+both `RecipeStore.save` and `recipe show`) as a canonical one-flag-
+per-line block (`domain/vllm_command.py`'s `render_multiline_command`)
+regardless of how it was originally authored, so it's exactly what gets
+copied out and run by hand. `repo_id`/`serve_args`/`port` are derived
 properties parsed from it on access (`fllame/domain/vllm_command.py`),
 not stored a second time. Recipes are loaded
 from plain YAML files (`fllame/recipes/store.py`) that live in the

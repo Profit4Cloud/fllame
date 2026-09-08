@@ -50,14 +50,19 @@ Recipes live in `~/.config/fllame/recipes/<handle>.yaml` by default
 # ~/.config/fllame/recipes/llama-3-8b-instruct.yaml
 image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
-command: vllm serve meta-llama/Meta-Llama-3-8B-Instruct --gpu-memory-utilization=0.9 --max-model-len=8192
+command: |-
+  vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --gpu-memory-utilization=0.9 \
+  --max-model-len=8192
 ```
 
-`command` is the whole `vllm serve <repo_id> <args...>` invocation,
-kept as one line (see "Recipe format" below) - not split into separate
-`repo_id`/`serve_args`/`port` keys, so it's exactly what `recipe show`
-prints and exactly what you'd copy out to run by hand, on a box with
-vLLM installed, with no reassembly.
+`command` is the whole `vllm serve <repo_id> <args...>` invocation -
+not split into separate `repo_id`/`serve_args`/`port` keys - rendered
+one flag per line, each ending in `\` (a plain single line when there
+are no flags at all). This is exactly what `recipe show` prints and
+exactly what you'd copy out to run by hand, on a box with vLLM
+installed, with no reassembly - the same canonical rendering every
+time regardless of how the command was originally pasted or typed.
 
 Then:
 
@@ -196,7 +201,7 @@ recipe instead.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `command`     | yes      | the whole `vllm serve <repo_id> <args...>` line, verbatim - e.g. `vllm serve org/repo --max-model-len 8192`. Kept as one line, not split into separate keys, so it's exactly what you'd copy out to run by hand. `repo_id` (downloaded via `fllame model pull`/`serve`) and the host port mapping (`--port`, defaulting to vLLM's own `8000` if the command doesn't set one) are both derived from it, not separate fields |
+| `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation - e.g. `vllm serve org/repo --max-model-len 8192`. Not split into separate keys, and rendered one flag per line (each ending in `\`) whenever there's more than one, so it's exactly what you'd copy out to run by hand. `repo_id` (downloaded via `fllame model pull`/`serve`) and the host port mapping (`--port`, defaulting to vLLM's own `8000` if the command doesn't set one) are both derived from it, not separate fields |
 | `image`       | no       | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use fllame's configured default (`fllame config`), falling back to `vllm/vllm-openai:latest` if none is configured |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |

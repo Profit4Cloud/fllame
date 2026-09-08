@@ -3,4 +3,7 @@
 # ($FLLAME_RECIPES_DIR, or ~/.config/fllame/recipes by default) to use it.
 image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
-command: vllm serve meta-llama/Meta-Llama-3-8B-Instruct --gpu-memory-utilization=0.9 --max-model-len=8192
+command: |-
+  vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --gpu-memory-utilization=0.9 \
+  --max-model-len=8192

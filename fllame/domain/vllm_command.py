@@ -78,6 +78,25 @@ def parse_vllm_serve_command(command: str) -> tuple[str, list[str]]:
     return repo_id, serve_args
 
 
+def render_multiline_command(repo_id: str, serve_args: list[str]) -> str:
+    r"""The inverse of `parse_vllm_serve_command`'s tokenization,
+    rendered as a human-editable multi-line block: `vllm serve
+    <repo_id>` on its own first line, then one flag per line (a flag's
+    own value, if it has one, stays on that same line), each ending in
+    `\` except the last - the shape recipes.vllm.ai and model cards
+    typically show a command in, and one that's easy to copy out and
+    run by hand. A single-line command (no args at all) renders as
+    just that one line, no trailing `\`.
+    """
+    lines = [f"vllm serve {repo_id}"]
+    for token in serve_args:
+        if token.startswith("--"):
+            lines.append(token)
+        else:
+            lines[-1] += f" {shlex.quote(token)}"
+    return " \\\n".join(lines)
+
+
 def extract_port(serve_args: list[str], *, default: int = 8000) -> int:
     """The `--port` value from a parsed `vllm serve` args list, falling
     back to `default` (vLLM's own default) when absent - so the

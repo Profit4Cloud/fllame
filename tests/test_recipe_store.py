@@ -96,6 +96,11 @@ def test_next_available_handle_skips_multiple_collisions(tmp_path: Path):
 
 
 def test_save_then_load_round_trips(tmp_path: Path):
+    """save() canonicalizes `command` into a multi-line block, so the
+    loaded recipe's `command` field isn't byte-identical to the one
+    Recipe(...) was constructed with here - checked via to_dict() (which
+    is idempotent under that canonicalization) rather than raw equality.
+    """
     store = RecipeStore(tmp_path / "nested")
     recipe = Recipe(
         handle="demo",
@@ -107,7 +112,9 @@ def test_save_then_load_round_trips(tmp_path: Path):
     store.save(recipe)
     loaded = store.load("demo")
 
-    assert loaded == recipe
+    assert loaded.to_dict() == recipe.to_dict()
+    assert loaded.repo_id == recipe.repo_id
+    assert loaded.serve_args == recipe.serve_args
 
 
 def test_save_omits_empty_env(tmp_path: Path):
@@ -180,6 +187,29 @@ def test_save_writes_command_last(tmp_path: Path):
 
     lines = [line for line in (tmp_path / "demo.yaml").read_text().splitlines() if line]
     assert lines[-1] == "command: vllm serve org/demo"
+
+
+def test_save_renders_multi_arg_command_as_literal_block(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo --tensor-parallel-size 1 --enable-auto-tool-choice",
+    )
+
+    store.save(recipe)
+
+    assert (tmp_path / "demo.yaml").read_text() == (
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1 \\\n"
+        "  --enable-auto-tool-choice\n"
+    )
+    # Round-trips back to the same tokens, backslashes and all.
+    assert store.load("demo").serve_args == [
+        "--tensor-parallel-size",
+        "1",
+        "--enable-auto-tool-choice",
+    ]
 
 
 def test_remove_deletes_file(tmp_path: Path):

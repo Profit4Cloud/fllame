@@ -2,14 +2,15 @@
 model" for one model handle - the thing an operator commits to git and
 reviews in a PR, not a runtime artifact.
 
-Its `command` field is stored (and shown by `recipe show`) as the whole
-`vllm serve <repo_id> <args...>` line, verbatim - not split into
-separate `repo_id`/`args` YAML keys - so it can be copied straight out
-of the recipe file and run by hand (`vllm serve ...` on a box with vLLM
-installed) with no reassembly. `repo_id`/`serve_args`/`port` are still
-available as derived properties for the rest of fllame (`model pull`,
-the compose backend, ...), parsed from `command` on access rather than
-stored a second time.
+Its `command` field holds the whole `vllm serve <repo_id> <args...>`
+invocation - not split into separate `repo_id`/`args` YAML keys - so it
+can be copied straight out of the recipe file and run by hand (`vllm
+serve ...` on a box with vLLM installed) with no reassembly. Written
+out (`to_dict`/`to_yaml`, used by both `RecipeStore.save` and `recipe
+show`) as a canonical one-flag-per-line block regardless of how it was
+originally authored. `repo_id`/`serve_args`/`port` are derived
+properties for the rest of fllame (`model pull`, the compose backend,
+...), parsed from `command` on access rather than stored a second time.
 """
 
 from __future__ import annotations
@@ -18,7 +19,12 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from fllame.domain.vllm_command import VllmCommandError, extract_port, parse_vllm_serve_command
+from fllame.domain.vllm_command import (
+    VllmCommandError,
+    extract_port,
+    parse_vllm_serve_command,
+    render_multiline_command,
+)
 
 _VALID_GPUS = ("all", "none")
 
@@ -132,7 +138,11 @@ class Recipe:
         (with `image` already resolved to fllame's configured default,
         see `cli._resolve_image`), so the file on disk and the resolved
         view share one shape: `command` last and on its own, since it's
-        the part meant to be copied out and run by hand.
+        the part meant to be copied out and run by hand. Rendered as a
+        canonical multi-line block (see `render_multiline_command`) -
+        one flag per line - regardless of how `command` happened to be
+        authored (a single line, different spacing, ...), so the same
+        recipe always looks the same on disk/in `recipe show`.
         """
         data: dict = {}
         if self.description:
@@ -145,13 +155,32 @@ class Recipe:
             data["env"] = self.env
         if self.preinstall:
             data["preinstall"] = self.preinstall
-        data["command"] = self.command
+        data["command"] = render_multiline_command(self.repo_id, self.serve_args)
         return data
 
     def to_yaml(self) -> str:
-        """`to_dict()` rendered with no line-wrap width limit: the whole
-        point of a copy-pasteable `command` is that it's one physical
-        line in the file - the default YAML dumper would otherwise fold
-        a long one mid-flag.
+        """`to_dict()` rendered with no line-wrap width limit (the
+        default YAML dumper would otherwise fold a long line mid-flag),
+        and `command` forced to YAML's literal block style (`|`) when
+        it's actually multi-line, so each `--flag` lands on its own
+        physical line rather than PyYAML's default single-quoted
+        folding (which would visually blank-line-separate them instead).
         """
-        return yaml.safe_dump(self.to_dict(), sort_keys=False, width=float("inf"))
+        data = self.to_dict()
+        if "\n" in data["command"]:
+            data["command"] = _LiteralStr(data["command"])
+        return yaml.safe_dump(data, sort_keys=False, width=float("inf"))
+
+
+class _LiteralStr(str):
+    """A marker type telling `_literal_str_representer` to dump this
+    particular string in YAML's literal block style (`|`) - forcing it
+    only for this one value, not every string in the document.
+    """
+
+
+def _literal_str_representer(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+
+
+yaml.add_representer(_LiteralStr, _literal_str_representer, Dumper=yaml.SafeDumper)
