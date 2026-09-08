@@ -7,8 +7,8 @@ from fllame.domain.recipe import Recipe
 
 def test_generate_compose_one_service_per_recipe():
     recipes = [
-        Recipe(handle="a", repo_id="org/a", image="img-a"),
-        Recipe(handle="b", repo_id="org/b", image="img-b", port=8001),
+        Recipe(handle="a", command="vllm serve org/a", image="img-a"),
+        Recipe(handle="b", command="vllm serve org/b --port 8001", image="img-b"),
     ]
 
     compose = generate_compose(recipes, backend=VllmServingBackend(), hf_cache_dir=Path("/cache"))

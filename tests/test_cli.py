@@ -13,7 +13,9 @@ runner = CliRunner()
 
 
 def _write_recipe(tmp_path: Path, handle: str = "demo") -> None:
-    (tmp_path / f"{handle}.yaml").write_text("repo_id: org/demo\nimage: vllm/vllm-openai:v0.27.1\n")
+    (tmp_path / f"{handle}.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo\n"
+    )
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> None:
@@ -255,7 +257,7 @@ def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
     _write_recipe(tmp_path)
 
     def fake_edit(filename):
-        Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # repo_id now missing
+        Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # command now missing
         return None
 
     monkeypatch.setattr(cli.click, "edit", fake_edit)
@@ -377,7 +379,7 @@ def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
 
 def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\n")
+    (tmp_path / "demo.yaml").write_text("command: vllm serve org/demo\n")
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
     result = runner.invoke(app, ["recipe", "show", "demo"])
@@ -390,7 +392,7 @@ def test_recipe_show_falls_back_to_hardcoded_image_when_nothing_configured(
     tmp_path: Path, monkeypatch
 ):
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\n")
+    (tmp_path / "demo.yaml").write_text("command: vllm serve org/demo\n")
 
     result = runner.invoke(app, ["recipe", "show", "demo"])
 

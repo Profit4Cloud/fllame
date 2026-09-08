@@ -3,7 +3,7 @@ import pytest
 from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
 
 
-def test_parses_env_and_serve_args():
+def test_parses_env_and_command():
     text = """
     export FOO=bar
     export BAZ="quoted value"
@@ -14,7 +14,7 @@ def test_parses_env_and_serve_args():
 
     assert parsed.repo_id == "org/repo"
     assert parsed.env == {"FOO": "bar", "BAZ": "quoted value"}
-    assert parsed.serve_args == ["--max-model-len", "8192", "--gpu-memory-utilization=0.9"]
+    assert parsed.command == "vllm serve org/repo --max-model-len 8192 --gpu-memory-utilization=0.9"
 
 
 def test_no_export_lines_is_fine():
@@ -79,7 +79,33 @@ def test_rejects_malformed_flag():
 
 def test_bare_value_tokens_allowed_after_a_flag():
     parsed = parse_pasted_recipe("vllm serve org/repo --port 8000")
-    assert parsed.serve_args == ["--port", "8000"]
+    assert parsed.command == "vllm serve org/repo --port 8000"
+
+
+def test_multiline_backslash_continued_command_joins_into_one_line():
+    import shlex
+
+    text = (
+        "vllm serve Inferact/Qwen3.8-27B-NVFP4 \\\n"
+        "  --tensor-parallel-size 1 \\\n"
+        "  --enable-auto-tool-choice \\\n"
+        "  --tool-call-parser qwen3_coder\n"
+    )
+
+    parsed = parse_pasted_recipe(text)
+
+    assert parsed.repo_id == "Inferact/Qwen3.8-27B-NVFP4"
+    assert "\\" not in parsed.command
+    assert shlex.split(parsed.command) == [
+        "vllm",
+        "serve",
+        "Inferact/Qwen3.8-27B-NVFP4",
+        "--tensor-parallel-size",
+        "1",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "qwen3_coder",
+    ]
 
 
 def test_parses_run_lines_as_preinstall():

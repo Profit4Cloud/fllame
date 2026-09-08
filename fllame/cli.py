@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 
 import click
 import typer
-import yaml
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from requests.exceptions import RequestException
 
@@ -190,10 +189,14 @@ def recipe_list() -> None:
 
 @recipe_app.command("show")
 def recipe_show(handle: str) -> None:
-    """Print the resolved docker-compose service for HANDLE."""
-    recipe = _load_or_exit(handle)
-    service = BACKEND.build_service(_resolve_image(recipe), hf_cache_dir=config.hf_cache_dir())
-    typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
+    """Print HANDLE's resolved recipe - the same shape as the recipe
+    file, with `image` filled in from fllame's configured default when
+    the recipe doesn't pin its own. `command` is the last line, ready to
+    copy out and run by hand (`vllm serve ...` on a box with vLLM
+    installed) without going through Docker at all.
+    """
+    recipe = _resolve_image(_load_or_exit(handle))
+    typer.echo(recipe.to_yaml().rstrip())
 
 
 @recipe_app.command("add", context_settings={**_CONTEXT_SETTINGS, "ignore_unknown_options": True})
@@ -256,11 +259,10 @@ def recipe_add(
         recipe = Recipe.from_dict(
             handle,
             {
-                "repo_id": parsed.repo_id,
+                "command": parsed.command,
                 "image": image,
                 "gpus": gpus,
                 "env": parsed.env,
-                "serve_args": parsed.serve_args,
                 "preinstall": parsed.preinstall,
             },
         )

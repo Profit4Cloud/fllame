@@ -27,7 +27,12 @@ class VllmServingBackend:
             # happens to bake in - this way behavior doesn't depend on
             # image internals we don't control.
             "entrypoint": ["vllm", "serve"],
-            "command": [recipe.repo_id, "--port", str(recipe.port), *recipe.serve_args],
+            # No explicit `--port` inserted here: recipe.port is only
+            # for the host mapping below, derived from whatever's
+            # already in serve_args (or vLLM's own default) - not
+            # re-added, or a recipe whose command already sets --port
+            # would end up with it twice.
+            "command": [recipe.repo_id, *recipe.serve_args],
             "ports": [f"{recipe.port}:{recipe.port}"],
             "environment": {"HF_HOME": _CONTAINER_HF_HOME, **recipe.env},
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],

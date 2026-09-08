@@ -55,8 +55,13 @@ examples/recipes/   # Sample recipe files, for reference - not loaded at runtime
 ## Architecture, in one paragraph
 
 A `Recipe` (`fllame/domain/recipe.py`) is a validated, immutable record
-of how to serve one model handle: HF repo id, Docker image, port, GPU
-reservation, env vars, and extra `vllm serve` flags. Recipes are loaded
+of how to serve one model handle: a Docker image, GPU reservation, env
+vars, a preinstall step, and - as one field, `command` - the whole
+`vllm serve <repo_id> <args...>` invocation, kept verbatim rather than
+split into `repo_id`/args/port keys so it's exactly what gets copied
+out and run by hand; `repo_id`/`serve_args`/`port` are derived
+properties parsed from it on access (`fllame/domain/vllm_command.py`),
+not stored a second time. Recipes are loaded
 from plain YAML files (`fllame/recipes/store.py`) that live in the
 *operator's* own directory, not inside fllame - they're meant to be
 hand-edited and git-tracked the same way a Helm `values.yaml` or an
@@ -229,8 +234,11 @@ headroom.
   straight at the checkout instead of a frozen copy, so source edits are
   picked up on the next invocation with no reinstall; verified this
   live, including that it isn't defeated by a stale `__pycache__` .pyc.
-- `Recipe` domain type (Docker image required, `gpus: all|none`, `env`
-  rejects `HF_HOME`) + YAML-directory-backed `RecipeStore`.
+- `Recipe` domain type (`command` holds the whole `vllm serve ...`
+  line, Docker image optional - falls back to `fllame config`'s
+  configured default, `gpus: all|none`, `env` rejects `HF_HOME`,
+  `preinstall` for a shell setup step before `vllm serve`) + YAML-
+  directory-backed `RecipeStore`.
 - `VllmServingBackend`, the sole `ServingBackend` implementation -
   compiles a `Recipe` into a docker-compose service definition.
 - `fllame/compose/generator.py` - compiles the whole recipe registry

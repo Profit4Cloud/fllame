@@ -48,15 +48,17 @@ Recipes live in `~/.config/fllame/recipes/<handle>.yaml` by default
 
 ```yaml
 # ~/.config/fllame/recipes/llama-3-8b-instruct.yaml
-repo_id: meta-llama/Meta-Llama-3-8B-Instruct
 image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
-port: 8000
 gpus: all
-serve_args:
-  - --gpu-memory-utilization=0.9
-  - --max-model-len=8192
+command: vllm serve meta-llama/Meta-Llama-3-8B-Instruct --gpu-memory-utilization=0.9 --max-model-len=8192
 ```
+
+`command` is the whole `vllm serve <repo_id> <args...>` invocation,
+kept as one line (see "Recipe format" below) - not split into separate
+`repo_id`/`serve_args`/`port` keys, so it's exactly what `recipe show`
+prints and exactly what you'd copy out to run by hand, on a box with
+vLLM installed, with no reassembly.
 
 Then:
 
@@ -70,7 +72,7 @@ fllame recipe add                              # paste export/vllm serve lines t
 fllame recipe add --image vllm/vllm-openai:v0.27.1 \
   vllm serve org/repo --tensor-parallel-size 1 --enable-auto-tool-choice   # or as trailing args
 fllame recipe list
-fllame recipe show llama-3-8b-instruct         # resolved compose service, as YAML
+fllame recipe show llama-3-8b-instruct         # resolved recipe (image/env/preinstall/command), as YAML
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
 fllame recipe remove llama-3-8b-instruct       # delete it (asks first, unless -y)
 fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
@@ -177,14 +179,12 @@ recipe instead.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `repo_id`     | yes      | HF repo id (or local path) - what's passed to `vllm serve` and downloaded via `fllame model pull`/`serve` |
+| `command`     | yes      | the whole `vllm serve <repo_id> <args...>` line, verbatim - e.g. `vllm serve org/repo --max-model-len 8192`. Kept as one line, not split into separate keys, so it's exactly what you'd copy out to run by hand. `repo_id` (downloaded via `fllame model pull`/`serve`) and the host port mapping (`--port`, defaulting to vLLM's own `8000` if the command doesn't set one) are both derived from it, not separate fields |
 | `image`       | no       | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use fllame's configured default (`fllame config`), falling back to `vllm/vllm-openai:latest` if none is configured |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
-| `port`        | no       | default `8000`; used for both the container's `--port` and the host port mapping |
 | `gpus`        | no       | `all` (default) or `none` - whether the container gets a GPU reservation |
 | `env`         | no       | environment variables set on the container; must not set `HF_HOME`, which fllame manages itself |
-| `serve_args`  | no       | extra flags appended to `vllm serve <repo_id>` verbatim - don't include `--port` here, use the `port` field |
 | `preinstall`  | no       | shell commands run, in order, before `vllm serve` (e.g. `pip install -U transformers`) - a preinstall step some recipes need on top of the base image |
 
 ## Development
