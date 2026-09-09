@@ -46,14 +46,14 @@ class VllmServingBackend:
     name = "vllm"
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
+        env = {"HF_HOME": _CONTAINER_HF_HOME, "HF_HUB_OFFLINE": "1", **recipe.env}
         service: dict = {
             "image": recipe.image,
             "ports": [f"{recipe.port}:{recipe.port}"],
-            "environment": {
-                "HF_HOME": _CONTAINER_HF_HOME,
-                "HF_HUB_OFFLINE": "1",
-                **recipe.env,
-            },
+            # A list of `KEY=VALUE` strings rather than a `KEY: VALUE`
+            # mapping - both are valid Compose syntax for the same
+            # thing, this is just the more familiar shell-like shape.
+            "environment": [f"{key}={value}" for key, value in env.items()],
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
             # vLLM's own multiprocessing workers (tensor-parallel, NCCL)
             # need more shared memory than Docker's tiny default

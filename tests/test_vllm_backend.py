@@ -19,11 +19,11 @@ def test_build_service_with_gpus():
     assert service["entrypoint"] == ["vllm", "serve"]
     assert service["command"] == ["org/demo", "--port", "9000", "--max-model-len", "8192"]
     assert service["ports"] == ["9000:9000"]
-    assert service["environment"] == {
-        "HF_HOME": "/root/.cache/huggingface",
-        "HF_HUB_OFFLINE": "1",
-        "FOO": "bar",
-    }
+    assert service["environment"] == [
+        "HF_HOME=/root/.cache/huggingface",
+        "HF_HUB_OFFLINE=1",
+        "FOO=bar",
+    ]
     assert service["volumes"] == ["/home/user/.cache/huggingface:/root/.cache/huggingface"]
     assert service["ipc"] == "host"
     assert service["gpus"] == "all"
