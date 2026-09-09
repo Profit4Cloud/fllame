@@ -865,7 +865,10 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
     assert command[command.index("-p") + 1] == "fllame-demo"
 
 
-def test_serve_without_preinstall_omits_build_flag(tmp_path: Path, monkeypatch):
+def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
+    """No separate build step exists at all, with or without a
+    preinstall step - preinstall runs as part of the container's own
+    startup command instead (see backends/vllm.py)."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
@@ -876,10 +879,9 @@ def test_serve_without_preinstall_omits_build_flag(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert "--build" not in captured["command"]
-    assert not (tmp_path / "state" / "recipes" / "demo" / "Dockerfile").is_file()
 
 
-def test_serve_with_preinstall_builds_and_writes_dockerfile(tmp_path: Path, monkeypatch):
+def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo.yaml").write_text(
         "image: vllm/vllm-openai:v0.27.1\n"
@@ -888,18 +890,31 @@ def test_serve_with_preinstall_builds_and_writes_dockerfile(tmp_path: Path, monk
         "command: vllm serve org/demo\n"
     )
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
-    captured = {}
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    assert "--build" in captured["command"]
-    dockerfile = tmp_path / "state" / "recipes" / "demo" / "Dockerfile"
-    assert dockerfile.is_file()
-    assert dockerfile.read_text() == (
-        "FROM vllm/vllm-openai:v0.27.1\nRUN pip install -U transformers\n"
-    )
+    compose_text = (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").read_text()
+    assert "pip install -U transformers" in compose_text
+    assert not (tmp_path / "state" / "recipes" / "demo" / "Dockerfile").exists()
+
+
+def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
+    """A Dockerfile left over from an older fllame version's
+    build-a-custom-image approach is cleaned up on the next serve."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    state_folder = tmp_path / "state" / "recipes" / "demo"
+    state_folder.mkdir(parents=True)
+    (state_folder / "Dockerfile").write_text("FROM img\n")
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert not (state_folder / "Dockerfile").exists()
 
 
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):

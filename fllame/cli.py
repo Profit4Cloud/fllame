@@ -84,10 +84,10 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe, *, offline: bool = False) -> None:
-    """Regenerates HANDLE's own self-contained compose folder
-    (`docker-compose.yml`, plus a `Dockerfile` when its preinstall step
-    needs one - removed if a stale one is left over from before
-    preinstall was dropped).
+    """Regenerates HANDLE's own self-contained compose folder - just
+    `docker-compose.yml`, nothing else to build or manage alongside it
+    (a stale `Dockerfile` from an older fllame version's preinstall
+    handling is removed if found).
 
     `offline`, when set, forces this one service to run with
     HF_HUB_OFFLINE=1 - an invocation-time concern (`fllame serve
@@ -101,12 +101,9 @@ def _write_recipe_compose(recipe: Recipe, *, offline: bool = False) -> None:
         compose["services"][resolved.handle]["environment"]["HF_HUB_OFFLINE"] = "1"
 
     directory.mkdir(parents=True, exist_ok=True)
-    dockerfile_path = directory / "Dockerfile"
-    dockerfile_content = BACKEND.render_dockerfile(resolved)
-    if dockerfile_content is not None:
-        dockerfile_path.write_text(dockerfile_content)
-    elif dockerfile_path.is_file():
-        dockerfile_path.unlink()
+    stale_dockerfile = directory / "Dockerfile"
+    if stale_dockerfile.is_file():
+        stale_dockerfile.unlink()
 
     write_compose_file(compose, directory / "docker-compose.yml")
 
@@ -424,8 +421,8 @@ def recipe_remove(
     """Delete HANDLE's recipe file and its generated compose folder.
 
     Doesn't stop a container that's still running under it - only the
-    files fllame generated (`docker-compose.yml`, any built image's
-    Dockerfile); if `fllame stop HANDLE` matters, run it first.
+    generated `docker-compose.yml`; if `fllame stop HANDLE` matters,
+    run it first.
     """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
@@ -659,9 +656,8 @@ def serve(
 
     Always downloads the model first (see `model pull`) - vLLM's own
     auto-download inside the container is never relied on. A recipe
-    with a preinstall step always builds (`--build`) before starting -
-    Docker's own layer cache makes a no-op rebuild cheap when nothing
-    changed, so this needs no bookkeeping of fllame's own.
+    with a preinstall step runs it as part of the container's own
+    startup, every time - there's no separate image build step.
     """
     recipe = _load_or_exit(handle)
     if offline:
@@ -679,12 +675,7 @@ def serve(
         raise typer.Exit(code=1) from e
 
     _write_recipe_compose(recipe, offline=offline)
-    args = ["up"]
-    if detach:
-        args.append("-d")
-    if recipe.preinstall:
-        args.append("--build")
-    args.append(handle)
+    args = ["up", "-d", handle] if detach else ["up", handle]
     raise typer.Exit(code=_run_compose(handle, *args))
 
 

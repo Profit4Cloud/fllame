@@ -7,6 +7,7 @@ vLLM's own auto-download run inside the container.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from fllame.domain.recipe import Recipe
@@ -21,30 +22,47 @@ class VllmServingBackend:
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
         service: dict = {
-            # Set explicitly rather than relying on the image's own
-            # ENTRYPOINT/CMD, whatever a given vllm/vllm-openai tag
-            # happens to bake in - this way behavior doesn't depend on
-            # image internals we don't control.
-            "entrypoint": ["vllm", "serve"],
-            # No explicit `--port` inserted here: recipe.port is only
-            # for the host mapping below, derived from whatever's
-            # already in serve_args (or vLLM's own default) - not
-            # re-added, or a recipe whose command already sets --port
-            # would end up with it twice.
-            "command": [recipe.repo_id, *recipe.serve_args],
+            "image": recipe.image,
             "ports": [f"{recipe.port}:{recipe.port}"],
             "environment": {"HF_HOME": _CONTAINER_HF_HOME, **recipe.env},
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
         }
+
+        # No explicit `--port` inserted here: recipe.port is only for
+        # the host mapping above, derived from whatever's already in
+        # serve_args (or vLLM's own default) - not re-added, or a
+        # recipe whose command already sets --port would end up with
+        # it twice.
+        vllm_command = shlex.join(["vllm", "serve", recipe.repo_id, *recipe.serve_args])
+
         if recipe.preinstall:
-            # Built from the Dockerfile written alongside this compose
-            # file (see `render_dockerfile`) - `image` just names the
-            # tag compose gives the result, so `docker images`/`ps`
-            # show something meaningful instead of an anonymous hash.
-            service["build"] = {"context": "."}
-            service["image"] = f"fllame-{recipe.handle}:latest"
+            # No custom image/Dockerfile: the preinstall step runs as
+            # part of the container's own command, through a shell,
+            # every time it starts (there's no build step to cache it
+            # in) - the whole point of this recipe field being a
+            # compose-only concept: one self-contained
+            # docker-compose.yml per recipe, nothing else to build or
+            # manage alongside it. `vllm_command` above is already
+            # shell-escaped (`shlex.join`), so a repo_id/flag value
+            # containing shell syntax stays a literal argument rather
+            # than being interpreted as more shell; `recipe.preinstall`
+            # entries are joined in verbatim since they're genuinely
+            # meant to be shell text (see `Recipe.preinstall`'s
+            # docstring). `exec` on the final command replaces the
+            # shell process with vLLM's own, so it becomes PID 1 and
+            # receives `docker stop`'s SIGTERM directly instead of it
+            # being swallowed by an intermediate shell.
+            segments = [*recipe.preinstall, f"exec {vllm_command}"]
+            service["entrypoint"] = ["sh", "-c"]
+            service["command"] = [" && ".join(segments)]
         else:
-            service["image"] = recipe.image
+            # Set explicitly rather than relying on the image's own
+            # ENTRYPOINT/CMD, whatever a given vllm/vllm-openai tag
+            # happens to bake in - this way behavior doesn't depend on
+            # image internals we don't control.
+            service["entrypoint"] = ["vllm", "serve"]
+            service["command"] = [recipe.repo_id, *recipe.serve_args]
+
         if recipe.gpus == "all":
             service["deploy"] = {
                 "resources": {
@@ -54,10 +72,3 @@ class VllmServingBackend:
                 }
             }
         return service
-
-    def render_dockerfile(self, recipe: Recipe) -> str | None:
-        if not recipe.preinstall:
-            return None
-        lines = [f"FROM {recipe.image}"]
-        lines.extend(f"RUN {step}" for step in recipe.preinstall)
-        return "\n".join(lines) + "\n"

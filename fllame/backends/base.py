@@ -16,11 +16,7 @@ class ServingBackend(Protocol):
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
         """A docker-compose service definition (the value under
-        `services.<handle>`) for running this recipe."""
-        ...
-
-    def render_dockerfile(self, recipe: Recipe) -> str | None:
-        """Dockerfile content to build a custom image for this recipe,
-        or `None` if it can run from its `image` directly - a recipe
-        with no preinstall step needs no Dockerfile at all."""
+        `services.<handle>`) for running this recipe - a fully
+        self-contained `docker-compose.yml`, with no separate
+        Dockerfile/build step to go alongside it."""
         ...
