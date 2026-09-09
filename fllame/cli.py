@@ -121,7 +121,7 @@ def _require_model_cached(recipe: Recipe) -> None:
         return
     typer.echo(
         f"'{recipe.repo_id}' is not fully cached locally - run "
-        f"`fllame model pull {recipe.handle}` first.",
+        f"`fllame model pull {recipe.repo_id}` first.",
         err=True,
     )
     raise typer.Exit(code=1)
@@ -402,7 +402,7 @@ def recipe_build(handle: str) -> None:
     """Regenerate HANDLE's `compose.yaml`.
 
     Fails with a clear error if the model isn't fully downloaded yet -
-    run `fllame model pull HANDLE` (or `recipe add --pull`/`--build`)
+    run `fllame model pull <repo_id>` (or `recipe add --pull`/`--build`)
     first.
     """
     _build_or_exit(_load_or_exit(handle))
@@ -539,20 +539,28 @@ def hardware_scan() -> None:
 
 
 @model_app.command("pull")
-def model_pull(handle: str) -> None:
-    """Download HANDLE's model into the Hugging Face cache."""
-    recipe = _load_or_exit(handle)
-    typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
-    path = pull_model(recipe.repo_id)
+def model_pull(repo_id: str) -> None:
+    """Download REPO_ID into the Hugging Face cache.
+
+    Takes a Hugging Face repo_id directly (e.g. `org/repo`), not a
+    recipe handle - `model` commands never depend on recipes at all,
+    since a recipe is a higher-level abstraction built on top of a
+    model, not the other way around (see CLAUDE.md, "Layering"). To
+    pull the model a specific recipe needs, either `recipe show
+    HANDLE` first to see its repo_id, or use `recipe add --pull`/
+    `recipe build HANDLE` instead.
+    """
+    typer.echo(f"pulling '{repo_id}' into {config.hf_cache_dir()}")
+    path = pull_model(repo_id)
     typer.echo(f"done: {path}")
 
 
 @model_app.command("update")
 def model_update(
-    handle: str | None = typer.Argument(
+    repo_id: str | None = typer.Argument(
         None,
-        help="Check only HANDLE's recipe's model; omit to check every model "
-        "currently in the local cache.",
+        help="Check only REPO_ID; omit to check every model currently in "
+        "the local cache.",
     ),
     apply: bool = typer.Option(
         False,
@@ -570,9 +578,12 @@ def model_update(
     Check-only by default; `--apply` re-pulls anything stale, a no-op
     download-wise if nothing has actually changed, since it goes
     through the same `pull_model` `model pull` already uses.
+
+    Takes a repo_id directly, not a recipe handle - same reasoning as
+    `model pull` above.
     """
-    if handle is not None:
-        repo_ids = [_load_or_exit(handle).repo_id]
+    if repo_id is not None:
+        repo_ids = [repo_id]
     else:
         repo_ids = [repo.repo_id for repo in list_cached_models()]
 
@@ -812,7 +823,7 @@ def serve(
     recipe's).
 
     Never touches the network, full stop: the model must already be
-    fully present in the HF cache - `fllame model pull HANDLE`, or
+    fully present in the HF cache - `fllame model pull <repo_id>`, or
     `recipe add HANDLE --pull` when the recipe was created, does that
     separately - and this only ever verifies that via a filesystem
     check, failing with a clear error if it isn't there rather than

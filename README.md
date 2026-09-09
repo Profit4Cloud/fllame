@@ -82,12 +82,12 @@ fllame recipe list
 fllame recipe show llama-3-8b-instruct         # resolved recipe (image/env/preinstall/command), as YAML
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
 fllame recipe remove llama-3-8b-instruct       # delete it (asks first, unless -y)
-fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
+fllame model pull meta-llama/Meta-Llama-3-8B-Instruct  # download into the HF cache, standalone
 fllame recipe build llama-3-8b-instruct        # write its compose.yaml - fails if not pulled yet
 fllame recipe add --pull --build ...           # or do both right after creating the recipe
 fllame model list                              # what's actually cached locally
 fllame model update                            # check every cached model against the Hub for updates
-fllame model update llama-3-8b-instruct --apply    # or just one, and actually re-pull it if stale
+fllame model update meta-llama/Meta-Llama-3-8B-Instruct --apply   # or just one, re-pulling it if stale
 fllame serve llama-3-8b-instruct               # never touches the network - fails if not pulled yet
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
 fllame serve llama-3-8b-instruct --yes         # skip the VRAM sanity check's confirmation prompt
@@ -211,9 +211,10 @@ to reach the network. `serve` checks that the model is already fully
 present in Hugging Face's own cache with a pure filesystem scan (no
 network call of any kind, not even a "local files only" one) and fails
 immediately with a clear error - telling you to run
-`fllame model pull HANDLE` first - if it isn't, rather than falling back
-to a download of its own. Downloading is exclusively `model pull`'s job
-(or `recipe add HANDLE --pull` right when the recipe is created) -
+`fllame model pull <repo_id>` first - if it isn't, rather than falling
+back to a download of its own. Downloading is exclusively `model
+pull`'s job (or `recipe add HANDLE --pull` right when the recipe is
+created) -
 `serve` only ever confirms, never fetches. That same cache directory
 (wherever `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into
 the container, so vLLM's own auto-download inside the container is
@@ -242,17 +243,20 @@ container unconditionally, so vLLM itself never attempts a network call
 either - the model is always already fully downloaded by the time it
 starts. Together, this is what makes "pull while online, `serve` later
 with no network at all" a real guarantee rather than a hope: run
-`fllame model pull <handle>` (or `recipe add --pull`) while online,
+`fllame model pull <repo_id>` (or `recipe add --pull`) while online,
 then `fllame serve <handle>` later on a genuinely offline machine.
 
 Because `serve` never touches the network, it also has no way to
 notice a cached model has been updated upstream - `fllame model
-update` is the other side of that trade-off. With no argument it
-checks every model currently in the cache against the Hub; given a
-handle, just that recipe's model. Check-only by default (reports
-up to date/stale, downloads nothing); `--apply` re-downloads anything
-stale through the same path `model pull` uses, so a model whose commit
-hash hasn't actually changed costs no transfer even then.
+update` is the other side of that trade-off. Like `model pull`, it
+takes a repo_id directly, never a recipe handle - neither command has
+any notion that recipes exist at all, since a recipe is a higher-level
+concept built on top of a model, not the other way around. With no
+argument it checks every model currently in the cache against the Hub;
+given a repo_id, just that one. Check-only by default (reports up to
+date/stale, downloads nothing); `--apply` re-downloads anything stale
+through the same path `model pull` uses, so a model whose commit hash
+hasn't actually changed costs no transfer even then.
 
 ### Where compose.yaml lives
 

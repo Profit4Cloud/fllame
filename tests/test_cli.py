@@ -670,12 +670,13 @@ def test_hardware_scan_no_gpu(monkeypatch):
     assert "none detected" in result.stdout
 
 
-def test_model_pull_downloads_recipes_model(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
+def test_model_pull_downloads_given_repo_id(monkeypatch):
+    """`model pull` takes a repo_id directly, not a recipe handle -
+    `model` commands never depend on recipes (see CLAUDE.md,
+    "Layering")."""
     monkeypatch.setattr(cli, "pull_model", lambda repo_id: f"/cache/{repo_id}")
 
-    result = runner.invoke(app, ["model", "pull", "demo"])
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
 
     assert result.exit_code == 0
     assert "org/demo" in result.stdout
@@ -740,9 +741,9 @@ def test_model_update_reports_up_to_date_and_stale(monkeypatch):
     assert "stale" in result.stdout
 
 
-def test_model_update_checks_only_given_handles_recipe(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
+def test_model_update_checks_only_given_repo_id(monkeypatch):
+    """`model update REPO_ID` takes a repo_id directly, not a recipe
+    handle - same layering reasoning as `model pull`."""
     seen = []
 
     def fake_check(repo_id):
@@ -751,7 +752,7 @@ def test_model_update_checks_only_given_handles_recipe(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(cli, "check_for_update", fake_check)
 
-    result = runner.invoke(app, ["model", "update", "demo"])
+    result = runner.invoke(app, ["model", "update", "org/demo"])
 
     assert result.exit_code == 0
     assert seen == ["org/demo"]
@@ -783,16 +784,14 @@ def test_model_update_apply_repulls_stale_models_only(monkeypatch):
     assert "updated" in result.stdout
 
 
-def test_model_update_reports_not_cached_for_never_pulled_handle(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
+def test_model_update_reports_not_cached_for_never_pulled_repo(monkeypatch):
     monkeypatch.setattr(
         cli,
         "check_for_update",
         lambda repo_id: UpdateStatus(repo_id=repo_id, cached_revision=None, latest_revision="a"),
     )
 
-    result = runner.invoke(app, ["model", "update", "demo"])
+    result = runner.invoke(app, ["model", "update", "org/never-pulled"])
 
     assert result.exit_code == 0
     assert "not cached" in result.stdout
