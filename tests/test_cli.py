@@ -942,20 +942,35 @@ def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkey
     assert called == []
 
 
-def test_serve_offline_passes_offline_to_pull_and_sets_container_env(tmp_path: Path, monkeypatch):
+def test_serve_offline_passes_offline_to_pull_step(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     pulled = []
     monkeypatch.setattr(
         cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
     )
-    captured = {}
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo", "--offline"])
 
     assert result.exit_code == 0
     assert pulled == [("org/demo", True)]
+
+
+def test_serve_container_is_always_offline_regardless_of_flag(tmp_path: Path, monkeypatch):
+    """HF_HUB_OFFLINE=1 is unconditional (VllmServingBackend bakes it
+    into every generated service) - the model is always already fully
+    downloaded by the time the container runs, so vLLM has no
+    legitimate need to reach the Hub itself. --offline only controls
+    whether the pull step itself is allowed to touch the network."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
     compose_text = (config.recipe_state_dir("demo") / "docker-compose.yml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
 

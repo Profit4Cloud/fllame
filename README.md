@@ -206,13 +206,15 @@ the container is never relied on. That same cache directory (wherever
 `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into the container,
 so the download only ever happens once, on the host.
 
-For a fully offline demo: run `fllame model pull <handle>` while online,
-then `fllame serve <handle> --offline` later with no network at all.
-`--offline` forces `local_files_only` on the download check (fails fast
-with a clear error if the model isn't fully cached, rather than hoping a
-plain download call happens to fall back to cache quickly on a
-genuinely offline machine) and sets `HF_HUB_OFFLINE=1` on the container
-itself, so vLLM doesn't attempt any network call either.
+Every generated compose file sets `HF_HUB_OFFLINE=1` on the container
+unconditionally, so vLLM itself never attempts a network call - the
+model is always already fully downloaded by the time it starts. For a
+fully offline demo: run `fllame model pull <handle>` while online, then
+`fllame serve <handle> --offline` later with no network at all.
+`--offline` only affects fllame's own download step - it forces
+`local_files_only` on the cache check (fails fast with a clear error if
+the model isn't fully cached, rather than hoping a plain download call
+happens to fall back to cache quickly on a genuinely offline machine).
 
 Each recipe gets its own self-contained compose folder,
 `$FLLAME_STATE_DIR/recipes/<handle>/` (default
@@ -224,12 +226,15 @@ recipe's. `fllame serve`/`status`/`stop` regenerate HANDLE's folder
 before running a `docker compose` command against it (`status` loops
 over every recipe, one `docker compose ps` each, under a
 `== <handle> ==` header). This file is a generated artifact fllame
-fully owns and overwrites - don't hand-edit it, edit the recipe
-instead - and being self-contained, the folder can also be copied
-elsewhere and driven with plain `docker compose up -d`, no fllame
-involved. `recipe remove` deletes a recipe's folder along with its YAML
-file (not a container already running under it - `fllame stop` that
-first if it matters).
+fully owns and overwrites on every one of those commands - normal
+changes belong in the recipe, not the compose file, since they'd
+otherwise be silently discarded on the next regeneration. See
+"Advanced" below for the cases where hand-editing it is the right
+move. Being self-contained, the folder can also be copied elsewhere and
+driven with plain `docker compose up -d`, no fllame involved. `recipe
+remove` deletes a recipe's folder along with its YAML file (not a
+container already running under it - `fllame stop` that first if it
+matters).
 
 A recipe's `preinstall` step runs as part of the container's own
 startup command, every time it starts, through a shell (`sh -c
@@ -249,8 +254,21 @@ that's the cost of keeping this compose-only.
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
 | `gpus`        | no       | `all` (default) or `none` - whether the container gets a GPU reservation |
-| `env`         | no       | environment variables set on the container; must not set `HF_HOME`, which fllame manages itself |
+| `env`         | no       | environment variables set on the container; must not set `HF_HOME` or `HF_HUB_OFFLINE`, which fllame manages itself |
 | `preinstall`  | no       | shell commands run, in order, before `vllm serve` (e.g. `pip install -U transformers`) - a preinstall step some recipes need on top of the base image |
+
+## Advanced
+
+`HF_HUB_OFFLINE=1` is unconditional on every generated compose file
+because letting vLLM's own download/update path touch the network is
+unreliable - it can fail silently and leave you waiting indefinitely
+instead of erroring, whereas fllame's own `model pull` step already
+guarantees the model is fully cached before the container ever starts.
+If a specific model genuinely needs network access (e.g. a linked
+tokenizer or base-model repo), the way to work around this is to edit
+that recipe's generated `docker-compose.yml` directly - fllame's job
+ends at producing a working compose file, and an engineer is always
+free to take it from there.
 
 ## Development
 

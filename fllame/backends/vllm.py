@@ -3,6 +3,17 @@
 in the mounted HF cache (fllame's CLI guarantees this before ever
 generating a service - see `fllame/models/puller.py`) rather than letting
 vLLM's own auto-download run inside the container.
+
+Every generated service also gets `HF_HUB_OFFLINE=1` unconditionally,
+for the same reason: the model is always already fully downloaded by
+the time this runs, so vLLM has no legitimate need to reach the Hub
+itself, and letting it try anyway trades a guaranteed-fast local
+resolution for a network call that can fail slowly or silently. Not a
+recipe/`env` concern - `Recipe.from_dict` rejects a recipe that tries
+to set `HF_HUB_OFFLINE` itself, the same way it already rejects
+`HF_HOME` - if a specific model genuinely needs the network for
+something beyond its own repo_id (e.g. a linked tokenizer/base-model
+repo), that's a hand-edit-the-generated-compose-file situation.
 """
 
 from __future__ import annotations
@@ -24,7 +35,11 @@ class VllmServingBackend:
         service: dict = {
             "image": recipe.image,
             "ports": [f"{recipe.port}:{recipe.port}"],
-            "environment": {"HF_HOME": _CONTAINER_HF_HOME, **recipe.env},
+            "environment": {
+                "HF_HOME": _CONTAINER_HF_HOME,
+                "HF_HUB_OFFLINE": "1",
+                **recipe.env,
+            },
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
         }
 

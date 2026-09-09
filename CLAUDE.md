@@ -150,15 +150,25 @@ host cache directory is bind-mounted into the container.
 `fllame/models/cache.py` (`huggingface_hub.scan_cache_dir`) is the
 read-only counterpart, backing `fllame model list`.
 
-`serve --offline` forces the download step's `local_files_only=True`
-(failing fast with a clear error if the model isn't fully cached, rather
-than a plain download call's network-then-fallback-to-cache behavior,
-which isn't fast or fully deterministic on a genuinely offline machine)
-and sets `HF_HUB_OFFLINE=1` on that one generated service's environment
-- an invocation-time concern applied in `cli.py` when it (re)writes the
-compose file, not a property threaded through `Recipe`/`ServingBackend`.
-This is what makes "pull while online, `serve --offline` later with no
-network at all" a real guarantee rather than a hope.
+Every generated service also gets `HF_HUB_OFFLINE=1` unconditionally
+(`VllmServingBackend.build_service`, not an invocation-time flag) - the
+model is always already fully downloaded by the time the container
+runs, so vLLM has no legitimate need to reach the Hub itself, and
+letting it try is what fails silently and hangs rather than erroring.
+`Recipe.from_dict` rejects a recipe that tries to set `HF_HUB_OFFLINE`
+in `env` itself, the same way it already rejects `HF_HOME` - if a
+specific model genuinely needs the network for something beyond its
+own repo_id (e.g. a linked tokenizer/base-model repo), that's a
+hand-edit-the-generated-compose-file situation (see the README's
+"Advanced" section).
+`serve --offline` is a separate, narrower concern: it forces the
+download step's `local_files_only=True` (failing fast with a clear
+error if the model isn't fully cached, rather than a plain download
+call's network-then-fallback-to-cache behavior, which isn't fast or
+fully deterministic on a genuinely offline machine). This is what makes
+"pull while online, `serve --offline` later with no network at all" a
+real guarantee rather than a hope - `HF_HUB_OFFLINE=1` on the container
+guarantees the other half, that vLLM itself never tries.
 
 `HardwareProfile` (`fllame/domain/hardware.py`) is a fourth, distinct
 kind of data: neither hand-edited config nor container state, just the
@@ -244,9 +254,10 @@ headroom.
   it into the recipe file. The intended design is for `fllame serve` to
   compute a safe value from `scan_hardware()` at launch time and add it
   to the generated compose service's command, the same invocation-time
-  pattern `--offline` already uses for `HF_HUB_OFFLINE` in `cli.py` -
-  not persisted, recomputed per machine. Until this exists, a recipe
-  that omits `--gpu-memory-utilization` gets whatever vLLM's own default
+  pattern `serve --offline` already uses for the download step's
+  `local_files_only` in `cli.py` - not persisted, recomputed per
+  machine. Until this exists, a recipe that omits
+  `--gpu-memory-utilization` gets whatever vLLM's own default
   is; one that sets it explicitly (e.g. from a paste that already had
   it) is used as-is.
 - **Any multi-user or remote-access concern** (auth, RBAC, a server

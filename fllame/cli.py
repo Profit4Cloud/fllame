@@ -83,22 +83,17 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(recipe: Recipe, *, offline: bool = False) -> None:
+def _write_recipe_compose(recipe: Recipe) -> None:
     """Regenerates HANDLE's own self-contained compose folder - just
     `docker-compose.yml`, nothing else to build or manage alongside it
     (a stale `Dockerfile` from an older fllame version's preinstall
-    handling is removed if found).
-
-    `offline`, when set, forces this one service to run with
-    HF_HUB_OFFLINE=1 - an invocation-time concern (`fllame serve
-    --offline`), not a property of the recipe itself, so it's applied
-    here rather than threaded through `Recipe`/`ServingBackend`.
+    handling is removed if found). Its `HF_HUB_OFFLINE=1` is baked in
+    unconditionally by `VllmServingBackend` - not something this
+    invocation controls.
     """
     resolved = _resolve_image(recipe)
     directory = config.recipe_state_dir(resolved.handle)
     compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
-    if offline:
-        compose["services"][resolved.handle]["environment"]["HF_HUB_OFFLINE"] = "1"
 
     directory.mkdir(parents=True, exist_ok=True)
     stale_dockerfile = directory / "Dockerfile"
@@ -697,8 +692,10 @@ def serve(
     offline: bool = typer.Option(
         False,
         "--offline",
-        help="Never touch the network - fail if the model isn't already fully cached "
-        "(pull it first with `fllame model pull`).",
+        help="Never touch the network for the download step - fail if the model "
+        "isn't already fully cached (pull it first with `fllame model pull`). The "
+        "container itself never touches the network either way - see 'Advanced' "
+        "in the README.",
     ),
 ) -> None:
     """Launch the recipe for HANDLE as a Docker container via `docker
@@ -726,7 +723,7 @@ def serve(
         )
         raise typer.Exit(code=1) from e
 
-    _write_recipe_compose(recipe, offline=offline)
+    _write_recipe_compose(recipe)
     args = ["up", "-d", handle] if detach else ["up", handle]
     raise typer.Exit(code=_run_compose(handle, *args))
 

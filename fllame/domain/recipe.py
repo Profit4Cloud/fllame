@@ -113,6 +113,12 @@ class Recipe:
                 f"recipe '{handle}': 'env' must not set HF_HOME - fllame manages the HF "
                 "cache mount and its in-container path itself"
             )
+        if "HF_HUB_OFFLINE" in env:
+            raise RecipeError(
+                f"recipe '{handle}': 'env' must not set HF_HUB_OFFLINE - fllame always "
+                "sets it itself; edit the generated compose file directly if a specific "
+                "model genuinely needs network access"
+            )
 
         preinstall = list(data.get("preinstall") or [])
         for step in preinstall:
