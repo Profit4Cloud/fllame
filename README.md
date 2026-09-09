@@ -208,7 +208,13 @@ first (via `huggingface_hub.snapshot_download`, a no-op if it's already
 there) before starting the container - vLLM's own auto-download inside
 the container is never relied on. That same cache directory (wherever
 `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into the container,
-so the download only ever happens once, on the host.
+so the download only ever happens once, on the host. When that
+directory sits under the current user's home (the default,
+out-of-the-box location), the bind mount's host side is written as
+`${HOME}/...` rather than a literal absolute path, so `compose.yaml`
+stays correct when copied to a different machine or run under a
+different account - Docker Compose interpolates `${HOME}` itself from
+whatever shell environment `docker compose` runs in.
 
 Every generated compose file sets `HF_HUB_OFFLINE=1` on the container
 unconditionally, so vLLM itself never attempts a network call - the

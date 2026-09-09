@@ -4,7 +4,8 @@ from fllame.backends.vllm import VllmServingBackend
 from fllame.domain.recipe import Recipe
 
 
-def test_build_service_with_gpus():
+def test_build_service_with_gpus(monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: Path("/nonexistent-home"))
     backend = VllmServingBackend()
     recipe = Recipe(
         handle="demo",
@@ -27,6 +28,49 @@ def test_build_service_with_gpus():
     assert service["volumes"] == ["/home/user/.cache/huggingface:/root/.cache/huggingface"]
     assert service["ipc"] == "host"
     assert service["gpus"] == "all"
+
+
+def test_build_service_volume_uses_home_variable_when_cache_is_under_home(monkeypatch):
+    """The host side of the HF cache bind mount is written as
+    `${HOME}/...` rather than a literal absolute path when it sits
+    under the current user's home directory - the default,
+    out-of-the-box location - so the generated compose.yaml stays
+    correct after being copied to a different machine or account,
+    rather than baking in the one home directory it was generated
+    under."""
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/alice"))
+    backend = VllmServingBackend()
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    service = backend.build_service(
+        recipe, hf_cache_dir=Path("/home/alice/.cache/huggingface/hub")
+    )
+
+    assert service["volumes"] == ["${HOME}/.cache/huggingface/hub:/root/.cache/huggingface"]
+
+
+def test_build_service_volume_uses_bare_home_variable_when_cache_is_home_itself(monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/alice"))
+    backend = VllmServingBackend()
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    service = backend.build_service(recipe, hf_cache_dir=Path("/home/alice"))
+
+    assert service["volumes"] == ["${HOME}:/root/.cache/huggingface"]
+
+
+def test_build_service_volume_falls_back_to_literal_path_outside_home(monkeypatch):
+    """A custom HF_HOME/HF_HUB_CACHE pointed somewhere other than the
+    home directory (a separate data volume, a network share) has no
+    portable `${HOME}`-relative form - the literal path is the correct
+    fallback."""
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/alice"))
+    backend = VllmServingBackend()
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    service = backend.build_service(recipe, hf_cache_dir=Path("/mnt/models/hf-cache"))
+
+    assert service["volumes"] == ["/mnt/models/hf-cache:/root/.cache/huggingface"]
 
 
 def test_build_service_command_has_no_duplicate_port():

@@ -28,6 +28,15 @@ host, the Compose Specification's own shorthand for what `docker run
 swapping `ipc: host` for an explicit `shm_size:` - is again a
 hand-edit-the-generated-compose-file situation; see the README's
 "Advanced" section.
+
+The HF cache bind mount's host side is written as `${HOME}/...` rather
+than a literal absolute path whenever `hf_cache_dir` sits under the
+current user's home directory (the default, out-of-the-box location) -
+see `_host_volume_source`. Docker Compose interpolates `${HOME}` itself,
+from whatever shell environment `docker compose` runs in, so the
+generated `compose.yaml` stays correct after being copied to a
+different machine or run under a different account, rather than baking
+in the one user's home directory it happened to be generated under.
 """
 
 from __future__ import annotations
@@ -42,6 +51,24 @@ from fllame.domain.recipe import Recipe
 _CONTAINER_HF_HOME = "/root/.cache/huggingface"
 
 
+def _host_volume_source(hf_cache_dir: Path) -> str:
+    """The host side of the HF cache bind mount. Written as `${HOME}/...`
+    when `hf_cache_dir` sits under the current user's home directory -
+    the default, out-of-the-box location, since HF_HOME/HF_HUB_CACHE
+    fall back to it - rather than as a literal absolute path, so the
+    same generated compose.yaml stays correct after being copied
+    elsewhere or run by a different account (see the module docstring).
+    Falls back to the literal path when the cache lives somewhere
+    `${HOME}` can't express - a custom HF_HOME/HF_HUB_CACHE pointed
+    outside the home directory entirely.
+    """
+    try:
+        relative = hf_cache_dir.relative_to(Path.home())
+    except ValueError:
+        return str(hf_cache_dir)
+    return "${HOME}" if str(relative) == "." else f"${{HOME}}/{relative.as_posix()}"
+
+
 class VllmServingBackend:
     name = "vllm"
 
@@ -54,7 +81,7 @@ class VllmServingBackend:
             # mapping - both are valid Compose syntax for the same
             # thing, this is just the more familiar shell-like shape.
             "environment": [f"{key}={value}" for key, value in env.items()],
-            "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
+            "volumes": [f"{_host_volume_source(hf_cache_dir)}:{_CONTAINER_HF_HOME}"],
             # vLLM's own multiprocessing workers (tensor-parallel, NCCL)
             # need more shared memory than Docker's tiny default
             # `/dev/shm` - see the module docstring.

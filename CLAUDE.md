@@ -152,7 +152,17 @@ remove` deletes the whole handle folder - both `recipe.yaml` and
 `fllame/models/puller.py` (`huggingface_hub.snapshot_download`) to
 guarantee the model is fully present in HF's own cache - vLLM's own
 auto-download inside the container is never relied on - and that same
-host cache directory is bind-mounted into the container.
+host cache directory is bind-mounted into the container. The bind
+mount's host side (`VllmServingBackend`'s `_host_volume_source`) is
+written as `${HOME}/...` rather than a literal absolute path whenever
+that cache directory sits under the current user's home (the default
+`HF_HOME`/`HF_HUB_CACHE` location), falling back to a literal path only
+when it doesn't (a custom cache location outside the home directory
+entirely, which has no portable `${HOME}`-relative form) - Docker
+Compose interpolates `${HOME}` itself at `docker compose` invocation
+time, so the generated `compose.yaml` stays correct after being copied
+to a different machine or run under a different account, rather than
+baking in the one home directory it happened to be generated under.
 `fllame/models/cache.py` (`huggingface_hub.scan_cache_dir`) is the
 read-only counterpart, backing `fllame model list`.
 
@@ -370,4 +380,14 @@ headroom.
   old `deploy.resources.reservations.devices` block with the Compose
   Specification's simpler shorthand) and `ipc: "host"` (vLLM's own
   multiprocessing workers need more shared memory than Docker's tiny
-  default `/dev/shm`).
+  default `/dev/shm`). `environment` renders as a `KEY=VALUE` list
+  rather than a `KEY: VALUE` mapping (both are equivalent Compose
+  syntax; the list form is the more familiar shell-like shape).
+- The HF cache bind mount's host side is written as `${HOME}/...`
+  rather than a literal absolute path whenever it sits under the
+  current user's home directory (`VllmServingBackend`'s
+  `_host_volume_source`), falling back to a literal path only when it
+  doesn't - Docker Compose interpolates `${HOME}` itself, so a
+  generated `compose.yaml` stays correct after being copied to a
+  different machine or run under a different account, rather than
+  baking in the one home directory it was generated under.
