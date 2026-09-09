@@ -682,6 +682,24 @@ def test_model_pull_downloads_given_repo_id(monkeypatch):
     assert "org/demo" in result.stdout
 
 
+def test_model_pull_hub_error_gives_friendly_message_not_traceback(monkeypatch):
+    """A transient Hub failure mid-download (rate limiting, a connection
+    blip) must never surface as a raw traceback - see CLAUDE.md/git
+    history for the real-world case this guards against."""
+
+    def raise_error(repo_id):
+        raise HfHubHTTPError("429 Client Error: Too Many Requests")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
+
+    assert result.exit_code == 1
+    assert "429 Client Error" in result.output
+    assert "resume rather than start over" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_model_list_empty(monkeypatch):
     monkeypatch.setattr(cli, "list_cached_models", lambda: [])
 
@@ -782,6 +800,41 @@ def test_model_update_apply_repulls_stale_models_only(monkeypatch):
     assert result.exit_code == 0
     assert pulled == ["org/stale"]
     assert "updated" in result.stdout
+
+
+def test_model_update_apply_reports_interrupted_download_and_continues(monkeypatch):
+    """A stale repo whose re-pull hits a transient Hub failure gets its
+    own row rather than crashing the whole table - the remaining repos'
+    statuses still get reported."""
+
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/broken"), _FakeRepo("org/fresh")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/broken"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    def fake_pull(repo_id):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "pull_model", fake_pull)
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert "org/broken" in result.stdout
+    assert "download interrupted" in result.stdout
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
 
 
 def test_model_update_reports_not_cached_for_never_pulled_repo(monkeypatch):
@@ -1249,6 +1302,28 @@ def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert pulled == [("org/demo", False)]
+
+
+def test_recipe_add_pull_hub_error_gives_friendly_message(tmp_path: Path, monkeypatch):
+    """A transient Hub failure during `recipe add --pull`'s download
+    must not crash with a raw traceback - same fix as `model pull`."""
+    _isolate(tmp_path, monkeypatch)
+
+    def raise_error(repo_id, offline=False):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "resume rather than start over" in result.output
+    # The recipe itself is still saved even though the pull step failed.
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
 
 
 def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, monkeypatch):

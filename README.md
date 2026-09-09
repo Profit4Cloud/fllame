@@ -258,6 +258,13 @@ date/stale, downloads nothing); `--apply` re-downloads anything stale
 through the same path `model pull` uses, so a model whose commit hash
 hasn't actually changed costs no transfer even then.
 
+A large download can hit a routine, transient Hub error partway through
+(rate limiting, a dropped connection) - `model pull`, `model update
+--apply`, and `recipe add --pull` all catch this and report a friendly
+message rather than a raw traceback, noting that already-downloaded
+files stay cached, so re-running the same command resumes rather than
+starting over.
+
 ### Where compose.yaml lives
 
 Each recipe compiles to its own self-contained `compose.yaml`, written

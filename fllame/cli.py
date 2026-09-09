@@ -391,7 +391,11 @@ def recipe_add(
 
     if pull:
         typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
-        pull_model(recipe.repo_id)
+        try:
+            pull_model(recipe.repo_id)
+        except (HfHubHTTPError, RequestException) as e:
+            typer.echo(_friendly_download_error(e), err=True)
+            raise typer.Exit(code=1) from e
 
     if build:
         _build_or_exit(recipe)
@@ -538,6 +542,22 @@ def hardware_scan() -> None:
     typer.echo(f"quantizations:  {quantizations}")
 
 
+def _friendly_download_error(e: Exception) -> str:
+    """A large multi-file `snapshot_download` can fail partway through
+    on a routine, transient Hub error (rate limiting, a connection
+    blip) - `huggingface_hub`'s own retry logic already handles a lot
+    of this internally, but not every case, and its own exception
+    message doesn't mention the one thing that matters most to the
+    operator: files already downloaded stay in the cache, so re-running
+    the same command resumes rather than starting over.
+    """
+    return (
+        f"{e}\n"
+        "Already-downloaded files stay cached - running the same command "
+        "again will resume rather than start over."
+    )
+
+
 @model_app.command("pull")
 def model_pull(repo_id: str) -> None:
     """Download REPO_ID into the Hugging Face cache.
@@ -551,7 +571,11 @@ def model_pull(repo_id: str) -> None:
     `recipe build HANDLE` instead.
     """
     typer.echo(f"pulling '{repo_id}' into {config.hf_cache_dir()}")
-    path = pull_model(repo_id)
+    try:
+        path = pull_model(repo_id)
+    except (HfHubHTTPError, RequestException) as e:
+        typer.echo(_friendly_download_error(e), err=True)
+        raise typer.Exit(code=1) from e
     typer.echo(f"done: {path}")
 
 
@@ -604,7 +628,11 @@ def model_update(
         elif not status.is_stale:
             rows.append([status.repo_id, "up to date"])
         elif apply:
-            pull_model(status.repo_id)
+            try:
+                pull_model(status.repo_id)
+            except (HfHubHTTPError, RequestException):
+                rows.append([status.repo_id, "download interrupted - rerun to resume"])
+                continue
             rows.append([status.repo_id, "updated"])
         else:
             rows.append([status.repo_id, "stale"])

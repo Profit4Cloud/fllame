@@ -360,6 +360,25 @@ directly by repo_id, but `cached_revision_hash` returns `None`) is left
 alone either way - `model update` refreshes what's already there, it
 doesn't do a first-time pull; that's `model pull`'s job.
 
+Every one of `pull_model`'s three call sites (`model pull`, `model
+update --apply`, `recipe add --pull`) wraps the call in a
+`try`/`except (HfHubHTTPError, RequestException)` and reports through
+`cli.py`'s `_friendly_download_error` rather than letting a transient
+Hub failure mid-download (rate limiting, a dropped connection) surface
+as a raw traceback - `LocalEntryNotFoundError`, the exception
+`snapshot_download` itself raises after exhausting its own retries, is
+already a subclass of `HfHubHTTPError` by way of `EntryNotFoundError`,
+so no separate import/catch is needed for it. The message always
+mentions that already-downloaded files stay in the cache, so re-running
+the identical command resumes rather than restarting the download from
+scratch (`snapshot_download` only ever fetches what's missing or
+changed) - the one thing worth telling the operator that the raw
+exception text doesn't say. `model pull`/`recipe add --pull` exit
+non-zero on this; `model update --apply` instead reports that one
+repo's row as "download interrupted - rerun to resume" and continues
+checking the rest, so one bad re-pull doesn't blank out the whole
+table's results.
+
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
 - **Non-vLLM backends** (llama.cpp, MLX, ...) - `ServingBackend` exists
@@ -576,3 +595,11 @@ doesn't do a first-time pull; that's `model pull`'s job.
   is a direct-purpose command the operator explicitly ran. This is the
   only place fllame ever asks the Hub whether a cached model has gone
   stale, since `serve` structurally cannot (see "Setup vs. running").
+- Friendly handling of a transient Hub failure mid-download - all three
+  `pull_model` call sites (`model pull`, `model update --apply`,
+  `recipe add --pull`) now catch `HfHubHTTPError`/`RequestException`
+  and report through `cli.py`'s new `_friendly_download_error` instead
+  of letting a raw traceback (e.g. a 429 rate-limit escalating to
+  `LocalEntryNotFoundError`) reach the operator - see the architecture
+  paragraph above for why no separate `LocalEntryNotFoundError` catch
+  is needed.
