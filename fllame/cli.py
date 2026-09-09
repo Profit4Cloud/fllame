@@ -37,6 +37,7 @@ from fllame.models.cache import is_model_cached, list_cached_models, local_estim
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
+from fllame.models.updater import check_for_update
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
@@ -544,6 +545,60 @@ def model_pull(handle: str) -> None:
     typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
     path = pull_model(recipe.repo_id)
     typer.echo(f"done: {path}")
+
+
+@model_app.command("update")
+def model_update(
+    handle: str | None = typer.Argument(
+        None,
+        help="Check only HANDLE's recipe's model; omit to check every model "
+        "currently in the local cache.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Re-pull any model found stale, via the same download path "
+        "`model pull` uses. Check-only by default - reports status, "
+        "downloads nothing.",
+    ),
+) -> None:
+    """Check cached models against the Hub for a newer revision.
+
+    A setup-phase command, like `model pull`/`model scan` - `fllame
+    serve` never checks this itself (see CLAUDE.md, "Setup vs.
+    running"), so this is the only place staleness is ever surfaced.
+    Check-only by default; `--apply` re-pulls anything stale, a no-op
+    download-wise if nothing has actually changed, since it goes
+    through the same `pull_model` `model pull` already uses.
+    """
+    if handle is not None:
+        repo_ids = [_load_or_exit(handle).repo_id]
+    else:
+        repo_ids = [repo.repo_id for repo in list_cached_models()]
+
+    if not repo_ids:
+        typer.echo("No models cached.")
+        raise typer.Exit(code=0)
+
+    try:
+        statuses = [check_for_update(repo_id) for repo_id in repo_ids]
+    except (HfHubHTTPError, RequestException) as e:
+        typer.echo(f"Hugging Face Hub unreachable: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+    rows = []
+    for status in statuses:
+        if status.cached_revision is None:
+            rows.append([status.repo_id, "not cached - run `model pull` first"])
+        elif not status.is_stale:
+            rows.append([status.repo_id, "up to date"])
+        elif apply:
+            pull_model(status.repo_id)
+            rows.append([status.repo_id, "updated"])
+        else:
+            rows.append([status.repo_id, "stale"])
+
+    _print_table(["REPO_ID", "STATUS"], rows)
 
 
 @model_app.command("list")

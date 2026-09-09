@@ -86,6 +86,8 @@ fllame model pull llama-3-8b-instruct          # download into the HF cache, sta
 fllame recipe build llama-3-8b-instruct        # write its compose.yaml - fails if not pulled yet
 fllame recipe add --pull --build ...           # or do both right after creating the recipe
 fllame model list                              # what's actually cached locally
+fllame model update                            # check every cached model against the Hub for updates
+fllame model update llama-3-8b-instruct --apply    # or just one, and actually re-pull it if stale
 fllame serve llama-3-8b-instruct               # never touches the network - fails if not pulled yet
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
 fllame serve llama-3-8b-instruct --yes         # skip the VRAM sanity check's confirmation prompt
@@ -242,6 +244,15 @@ starts. Together, this is what makes "pull while online, `serve` later
 with no network at all" a real guarantee rather than a hope: run
 `fllame model pull <handle>` (or `recipe add --pull`) while online,
 then `fllame serve <handle>` later on a genuinely offline machine.
+
+Because `serve` never touches the network, it also has no way to
+notice a cached model has been updated upstream - `fllame model
+update` is the other side of that trade-off. With no argument it
+checks every model currently in the cache against the Hub; given a
+handle, just that recipe's model. Check-only by default (reports
+up to date/stale, downloads nothing); `--apply` re-downloads anything
+stale through the same path `model pull` uses, so a model whose commit
+hash hasn't actually changed costs no transfer even then.
 
 ### Where compose.yaml lives
 

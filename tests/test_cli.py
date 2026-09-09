@@ -8,6 +8,7 @@ from fllame import config
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.discovery import ModelCandidate
+from fllame.models.updater import UpdateStatus
 
 runner = CliRunner()
 
@@ -703,6 +704,115 @@ def test_model_list_shows_cached_repos(monkeypatch):
     assert "org/demo" in result.stdout
     assert "16.1GB" in result.stdout
     assert "2 days ago" in result.stdout
+
+
+def test_model_update_no_cached_models(monkeypatch):
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [])
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 0
+    assert "No models cached" in result.stdout
+
+
+def test_model_update_reports_up_to_date_and_stale(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/fresh"), _FakeRepo("org/stale")]
+    )
+
+    def fake_check(repo_id):
+        if repo_id == "org/fresh":
+            return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="a")
+        return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="b")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 0
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
+    assert "org/stale" in result.stdout
+    assert "stale" in result.stdout
+
+
+def test_model_update_checks_only_given_handles_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    seen = []
+
+    def fake_check(repo_id):
+        seen.append(repo_id)
+        return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="a")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update", "demo"])
+
+    assert result.exit_code == 0
+    assert seen == ["org/demo"]
+
+
+def test_model_update_apply_repulls_stale_models_only(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/fresh"), _FakeRepo("org/stale")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/stale"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+    pulled = []
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id: pulled.append(repo_id))
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert pulled == ["org/stale"]
+    assert "updated" in result.stdout
+
+
+def test_model_update_reports_not_cached_for_never_pulled_handle(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "check_for_update",
+        lambda repo_id: UpdateStatus(repo_id=repo_id, cached_revision=None, latest_revision="a"),
+    )
+
+    result = runner.invoke(app, ["model", "update", "demo"])
+
+    assert result.exit_code == 0
+    assert "not cached" in result.stdout
+
+
+def test_model_update_hub_unreachable_gives_friendly_error(monkeypatch):
+    class _FakeRepo:
+        repo_id = "org/demo"
+
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [_FakeRepo()])
+
+    def fake_check(repo_id):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 1
+    assert "unreachable" in result.output
 
 
 def _hardware_profile(**overrides) -> HardwareProfile:

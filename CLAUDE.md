@@ -29,9 +29,10 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   compose/generator.py # Compiles one recipe into its own compose folder.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
-  models/cache.py    # Lists what's in that cache - a filesystem scan, no network.
+  models/cache.py    # Lists/verifies what's in that cache - a filesystem scan, no network.
   models/discovery.py # Searches the HF Hub for candidate models, ranked.
   models/sizing.py   # The coarse hardware memory budget `--max-size` defaults to.
+  models/updater.py  # Checks a cached model against the Hub for a newer revision.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -58,12 +59,17 @@ examples/recipes/   # Sample recipe files, for reference - not loaded at runtime
 fllame's commands split cleanly into two phases, and the boundary
 between them is a hard rule, not a preference:
 
-- **Setup** - `recipe add`/`edit`/`remove`/`build`, `model pull`/`scan`,
-  `hardware scan`, `config`. Network access belongs here.
+- **Setup** - `recipe add`/`edit`/`remove`/`build`, `model pull`/`scan`/
+  `update`, `hardware scan`, `config`. Network access belongs here.
   `models/puller.py`'s `pull_model` (downloading a model) is called
-  from exactly two places: `fllame model pull` and `recipe add
-  HANDLE --pull` (also reachable via `recipe add --pull --build`). No
-  other command may call it, directly or indirectly.
+  from `fllame model pull`, `recipe add HANDLE --pull` (also reachable
+  via `recipe add --pull --build`), and `model update --apply` (which
+  re-pulls a stale model through this same function - a no-op
+  download-wise if nothing actually changed). `model update` is this
+  boundary's whole reason to exist: `serve` can never notice a cached
+  model has gone stale on the Hub, since it never checks the Hub at all
+  (see "Running" below) - `model update` is the only place that ever
+  can.
 - **Running** - `serve`, `status`, `stop`. These must never touch the
   network, under any circumstance, no exceptions. `serve` in particular
   only ever *verifies* what's already on disk - `models/cache.py`'s
@@ -190,7 +196,7 @@ already fully present in HF's own cache, and fails with a clear error
 telling the operator to run `fllame model pull`/`recipe add --pull`
 first if it isn't. `serve` (`cli.py`'s `_require_model_cached`) never
 calls `pull_model` at all, so there is no code path by which it could
-touch the network even by accident - see "Setup vs. running" below.
+touch the network even by accident - see "Setup vs. running" above.
 vLLM's own auto-download inside the container is never relied on
 either, and that same host cache directory is bind-mounted into the
 container. The bind
@@ -291,6 +297,29 @@ the Hub about a model that's already sitting on disk. `cli.py`'s
 a warn-only sanity check, not the blocking guard described under
 "Explicitly deferred" below, and silently skipped whenever either side
 of that comparison isn't known.
+
+`fllame model update` is the answer to a question `serve` can
+structurally never ask itself: is a cached model stale on the Hub?
+`models/updater.py`'s `check_for_update(repo_id)` combines
+`models/cache.py`'s `cached_revision_hash` (the local half - the
+cached revision's commit hash, another pure filesystem read) with one
+`huggingface_hub.model_info(repo_id).sha` call (the network half) and
+compares the two. With no HANDLE given it checks every repo_id
+`list_cached_models` finds; given one, it resolves just that recipe's
+repo_id. Unlike the VRAM sanity check, a Hub failure here isn't
+swallowed into "unknown, skip" - `model update` is a direct-purpose
+command the operator explicitly ran, so `cli.py` lets
+`HfHubHTTPError`/`RequestException` surface as the same friendly
+"Hugging Face Hub unreachable" failure `model scan` gives, rather than
+silently reporting nothing wrong. Check-only by default (reports
+up-to-date/stale per repo, downloads nothing); `--apply` re-pulls
+anything stale via `pull_model` - the same function `model pull` uses,
+so a model whose commit hash hasn't actually changed costs no network
+transfer even under `--apply`, `snapshot_download` itself already only
+fetches files that changed. A model reported "not cached" (asked about
+by HANDLE, but `cached_revision_hash` returns `None`) is left alone
+either way - `model update` refreshes what's already there, it doesn't
+do a first-time pull; that's `model pull`'s job.
 
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
@@ -427,7 +456,7 @@ of that comparison isn't known.
   cache.py` (list/verify, via pure filesystem scans - `list_cached_models`,
   `is_model_cached`, `local_estimate_vram_gb`) - kept as two separate
   modules on purpose, since `serve` is only ever allowed to import from
-  the latter (see "Setup vs. running" below). This split is what makes
+  the latter (see "Setup vs. running" above). This split is what makes
   "pull while online, `serve` later with no network at all" a real
   guarantee.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
@@ -490,4 +519,18 @@ of that comparison isn't known.
   HANDLE` if the model isn't already fully cached, rather than
   downloading it - downloading is exclusively `fllame model pull`'s job
   (or `recipe add HANDLE --pull` right when a recipe is created). See
-  "Setup vs. running" below.
+  "Setup vs. running" above.
+- `fllame model update [HANDLE] [--apply]` - `models/updater.py`'s
+  `check_for_update` compares a cached repo's local commit hash
+  (`models/cache.py`'s new `cached_revision_hash`, a pure filesystem
+  read) against the Hub's current one (`huggingface_hub.model_info`).
+  Check-only by default (a per-repo `up to date`/`stale`/`not cached`
+  table via `cli.py`'s `_print_table`); `--apply` re-pulls anything
+  stale through the same `pull_model` `model pull` already uses, so an
+  unchanged model costs no transfer even under `--apply`. With no
+  HANDLE, checks every repo `list_cached_models` finds; a Hub failure
+  is a hard, friendly error (`model scan`'s own pattern), not a
+  swallowed "unknown" the way the VRAM sanity check treats one - this
+  is a direct-purpose command the operator explicitly ran. This is the
+  only place fllame ever asks the Hub whether a cached model has gone
+  stale, since `serve` structurally cannot (see "Setup vs. running").

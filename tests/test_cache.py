@@ -22,9 +22,10 @@ class _FakeFile:
 
 
 class _FakeRevision:
-    def __init__(self, files, last_modified: float = 0):
+    def __init__(self, files, last_modified: float = 0, commit_hash: str = "deadbeef"):
         self.files = files
         self.last_modified = last_modified
+        self.commit_hash = commit_hash
 
 
 def test_list_cached_models_filters_to_models_only_and_sorts(monkeypatch):
@@ -93,6 +94,30 @@ def test_is_model_cached_ignores_non_model_repo_type(monkeypatch):
     monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
 
     assert cache.is_model_cached("org/demo") is False
+
+
+def test_cached_revision_hash_returns_most_recent_revisions_hash(monkeypatch):
+    stale = _FakeRevision(files=[], last_modified=1, commit_hash="stale-hash")
+    current = _FakeRevision(files=[], last_modified=2, commit_hash="current-hash")
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "model", revisions=[stale, current])])
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
+
+    assert cache.cached_revision_hash("org/demo") == "current-hash"
+
+
+def test_cached_revision_hash_none_when_repo_not_cached(monkeypatch):
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: _FakeCacheInfo([]))
+
+    assert cache.cached_revision_hash("org/never-pulled") is None
+
+
+def test_cached_revision_hash_none_when_cache_dir_never_created(monkeypatch):
+    def raise_not_found():
+        raise CacheNotFound("no cache yet", cache_dir="/root/.cache/huggingface/hub")
+
+    monkeypatch.setattr(cache, "scan_cache_dir", raise_not_found)
+
+    assert cache.cached_revision_hash("org/demo") is None
 
 
 def test_local_estimate_vram_gb_sums_only_safetensors_files(monkeypatch):
