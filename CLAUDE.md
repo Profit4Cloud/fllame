@@ -234,6 +234,15 @@ its own merits. Adapted from the same admin-ui project's Hub-search
 logic mentioned above, trimmed to fllame's scope: no training/LoRA
 headroom.
 
+`discovery.py`'s per-dtype VRAM estimate has a second consumer beyond
+`model scan`: `estimate_vram_gb(repo_id)` looks up that same figure for
+one already-known repo_id (a single Hub call, not a search), which
+`fllame serve` (`cli.py`'s `_warn_if_vram_likely_insufficient`) compares
+against `hardware scan`'s usable-memory budget before pulling - a
+warn-only sanity check, not the blocking guard described under
+"Explicitly deferred" below, and silently skipped whenever either side
+of that comparison isn't known.
+
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
 - **Non-vLLM backends** (llama.cpp, MLX, ...) - `ServingBackend` exists
@@ -267,10 +276,21 @@ headroom.
   to narrow a Hub search, not to confirm a specific recipe fits - the
   two are intentionally separate and shouldn't gradually merge into each
   other without this being designed properly first.
-- **A pre-flight OOM guard on `fllame serve`** - `fllame hardware scan`
-  exists and reports what a box can run, but `serve` doesn't yet cross-
-  check a recipe against it before launching. Blocked on the estimator
-  above: a wrong "fits" verdict is worse than no verdict.
+- **A real, blocking pre-flight OOM guard on `fllame serve`** - still
+  blocked on the recipe-level estimator above: a wrong "fits" verdict
+  from a weights-only figure would be worse than no verdict at all, so
+  `serve` doesn't (and shouldn't yet) refuse to launch a recipe based on
+  one. What does exist, and is a deliberately narrower thing: a
+  warn-only sanity check (`cli.py`'s `_warn_if_vram_likely_insufficient`)
+  that compares `models/discovery.py`'s single-repo `estimate_vram_gb`
+  (the same coarse, weights-only figure `model scan` already shows,
+  looked up for this one recipe's repo_id) against `hardware scan`'s
+  usable-memory budget, prints a warning and asks to confirm
+  (`-y`/`--yes` to skip the prompt) only when it has a confident number
+  on both sides - silently skipped otherwise (no hardware signal, no
+  safetensors metadata, Hub unreachable, or `--offline`), never treating
+  "unknown" as "must be fine" or as "must not fit." This is a heads-up,
+  not the verdict described above, and shouldn't be mistaken for it.
 - **Injecting `--gpu-memory-utilization` at serve time from the
   hardware scan.** Decided, not yet built: this is deliberately *not* a
   `Recipe`/`serve_args` concern - a recipe (hand-written or from `recipe
@@ -391,3 +411,15 @@ headroom.
   generated `compose.yaml` stays correct after being copied to a
   different machine or run under a different account, rather than
   baking in the one home directory it was generated under.
+- `fllame serve`'s pre-flight VRAM sanity check (`cli.py`'s
+  `_warn_if_vram_likely_insufficient`) - `models/discovery.py`'s new
+  `estimate_vram_gb(repo_id)` (a single-repo counterpart of the
+  weights-only figure `model scan` already computes per search result)
+  compared against `hardware scan`'s usable-memory budget. Warns and
+  asks to confirm (`serve -y`/`--yes` to skip the prompt, warning still
+  printed) only when both figures are actually known and the estimate
+  exceeds the budget; silently skipped otherwise (no hardware signal,
+  no safetensors metadata for this repo_id, Hub unreachable) or entirely
+  under `--offline` (the check itself needs a Hub call). Deliberately
+  not the blocking, recipe-level guard tracked as still-deferred above -
+  a coarse, weights-only heads-up, not a verdict.
