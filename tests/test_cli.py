@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError
 from typer.testing import CliRunner
 
 import fllame.cli as cli
@@ -850,20 +850,16 @@ def test_model_scan_no_results(monkeypatch):
     assert "No matching models" in result.stdout
 
 
-def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):
+def test_serve_verifies_cache_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    pulled = []
-    monkeypatch.setattr(
-        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
-    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    assert pulled == [("org/demo", True)]
     assert captured["command"][:3] == ["docker", "compose", "-f"]
     assert captured["command"][-3:] == ["up", "-d", "demo"]
 
@@ -871,7 +867,7 @@ def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch)
 def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -889,7 +885,7 @@ def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
     startup command instead (see backends/vllm.py)."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -908,7 +904,7 @@ def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch)
         "- pip install -U transformers\n"
         "command: vllm serve org/demo\n"
     )
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo", "--detach"])
@@ -926,7 +922,7 @@ def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch)
     _write_recipe(tmp_path)
     handle_folder = tmp_path / "demo"
     (handle_folder / "Dockerfile").write_text("FROM img\n")
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -938,7 +934,7 @@ def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch)
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -948,10 +944,10 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     assert captured["command"][-2:] == ["up", "demo"]
 
 
-def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkeypatch):
+def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     called = []
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: called.append("pull"))
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: called.append("cache-check"))
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
     result = runner.invoke(app, ["serve", "nope"])
@@ -967,7 +963,7 @@ def test_serve_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch)
     legitimate need to reach the Hub itself."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -995,7 +991,7 @@ def test_serve_vram_warning_aborts_when_declined(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         cli, "local_estimate_vram_gb", lambda repo_id: 100.0
     )  # over the 68 GB budget
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
@@ -1011,7 +1007,7 @@ def test_serve_vram_warning_continues_when_confirmed(tmp_path: Path, monkeypatch
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"], input="y\n")
@@ -1025,7 +1021,7 @@ def test_serve_yes_flag_skips_confirmation_but_still_warns(tmp_path: Path, monke
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo", "--yes"])  # no stdin needed
@@ -1039,7 +1035,7 @@ def test_serve_vram_check_silent_when_estimate_fits_budget(tmp_path: Path, monke
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 10.0)  # well under budget
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -1057,7 +1053,7 @@ def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypat
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: None)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -1069,11 +1065,7 @@ def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypat
 def test_serve_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-
-    def fake_pull(repo_id, offline=False):
-        raise LocalEntryNotFoundError("not cached")
-
-    monkeypatch.setattr(cli, "pull_model", fake_pull)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
@@ -1087,11 +1079,7 @@ def test_serve_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
 def test_recipe_build_fails_when_model_not_cached(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "pull_model",
-        lambda repo_id, offline=False: (_ for _ in ()).throw(LocalEntryNotFoundError("nope")),
-    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
@@ -1103,15 +1091,11 @@ def test_recipe_build_fails_when_model_not_cached(tmp_path: Path, monkeypatch):
 def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    pulled = []
-    monkeypatch.setattr(
-        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
-    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
-    assert pulled == [("org/demo", True)]
     assert (tmp_path / "demo" / "compose.yaml").is_file()
 
 
@@ -1160,11 +1144,7 @@ def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
 
 def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        cli,
-        "pull_model",
-        lambda repo_id, offline=False: (_ for _ in ()).throw(LocalEntryNotFoundError("nope")),
-    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
 
     result = runner.invoke(
         app,
@@ -1185,6 +1165,7 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
     )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
 
     result = runner.invoke(
         app,
@@ -1193,8 +1174,8 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    # --pull's own download, then --build's offline cache check.
-    assert pulled == [("org/demo", False), ("org/demo", True)]
+    # --pull's own download; --build's local cache-presence check.
+    assert pulled == [("org/demo", False)]
     assert (tmp_path / "demo" / "compose.yaml").is_file()
 
 

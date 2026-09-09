@@ -1,10 +1,12 @@
 """fllame - a headless CLI for vLLM serving.
 
-`fllame serve <handle>` resolves a hand-edited recipe, confirms the
-model is already fully downloaded (never touching the network itself -
-`model pull`/`recipe add --pull` are the only things that download), and
-runs it as a Docker container via `docker compose`. See README.md for
-the recipe file format and CLAUDE.md for the architecture this sits on.
+`fllame serve <handle>` resolves a hand-edited recipe, verifies the
+model is already fully downloaded via a pure filesystem check - never
+touching the network itself; `model pull`/`recipe add --pull` are the
+only things that ever download - and runs it as a Docker container via
+`docker compose`. See README.md for the recipe file format and
+CLAUDE.md for the architecture this sits on, including the setup/
+running boundary this split enforces.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from pathlib import Path
 
 import click
 import typer
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
 from fllame import config, config_file
@@ -31,7 +33,7 @@ from fllame.domain.vllm_command import (
     parse_vllm_serve_command,
 )
 from fllame.hardware.scanner import scan_hardware
-from fllame.models.cache import list_cached_models, local_estimate_vram_gb
+from fllame.models.cache import is_model_cached, list_cached_models, local_estimate_vram_gb
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
@@ -103,22 +105,34 @@ def _write_recipe_compose(recipe: Recipe) -> None:
     write_compose_file(compose, directory / "compose.yaml")
 
 
+def _require_model_cached(recipe: Recipe) -> None:
+    """Fails with a clear, consistent error if `recipe`'s model isn't
+    already fully present in the local HF cache - the shared "verify,
+    never fetch" gate for `serve` and `recipe build`/`recipe add
+    --build`. Deliberately never calls `models/puller.py`'s
+    `pull_model` (which can touch the network): `models/cache.py`'s
+    `is_model_cached` is a pure filesystem scan, so this can never be
+    the thing that lets one of these commands cross the internet
+    boundary. Downloading is exclusively `fllame model pull`/
+    `recipe add --pull`'s job - see CLAUDE.md's setup/running boundary.
+    """
+    if is_model_cached(recipe.repo_id):
+        return
+    typer.echo(
+        f"'{recipe.repo_id}' is not fully cached locally - run "
+        f"`fllame model pull {recipe.handle}` first.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
 def _build_or_exit(recipe: Recipe) -> None:
     """Regenerates `recipe`'s `compose.yaml` - failing with a clear
     error, same wording as `serve`'s cache-miss check, if the model
     isn't fully downloaded yet. Shared by `recipe build` and
     `recipe add --build`.
     """
-    try:
-        pull_model(recipe.repo_id, offline=True)
-    except LocalEntryNotFoundError as e:
-        typer.echo(
-            f"'{recipe.repo_id}' is not fully cached locally - run "
-            f"`fllame model pull {recipe.handle}` while online first.",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
-
+    _require_model_cached(recipe)
     _write_recipe_compose(recipe)
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     typer.echo(f"wrote {compose_path}")
@@ -694,12 +708,12 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
     the recipe-level VRAM verdict (weights + KV cache + `--max-model-
     len` + concurrency) still tracked as deferred in CLAUDE.md.
 
-    Runs after `pull_model` has already confirmed the model is fully
-    cached (see `serve` below), and reads that same local cache
-    (`models/cache.py`'s `local_estimate_vram_gb` - a pure filesystem
-    scan, same data source as `model list`) rather than making a
-    network call of its own - consistent with `serve` never touching
-    the network at all.
+    Runs after `_require_model_cached` has already confirmed the model
+    is fully cached (see `serve` below), and reads that same local
+    cache (`models/cache.py`'s `local_estimate_vram_gb` - a pure
+    filesystem scan, same data source as `model list`) rather than
+    making a network call of its own - consistent with `serve` never
+    touching the network at all.
     """
     profile = scan_hardware()
     budget_gb = memory_budget_gb(profile)
@@ -742,14 +756,15 @@ def serve(
     (`fllame config` aside, entirely independent of every other
     recipe's).
 
-    Never touches the network: the model must already be fully present
-    in the HF cache - `fllame model pull HANDLE`, or `recipe add
-    HANDLE --pull` when the recipe was created, does that separately -
-    and this fails with a clear error if it isn't, rather than falling
-    back to a download of its own. vLLM's own auto-download inside the
-    container is never relied on either. A recipe with a preinstall
-    step runs it as part of the container's own startup, every time -
-    there's no separate image build step.
+    Never touches the network, full stop: the model must already be
+    fully present in the HF cache - `fllame model pull HANDLE`, or
+    `recipe add HANDLE --pull` when the recipe was created, does that
+    separately - and this only ever verifies that via a filesystem
+    check, failing with a clear error if it isn't there rather than
+    falling back to a download of its own. vLLM's own auto-download
+    inside the container is never relied on either. A recipe with a
+    preinstall step runs it as part of the container's own startup,
+    every time - there's no separate image build step.
 
     Once the model is confirmed cached, compares a coarse, weights-only
     VRAM estimate (from the cached files themselves, no network) against
@@ -760,17 +775,7 @@ def serve(
     the same underlying estimate.
     """
     recipe = _load_or_exit(handle)
-    typer.echo(f"resolving '{recipe.repo_id}' from the local cache only")
-    try:
-        pull_model(recipe.repo_id, offline=True)
-    except LocalEntryNotFoundError as e:
-        typer.echo(
-            f"'{recipe.repo_id}' is not fully cached locally - run "
-            f"`fllame model pull {handle}` first.",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
-
+    _require_model_cached(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
     _write_recipe_compose(recipe)

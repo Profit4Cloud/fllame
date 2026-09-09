@@ -53,6 +53,40 @@ examples/recipes/   # Sample recipe files, for reference - not loaded at runtime
   reading a doc in five years with zero conversational context should be
   able to follow it.
 
+## Setup vs. running - a core principle
+
+fllame's commands split cleanly into two phases, and the boundary
+between them is a hard rule, not a preference:
+
+- **Setup** - `recipe add`/`edit`/`remove`/`build`, `model pull`/`scan`,
+  `hardware scan`, `config`. Network access belongs here.
+  `models/puller.py`'s `pull_model` (downloading a model) is called
+  from exactly two places: `fllame model pull` and `recipe add
+  HANDLE --pull` (also reachable via `recipe add --pull --build`). No
+  other command may call it, directly or indirectly.
+- **Running** - `serve`, `status`, `stop`. These must never touch the
+  network, under any circumstance, no exceptions. `serve` in particular
+  only ever *verifies* what's already on disk - `models/cache.py`'s
+  `is_model_cached`/`local_estimate_vram_gb`, both pure filesystem scans
+  (`huggingface_hub.scan_cache_dir`), never `models/puller.py`'s
+  `pull_model`. If the model isn't fully cached, `serve` fails
+  immediately with a message pointing at `fllame model pull HANDLE`
+  (`cli.py`'s `_require_model_cached`) - it never falls back to
+  downloading it, not even a "local-files-only" download call. The
+  distinction matters: parameterizing the download function not to use
+  the network is still one accidental refactor away from a network call
+  creeping back in; calling a function that has no networking code in it
+  at all cannot regress that way.
+
+Any future feature that needs the network for anything - a Hub lookup,
+a version check, a richer VRAM estimate - belongs in a setup-phase
+command. It must never be added to `serve`/`status`/`stop`'s own code
+path, no matter how convenient inlining it there would be. This is what
+makes "pull everything while online, then run entirely on a genuinely
+offline machine" an actual guarantee rather than a best effort - see
+the architecture paragraph below for how `HF_HUB_OFFLINE=1` on the
+container extends the same guarantee to vLLM itself.
+
 ## Architecture, in one paragraph
 
 A `Recipe` (`fllame/domain/recipe.py`) is a validated, immutable record
@@ -149,14 +183,17 @@ remove` deletes the whole handle folder - both `recipe.yaml` and
 `compose.yaml` together (not a container still running under it, see
 `RecipeStore.remove`). Before
 `serve` ever calls `docker compose up`, it calls
-`fllame/models/puller.py`'s `pull_model(repo_id, offline=True)`
-(`huggingface_hub.snapshot_download(..., local_files_only=True)`) to
-confirm the model is already fully present in HF's own cache - never to
-download it: `serve` itself never touches the network, full stop, and
-fails with a clear error telling the operator to run `fllame model
-pull`/`recipe add --pull` first if the model isn't there. vLLM's own
-auto-download inside the container is never relied on either, and that
-same host cache directory is bind-mounted into the container. The bind
+`fllame/models/cache.py`'s `is_model_cached(repo_id)` - a pure
+filesystem scan (`huggingface_hub.scan_cache_dir`), never
+`fllame/models/puller.py`'s `pull_model` - to confirm the model is
+already fully present in HF's own cache, and fails with a clear error
+telling the operator to run `fllame model pull`/`recipe add --pull`
+first if it isn't. `serve` (`cli.py`'s `_require_model_cached`) never
+calls `pull_model` at all, so there is no code path by which it could
+touch the network even by accident - see "Setup vs. running" below.
+vLLM's own auto-download inside the container is never relied on
+either, and that same host cache directory is bind-mounted into the
+container. The bind
 mount's host side (`VllmServingBackend`'s `_host_volume_source`) is
 written as `${HOME}/...` rather than a literal absolute path whenever
 that cache directory sits under the current user's home (the default
@@ -189,17 +226,17 @@ the same reason - a sane baseline for a vLLM container specifically,
 not a recipe-level knob - and the same hand-edit-the-compose-file
 escape hatch applies to both (pinning specific device IDs instead of
 `gpus: all`; swapping `ipc: host` for an explicit `shm_size:`).
-`serve` calling `pull_model` with `offline=True` (see above) is what
-makes "pull while online, `serve` later with no network at all" a real
-guarantee rather than a hope: `local_files_only=True` means a fast,
-deterministic failure if the model isn't fully cached, rather than a
-plain download call's network-then-fallback-to-cache behavior, which
-isn't fast or fully deterministic on a genuinely offline machine.
+`serve`'s `is_model_cached` check (see above) is what makes "pull while
+online, `serve` later with no network at all" a real guarantee rather
+than a hope: a pure filesystem scan means a fast, deterministic failure
+if the model isn't fully cached, with no code path that could fall back
+to a network call the way even `pull_model(offline=True)` - correct,
+but still nominally the download function - would invite by association.
 `HF_HUB_OFFLINE=1` on the container guarantees the other half, that
-vLLM itself never tries either. There is no flag for this - it's
-`serve`'s only mode; `model pull`/`recipe add --pull` are the only
-things that ever call `pull_model` without `offline=True`, since
-downloading a model is deliberately their job alone, not `serve`'s.
+vLLM itself never tries either. There is no flag for any of this - it's
+`serve`'s only mode, unconditionally; `model pull`/`recipe add --pull`
+are the only things that ever call `pull_model`, since downloading a
+model is deliberately their job alone, not `serve`'s.
 
 `HardwareProfile` (`fllame/domain/hardware.py`) is a fourth, distinct
 kind of data: neither hand-edited config nor container state, just the
@@ -245,11 +282,12 @@ headroom.
 not this one: `models/cache.py`'s `local_estimate_vram_gb(repo_id)`
 sums the real on-disk size of a repo's cached `.safetensors` files (a
 pure filesystem scan via `scan_cache_dir`, the same data source
-`list_cached_models` already uses) rather than a Hub lookup - `serve`
-always pulls the model into this cache first, so there's no need to
-ask the Hub about a model that's already sitting on disk. `cli.py`'s
+`list_cached_models`/`is_model_cached` already use) rather than a Hub
+lookup - `serve` only ever reaches this check once `is_model_cached`
+has already confirmed the model is present, so there's no need to ask
+the Hub about a model that's already sitting on disk. `cli.py`'s
 `_warn_if_vram_likely_insufficient` compares that figure against
-`hardware scan`'s usable-memory budget right after the pull succeeds -
+`hardware scan`'s usable-memory budget right after that confirmation -
 a warn-only sanity check, not the blocking guard described under
 "Explicitly deferred" below, and silently skipped whenever either side
 of that comparison isn't known.
@@ -293,10 +331,10 @@ of that comparison isn't known.
   `serve` doesn't (and shouldn't yet) refuse to launch a recipe based on
   one. What does exist, and is a deliberately narrower thing: a
   warn-only sanity check (`cli.py`'s `_warn_if_vram_likely_insufficient`,
-  run right after `pull_model` guarantees the model is cached) that
-  compares `models/cache.py`'s `local_estimate_vram_gb` (the real
-  on-disk size of the recipe's cached `.safetensors` files, a pure
-  filesystem scan - no Hub lookup, since the model is already sitting
+  run right after `_require_model_cached` confirms the model is
+  present) that compares `models/cache.py`'s `local_estimate_vram_gb`
+  (the real on-disk size of the recipe's cached `.safetensors` files, a
+  pure filesystem scan - no Hub lookup, since the model is already sitting
   in the local cache by the time this runs) against `hardware scan`'s
   usable-memory budget, prints a warning and asks to confirm
   (`-y`/`--yes` to skip the prompt) only when it has a confident number
@@ -385,10 +423,13 @@ of that comparison isn't known.
   folder next to its `recipe.yaml`; `serve`/`status`/`stop` drive
   it via `docker compose up|ps|stop` instead of fllame tracking its own
   state.
-- `fllame/models/puller.py` + `models/cache.py` - download and list via
-  `huggingface_hub`; `serve` always calling `pull_model(...,
-  offline=True)` guarantees "pull while online, `serve` later with no
-  network at all" without needing a separate flag for it.
+- `fllame/models/puller.py` (download, via `pull_model`) + `models/
+  cache.py` (list/verify, via pure filesystem scans - `list_cached_models`,
+  `is_model_cached`, `local_estimate_vram_gb`) - kept as two separate
+  modules on purpose, since `serve` is only ever allowed to import from
+  the latter (see "Setup vs. running" below). This split is what makes
+  "pull while online, `serve` later with no network at all" a real
+  guarantee.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
   recipes or `serve` so far (see "Explicitly deferred").
 - `fllame model scan` - `models/sizing.py` (a coarse hardware memory
@@ -425,23 +466,28 @@ of that comparison isn't known.
   different machine or run under a different account, rather than
   baking in the one home directory it was generated under.
 - `fllame serve`'s pre-flight VRAM sanity check (`cli.py`'s
-  `_warn_if_vram_likely_insufficient`, run right after `pull_model`
-  guarantees the model is cached) - `models/cache.py`'s new
-  `local_estimate_vram_gb(repo_id)` (the real on-disk size of the
-  recipe's cached `.safetensors` files, a pure filesystem scan, no
-  network) compared against `hardware scan`'s usable-memory budget.
-  Warns and asks to confirm (`serve -y`/`--yes` to skip the prompt,
-  warning still printed) only when both figures are actually known and
-  the estimate exceeds the budget; silently skipped otherwise (no
-  hardware signal, or no cached `.safetensors` files to measure) -
-  reads the local cache only, consistent with `serve` never touching
-  the network at all. Deliberately not the blocking,
+  `_warn_if_vram_likely_insufficient`, run right after
+  `_require_model_cached` confirms the model is present) -
+  `models/cache.py`'s new `local_estimate_vram_gb(repo_id)` (the real
+  on-disk size of the recipe's cached `.safetensors` files, a pure
+  filesystem scan, no network) compared against `hardware scan`'s
+  usable-memory budget. Warns and asks to confirm (`serve -y`/`--yes`
+  to skip the prompt, warning still printed) only when both figures are
+  actually known and the estimate exceeds the budget; silently skipped
+  otherwise (no hardware signal, or no cached `.safetensors` files to
+  measure) - reads the local cache only, consistent with `serve` never
+  touching the network at all. Deliberately not the blocking,
   recipe-level guard tracked as still-deferred above - a coarse,
   weights-only heads-up, not a verdict.
-- `fllame serve --offline` removed - `serve` now *always* behaves the
-  way `--offline` used to: it calls `pull_model(repo_id, offline=True)`
-  unconditionally, so it never touches the network at all, and fails
-  with a clear error if the model isn't already fully cached, rather
-  than downloading it. Downloading is exclusively `fllame model pull`'s
-  job (or `recipe add HANDLE --pull` right when a recipe is created) -
-  `serve` only ever confirms what's already there.
+- `fllame serve --offline` removed, and `serve` no longer calls
+  `pull_model` at all (not even with `offline=True`) - it calls
+  `models/cache.py`'s `is_model_cached(repo_id)` instead, via `cli.py`'s
+  shared `_require_model_cached` (also used by `recipe build`/`recipe
+  add --build`). Both are pure filesystem scans, so there is no code
+  path inside `serve` that could touch the network even accidentally -
+  a stronger guarantee than parameterizing the download function not to
+  download. Fails with a clear error pointing at `fllame model pull
+  HANDLE` if the model isn't already fully cached, rather than
+  downloading it - downloading is exclusively `fllame model pull`'s job
+  (or `recipe add HANDLE --pull` right when a recipe is created). See
+  "Setup vs. running" below.

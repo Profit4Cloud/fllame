@@ -57,6 +57,44 @@ def test_list_cached_models_cache_dir_never_created(monkeypatch):
     assert cache.list_cached_models() == []
 
 
+def test_is_model_cached_true_when_repo_has_a_revision(monkeypatch):
+    revision = _FakeRevision(files=[_FakeFile("model.safetensors", 1024)])
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "model", revisions=[revision])])
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
+
+    assert cache.is_model_cached("org/demo") is True
+
+
+def test_is_model_cached_false_when_repo_never_pulled(monkeypatch):
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: _FakeCacheInfo([]))
+
+    assert cache.is_model_cached("org/never-pulled") is False
+
+
+def test_is_model_cached_false_when_repo_present_but_no_revisions(monkeypatch):
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "model", revisions=[])])
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
+
+    assert cache.is_model_cached("org/demo") is False
+
+
+def test_is_model_cached_false_when_cache_dir_never_created(monkeypatch):
+    def raise_not_found():
+        raise CacheNotFound("no cache yet", cache_dir="/root/.cache/huggingface/hub")
+
+    monkeypatch.setattr(cache, "scan_cache_dir", raise_not_found)
+
+    assert cache.is_model_cached("org/demo") is False
+
+
+def test_is_model_cached_ignores_non_model_repo_type(monkeypatch):
+    revision = _FakeRevision(files=[_FakeFile("data.parquet", 1024)])
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "dataset", revisions=[revision])])
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
+
+    assert cache.is_model_cached("org/demo") is False
+
+
 def test_local_estimate_vram_gb_sums_only_safetensors_files(monkeypatch):
     revision = _FakeRevision(
         files=[

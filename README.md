@@ -202,23 +202,26 @@ VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
 quantizations that hardware supports. It's a live scan, not a persisted
 value - nothing to keep in sync.
 
-`fllame serve` never touches the network itself. It checks that the
-model is already fully present in Hugging Face's own cache (via
-`huggingface_hub.snapshot_download(..., local_files_only=True)`) and
-fails immediately with a clear error - telling you to run
+`fllame serve` never touches the network itself, under any
+circumstance - setting up a recipe (adding it, pulling its model) and
+running it are strictly separate phases, and only the former is allowed
+to reach the network. `serve` checks that the model is already fully
+present in Hugging Face's own cache with a pure filesystem scan (no
+network call of any kind, not even a "local files only" one) and fails
+immediately with a clear error - telling you to run
 `fllame model pull HANDLE` first - if it isn't, rather than falling back
-to a download of its own. Downloading is deliberately `model pull`'s
-job alone (or `recipe add HANDLE --pull` right when the recipe is
-created) - `serve` only ever confirms, never fetches. That same cache
-directory (wherever `HF_HOME`/`HF_HUB_CACHE` resolves to) is
-bind-mounted into the container, so vLLM's own auto-download inside the
-container is never relied on either. When that directory sits under the
-current user's home (the default, out-of-the-box location), the bind
-mount's host side is written as `${HOME}/...` rather than a literal
-absolute path, so `compose.yaml` stays correct when copied to a
-different machine or run under a different account - Docker Compose
-interpolates `${HOME}` itself from whatever shell environment
-`docker compose` runs in.
+to a download of its own. Downloading is exclusively `model pull`'s job
+(or `recipe add HANDLE --pull` right when the recipe is created) -
+`serve` only ever confirms, never fetches. That same cache directory
+(wherever `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into
+the container, so vLLM's own auto-download inside the container is
+never relied on either. When that directory sits under the current
+user's home (the default, out-of-the-box location), the bind mount's
+host side is written as `${HOME}/...` rather than a literal absolute
+path, so `compose.yaml` stays correct when copied to a different
+machine or run under a different account - Docker Compose interpolates
+`${HOME}` itself from whatever shell environment `docker compose` runs
+in.
 
 Once the model is confirmed cached, `fllame serve` compares a coarse,
 weights-only VRAM estimate - the real on-disk size of that model's
@@ -276,7 +279,7 @@ that's the cost of keeping this compose-only.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation - e.g. `vllm serve org/repo --max-model-len 8192`. Not split into separate keys, and rendered one flag per line (each ending in `\`) whenever there's more than one, so it's exactly what you'd copy out to run by hand. `repo_id` (downloaded via `fllame model pull`/`serve`) and the host port mapping (`--port`, defaulting to vLLM's own `8000` if the command doesn't set one) are both derived from it, not separate fields |
+| `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation - e.g. `vllm serve org/repo --max-model-len 8192`. Not split into separate keys, and rendered one flag per line (each ending in `\`) whenever there's more than one, so it's exactly what you'd copy out to run by hand. `repo_id` (downloaded via `fllame model pull`) and the host port mapping (`--port`, defaulting to vLLM's own `8000` if the command doesn't set one) are both derived from it, not separate fields |
 | `image`       | no       | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use fllame's configured default (`fllame config`), falling back to `vllm/vllm-openai:latest` if none is configured |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
