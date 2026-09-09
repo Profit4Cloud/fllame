@@ -863,7 +863,7 @@ def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch)
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    assert pulled == [("org/demo", False)]
+    assert pulled == [("org/demo", True)]
     assert captured["command"][:3] == ["docker", "compose", "-f"]
     assert captured["command"][-3:] == ["up", "-d", "demo"]
 
@@ -960,27 +960,11 @@ def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkey
     assert called == []
 
 
-def test_serve_offline_passes_offline_to_pull_step(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    pulled = []
-    monkeypatch.setattr(
-        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
-    )
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
-
-    result = runner.invoke(app, ["serve", "demo", "--offline"])
-
-    assert result.exit_code == 0
-    assert pulled == [("org/demo", True)]
-
-
-def test_serve_container_is_always_offline_regardless_of_flag(tmp_path: Path, monkeypatch):
+def test_serve_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch):
     """HF_HUB_OFFLINE=1 is unconditional (VllmServingBackend bakes it
     into every generated service) - the model is always already fully
     downloaded by the time the container runs, so vLLM has no
-    legitimate need to reach the Hub itself. --offline only controls
-    whether the pull step itself is allowed to touch the network."""
+    legitimate need to reach the Hub itself."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
@@ -1082,24 +1066,7 @@ def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypat
     assert "warning" not in result.output
 
 
-def test_serve_vram_check_still_runs_under_offline(tmp_path: Path, monkeypatch):
-    """Unlike a Hub-based estimate, this reads the local cache only
-    (the same one `--offline`'s pull step already relies on being fully
-    populated) - no reason to skip it under `--offline`."""
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
-
-    result = runner.invoke(app, ["serve", "demo", "--offline"], input="y\n")
-
-    assert result.exit_code == 0
-    assert "estimated at 100.0 GB" in result.output
-
-
-def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
+def test_serve_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
 
@@ -1110,7 +1077,7 @@ def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypat
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
-    result = runner.invoke(app, ["serve", "demo", "--offline"])
+    result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 1
     assert "fllame model pull" in result.output

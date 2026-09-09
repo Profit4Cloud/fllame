@@ -16,8 +16,10 @@ def pull_model(repo_id: str, *, offline: bool = False) -> str:
 
     `offline=True` forces `local_files_only`: no network attempt at all,
     just a fast, deterministic resolution against whatever's already
-    cached (raising if it isn't) - the guarantee `fllame serve --offline`
-    depends on, rather than hoping a plain download call happens to fall
-    back to cache quickly on a genuinely offline machine.
+    cached (raising if it isn't) - the guarantee `fllame serve` itself
+    always relies on (see `cli.py`), never falling back to a download of
+    its own the way a plain call without this flag would. `model pull`/
+    `recipe add --pull` are the only places that call this without it,
+    since downloading a model is deliberately their job alone.
     """
     return snapshot_download(repo_id, local_files_only=offline)

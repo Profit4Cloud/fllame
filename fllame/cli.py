@@ -1,9 +1,10 @@
 """fllame - a headless CLI for vLLM serving.
 
-`fllame serve <handle>` resolves a hand-edited recipe, guarantees the
-model is fully downloaded, and runs it as a Docker container via
-`docker compose`. See README.md for the recipe file format and CLAUDE.md
-for the architecture this sits on.
+`fllame serve <handle>` resolves a hand-edited recipe, confirms the
+model is already fully downloaded (never touching the network itself -
+`model pull`/`recipe add --pull` are the only things that download), and
+runs it as a Docker container via `docker compose`. See README.md for
+the recipe file format and CLAUDE.md for the architecture this sits on.
 """
 
 from __future__ import annotations
@@ -693,12 +694,12 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
     the recipe-level VRAM verdict (weights + KV cache + `--max-model-
     len` + concurrency) still tracked as deferred in CLAUDE.md.
 
-    Runs after `pull_model` has already guaranteed the model is fully
+    Runs after `pull_model` has already confirmed the model is fully
     cached (see `serve` below), and reads that same local cache
     (`models/cache.py`'s `local_estimate_vram_gb` - a pure filesystem
-    scan, same data source as `model list`) rather than making a Hub
-    call of its own - so this needs no special-casing under `--offline`
-    the way a Hub-based estimate would.
+    scan, same data source as `model list`) rather than making a
+    network call of its own - consistent with `serve` never touching
+    the network at all.
     """
     profile = scan_hardware()
     budget_gb = memory_budget_gb(profile)
@@ -728,14 +729,6 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
 def serve(
     handle: str,
     detach: bool = typer.Option(False, "--detach", "-d", help="Run in the background."),
-    offline: bool = typer.Option(
-        False,
-        "--offline",
-        help="Never touch the network for the download step - fail if the model "
-        "isn't already fully cached (pull it first with `fllame model pull`). The "
-        "container itself never touches the network either way - see 'Advanced' "
-        "in the README.",
-    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -749,10 +742,14 @@ def serve(
     (`fllame config` aside, entirely independent of every other
     recipe's).
 
-    Always downloads the model first (see `model pull`) - vLLM's own
-    auto-download inside the container is never relied on. A recipe
-    with a preinstall step runs it as part of the container's own
-    startup, every time - there's no separate image build step.
+    Never touches the network: the model must already be fully present
+    in the HF cache - `fllame model pull HANDLE`, or `recipe add
+    HANDLE --pull` when the recipe was created, does that separately -
+    and this fails with a clear error if it isn't, rather than falling
+    back to a download of its own. vLLM's own auto-download inside the
+    container is never relied on either. A recipe with a preinstall
+    step runs it as part of the container's own startup, every time -
+    there's no separate image build step.
 
     Once the model is confirmed cached, compares a coarse, weights-only
     VRAM estimate (from the cached files themselves, no network) against
@@ -763,16 +760,13 @@ def serve(
     the same underlying estimate.
     """
     recipe = _load_or_exit(handle)
-    if offline:
-        typer.echo(f"resolving '{recipe.repo_id}' from the local cache only (--offline)")
-    else:
-        typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
+    typer.echo(f"resolving '{recipe.repo_id}' from the local cache only")
     try:
-        pull_model(recipe.repo_id, offline=offline)
+        pull_model(recipe.repo_id, offline=True)
     except LocalEntryNotFoundError as e:
         typer.echo(
             f"'{recipe.repo_id}' is not fully cached locally - run "
-            f"`fllame model pull {handle}` while online first.",
+            f"`fllame model pull {handle}` first.",
             err=True,
         )
         raise typer.Exit(code=1) from e

@@ -86,9 +86,8 @@ fllame model pull llama-3-8b-instruct          # download into the HF cache, sta
 fllame recipe build llama-3-8b-instruct        # write its compose.yaml - fails if not pulled yet
 fllame recipe add --pull --build ...           # or do both right after creating the recipe
 fllame model list                              # what's actually cached locally
-fllame serve llama-3-8b-instruct               # pulls if needed, then runs in the foreground
+fllame serve llama-3-8b-instruct               # never touches the network - fails if not pulled yet
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
-fllame serve llama-3-8b-instruct --offline     # never touch the network - fail if not cached
 fllame serve llama-3-8b-instruct --yes         # skip the VRAM sanity check's confirmation prompt
 fllame status                                  # docker compose ps
 fllame stop llama-3-8b-instruct                # docker compose stop
@@ -203,6 +202,24 @@ VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
 quantizations that hardware supports. It's a live scan, not a persisted
 value - nothing to keep in sync.
 
+`fllame serve` never touches the network itself. It checks that the
+model is already fully present in Hugging Face's own cache (via
+`huggingface_hub.snapshot_download(..., local_files_only=True)`) and
+fails immediately with a clear error - telling you to run
+`fllame model pull HANDLE` first - if it isn't, rather than falling back
+to a download of its own. Downloading is deliberately `model pull`'s
+job alone (or `recipe add HANDLE --pull` right when the recipe is
+created) - `serve` only ever confirms, never fetches. That same cache
+directory (wherever `HF_HOME`/`HF_HUB_CACHE` resolves to) is
+bind-mounted into the container, so vLLM's own auto-download inside the
+container is never relied on either. When that directory sits under the
+current user's home (the default, out-of-the-box location), the bind
+mount's host side is written as `${HOME}/...` rather than a literal
+absolute path, so `compose.yaml` stays correct when copied to a
+different machine or run under a different account - Docker Compose
+interpolates `${HOME}` itself from whatever shell environment
+`docker compose` runs in.
+
 Once the model is confirmed cached, `fllame serve` compares a coarse,
 weights-only VRAM estimate - the real on-disk size of that model's
 cached `.safetensors` files, no network involved - against this same
@@ -213,31 +230,15 @@ activations/concurrency in the estimate - see CLAUDE.md for the
 stronger, still-unbuilt recipe-level estimator this isn't), and it's
 silently skipped whenever a confident comparison isn't possible: no
 GPU/RAM figure from the hardware scan, or no cached `.safetensors`
-files to measure. Runs the same way under `--offline` as without it -
-it never touches the network either way.
+files to measure.
 
-`fllame serve` always downloads the model into Hugging Face's own cache
-first (via `huggingface_hub.snapshot_download`, a no-op if it's already
-there) before starting the container - vLLM's own auto-download inside
-the container is never relied on. That same cache directory (wherever
-`HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into the container,
-so the download only ever happens once, on the host. When that
-directory sits under the current user's home (the default,
-out-of-the-box location), the bind mount's host side is written as
-`${HOME}/...` rather than a literal absolute path, so `compose.yaml`
-stays correct when copied to a different machine or run under a
-different account - Docker Compose interpolates `${HOME}` itself from
-whatever shell environment `docker compose` runs in.
-
-Every generated compose file sets `HF_HUB_OFFLINE=1` on the container
-unconditionally, so vLLM itself never attempts a network call - the
-model is always already fully downloaded by the time it starts. For a
-fully offline demo: run `fllame model pull <handle>` while online, then
-`fllame serve <handle> --offline` later with no network at all.
-`--offline` only affects fllame's own download step - it forces
-`local_files_only` on the cache check (fails fast with a clear error if
-the model isn't fully cached, rather than hoping a plain download call
-happens to fall back to cache quickly on a genuinely offline machine).
+Every generated compose file also sets `HF_HUB_OFFLINE=1` on the
+container unconditionally, so vLLM itself never attempts a network call
+either - the model is always already fully downloaded by the time it
+starts. Together, this is what makes "pull while online, `serve` later
+with no network at all" a real guarantee rather than a hope: run
+`fllame model pull <handle>` (or `recipe add --pull`) while online,
+then `fllame serve <handle>` later on a genuinely offline machine.
 
 ### Where compose.yaml lives
 

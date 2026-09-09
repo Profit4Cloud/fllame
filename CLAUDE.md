@@ -149,10 +149,14 @@ remove` deletes the whole handle folder - both `recipe.yaml` and
 `compose.yaml` together (not a container still running under it, see
 `RecipeStore.remove`). Before
 `serve` ever calls `docker compose up`, it calls
-`fllame/models/puller.py` (`huggingface_hub.snapshot_download`) to
-guarantee the model is fully present in HF's own cache - vLLM's own
-auto-download inside the container is never relied on - and that same
-host cache directory is bind-mounted into the container. The bind
+`fllame/models/puller.py`'s `pull_model(repo_id, offline=True)`
+(`huggingface_hub.snapshot_download(..., local_files_only=True)`) to
+confirm the model is already fully present in HF's own cache - never to
+download it: `serve` itself never touches the network, full stop, and
+fails with a clear error telling the operator to run `fllame model
+pull`/`recipe add --pull` first if the model isn't there. vLLM's own
+auto-download inside the container is never relied on either, and that
+same host cache directory is bind-mounted into the container. The bind
 mount's host side (`VllmServingBackend`'s `_host_volume_source`) is
 written as `${HOME}/...` rather than a literal absolute path whenever
 that cache directory sits under the current user's home (the default
@@ -185,14 +189,17 @@ the same reason - a sane baseline for a vLLM container specifically,
 not a recipe-level knob - and the same hand-edit-the-compose-file
 escape hatch applies to both (pinning specific device IDs instead of
 `gpus: all`; swapping `ipc: host` for an explicit `shm_size:`).
-`serve --offline` is a separate, narrower concern: it forces the
-download step's `local_files_only=True` (failing fast with a clear
-error if the model isn't fully cached, rather than a plain download
-call's network-then-fallback-to-cache behavior, which isn't fast or
-fully deterministic on a genuinely offline machine). This is what makes
-"pull while online, `serve --offline` later with no network at all" a
-real guarantee rather than a hope - `HF_HUB_OFFLINE=1` on the container
-guarantees the other half, that vLLM itself never tries.
+`serve` calling `pull_model` with `offline=True` (see above) is what
+makes "pull while online, `serve` later with no network at all" a real
+guarantee rather than a hope: `local_files_only=True` means a fast,
+deterministic failure if the model isn't fully cached, rather than a
+plain download call's network-then-fallback-to-cache behavior, which
+isn't fast or fully deterministic on a genuinely offline machine.
+`HF_HUB_OFFLINE=1` on the container guarantees the other half, that
+vLLM itself never tries either. There is no flag for this - it's
+`serve`'s only mode; `model pull`/`recipe add --pull` are the only
+things that ever call `pull_model` without `offline=True`, since
+downloading a model is deliberately their job alone, not `serve`'s.
 
 `HardwareProfile` (`fllame/domain/hardware.py`) is a fourth, distinct
 kind of data: neither hand-edited config nor container state, just the
@@ -304,9 +311,9 @@ of that comparison isn't known.
   it into the recipe file. The intended design is for `fllame serve` to
   compute a safe value from `scan_hardware()` at launch time and add it
   to the generated compose service's command, the same invocation-time
-  pattern `serve --offline` already uses for the download step's
-  `local_files_only` in `cli.py` - not persisted, recomputed per
-  machine. Until this exists, a recipe that omits
+  pattern `_warn_if_vram_likely_insufficient` already uses in `cli.py` -
+  not persisted, recomputed per machine. Until this exists, a recipe
+  that omits
   `--gpu-memory-utilization` gets whatever vLLM's own default
   is; one that sets it explicitly (e.g. from a paste that already had
   it) is used as-is.
@@ -319,7 +326,7 @@ of that comparison isn't known.
 
 - CLI scaffold: `recipe list`/`show`/`add`/`build`/`edit`/`remove`,
   `hardware scan`, `model pull`/`list`/`scan`, `serve` (foreground,
-  `--detach`, `--offline`), `status`, `stop` - `-h` works as a `--help`
+  `--detach`, `--yes`), `status`, `stop` - `-h` works as a `--help`
   alias at every level (set via `context_settings` on each `Typer()`
   instance; Click only binds `--help` by default).
 - `recipe add`: recipe creation from a `vllm serve` line, either as
@@ -345,7 +352,7 @@ of that comparison isn't known.
 - `recipe build HANDLE` regenerates just that recipe's `compose.yaml`,
   standalone - useful since `recipe add`/`edit`/etc. never write it
   themselves (only `serve`/`status`/`stop` do). Fails with the same
-  cache-miss error as `serve --offline` if the model isn't fully
+  cache-miss error `serve` itself gives if the model isn't fully
   downloaded yet, rather than writing a compose file that can't
   actually run.
 - **Install with `pipx install .`, not `poetry install`, for everyday
@@ -379,9 +386,9 @@ of that comparison isn't known.
   it via `docker compose up|ps|stop` instead of fllame tracking its own
   state.
 - `fllame/models/puller.py` + `models/cache.py` - download and list via
-  `huggingface_hub`; `pull_model(..., offline=True)` and `serve
-  --offline` together guarantee a genuinely offline demo after an online
-  `model pull`.
+  `huggingface_hub`; `serve` always calling `pull_model(...,
+  offline=True)` guarantees "pull while online, `serve` later with no
+  network at all" without needing a separate flag for it.
 - `HardwareProfile` + live NVIDIA GPU/RAM scanning, unconnected to
   recipes or `serve` so far (see "Explicitly deferred").
 - `fllame model scan` - `models/sizing.py` (a coarse hardware memory
@@ -427,7 +434,14 @@ of that comparison isn't known.
   warning still printed) only when both figures are actually known and
   the estimate exceeds the budget; silently skipped otherwise (no
   hardware signal, or no cached `.safetensors` files to measure) -
-  needs no `--offline` special-casing, since it never touches the
-  network in the first place. Deliberately not the blocking,
+  reads the local cache only, consistent with `serve` never touching
+  the network at all. Deliberately not the blocking,
   recipe-level guard tracked as still-deferred above - a coarse,
   weights-only heads-up, not a verdict.
+- `fllame serve --offline` removed - `serve` now *always* behaves the
+  way `--offline` used to: it calls `pull_model(repo_id, offline=True)`
+  unconditionally, so it never touches the network at all, and fails
+  with a clear error if the model isn't already fully cached, rather
+  than downloading it. Downloading is exclusively `fllame model pull`'s
+  job (or `recipe add HANDLE --pull` right when a recipe is created) -
+  `serve` only ever confirms what's already there.
