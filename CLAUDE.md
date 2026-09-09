@@ -135,7 +135,11 @@ compose up -d`, no fllame CLI involved. `fllame serve`/`status`/`stop`
 shell out to `docker compose` against HANDLE's own folder (`up`/`ps`/
 `stop`) - `status` loops over every recipe, one invocation each - so
 container lifecycle state is whatever Docker already tracks; fllame
-keeps none of its own. `recipe remove`
+keeps none of its own. `recipe add`/`edit`/`remove` never touch
+`$FLLAME_STATE_DIR` on their own - only `serve`/`status`/`stop` (and
+`recipe build HANDLE`, which exists precisely to regenerate one
+recipe's folder standalone, without starting anything) actually write
+it. `recipe remove`
 deletes both the recipe file and its generated folder (not a container
 still running under it). Before
 `serve` ever calls `docker compose up`, it calls
@@ -252,17 +256,20 @@ headroom.
 
 ## Merged so far
 
-- CLI scaffold: `recipe list`/`show`/`add`/`edit`/`remove`, `hardware
-  scan`, `model pull`/`list`/`scan`, `serve` (foreground, `--detach`,
-  `--offline`), `status`, `stop` - `-h` works as a `--help` alias at
-  every level (set via `context_settings` on each `Typer()` instance;
-  Click only binds `--help` by default).
+- CLI scaffold: `recipe list`/`show`/`add`/`build`/`edit`/`remove`,
+  `hardware scan`, `model pull`/`list`/`scan`, `serve` (foreground,
+  `--detach`, `--offline`), `status`, `stop` - `-h` works as a `--help`
+  alias at every level (set via `context_settings` on each `Typer()`
+  instance; Click only binds `--help` by default).
 - `recipe add`: recipe creation from a `vllm serve` line, either as
   trailing CLI arguments (a quick one-liner, `recipes/parser.py` +
   `recipes/naming.py` + `RecipeStore.save`/`next_available_handle`) or,
   with no trailing arguments, a guided dialogue (image, then preinstall
   commands, then env vars, then the `vllm serve` command - each its own
-  labeled step, not one undifferentiated stdin paste). `recipe edit`
+  labeled step, not one undifferentiated stdin paste). `--pull`/
+  `--build` optionally download the model / regenerate the compose
+  folder right after saving (`cli.py`'s `_build_or_exit`, shared with
+  `recipe build HANDLE` below). `recipe edit`
   opens `$EDITOR` (`click.edit(filename=...)`, edits the file in place)
   and re-validates on save - `command`'s own indentation/trailing-`\`
   leniency (`RecipeStore.load`/`_extract_command_section`) handles the
@@ -274,6 +281,12 @@ headroom.
   git-tracked already). Either way, a successful revalidation re-saves
   the file in fllame's own canonical rendering. `recipe remove` deletes
   with a confirmation prompt (`-y` to skip it).
+- `recipe build HANDLE` regenerates just that recipe's compose folder,
+  standalone - useful since `recipe add`/`edit`/etc. never touch
+  `$FLLAME_STATE_DIR` themselves (only `serve`/`status`/`stop` do).
+  Fails with the same cache-miss error as `serve --offline` if the
+  model isn't fully downloaded yet, rather than writing a compose file
+  that can't actually run.
 - **Install with `pipx install .`, not `poetry install`, for everyday
   use.** `poetry install` only creates a project-local venv; the `fllame`
   command it produces isn't on `PATH` outside `poetry run`/`poetry

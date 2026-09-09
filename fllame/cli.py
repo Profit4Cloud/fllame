@@ -108,6 +108,27 @@ def _write_recipe_compose(recipe: Recipe, *, offline: bool = False) -> None:
     write_compose_file(compose, directory / "docker-compose.yml")
 
 
+def _build_or_exit(recipe: Recipe) -> None:
+    """Regenerates `recipe`'s compose folder - failing with a clear
+    error, same wording as `serve`'s cache-miss check, if the model
+    isn't fully downloaded yet. Shared by `recipe build` and
+    `recipe add --build`.
+    """
+    try:
+        pull_model(recipe.repo_id, offline=True)
+    except LocalEntryNotFoundError as e:
+        typer.echo(
+            f"'{recipe.repo_id}' is not fully cached locally - run "
+            f"`fllame model pull {recipe.handle}` while online first.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+
+    _write_recipe_compose(recipe)
+    compose_path = config.recipe_state_dir(recipe.handle) / "docker-compose.yml"
+    typer.echo(f"wrote {compose_path}")
+
+
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     """Left-aligned, space-padded columns - `docker ps`/`kubectl get`
     style, no border characters. The point is making a column (size,
@@ -264,6 +285,19 @@ def recipe_add(
         "changed to.",
     ),
     gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
+    pull: bool = typer.Option(
+        False,
+        "--pull",
+        help="Also download the model into the HF cache right after saving "
+        "(a no-op if it's already cached) - see `fllame model pull`.",
+    ),
+    build: bool = typer.Option(
+        False,
+        "--build",
+        help="Also regenerate the compose folder right after saving - see "
+        "`fllame recipe build`. Fails if the model isn't cached yet unless "
+        "combined with --pull.",
+    ),
 ) -> None:
     """Create a recipe.
 
@@ -344,6 +378,24 @@ def recipe_add(
 
     store.save(recipe)
     typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
+
+    if pull:
+        typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
+        pull_model(recipe.repo_id)
+
+    if build:
+        _build_or_exit(recipe)
+
+
+@recipe_app.command("build")
+def recipe_build(handle: str) -> None:
+    """Regenerate HANDLE's compose folder (`docker-compose.yml`).
+
+    Fails with a clear error if the model isn't fully downloaded yet -
+    run `fllame model pull HANDLE` (or `recipe add --pull`/`--build`)
+    first.
+    """
+    _build_or_exit(_load_or_exit(handle))
 
 
 def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:

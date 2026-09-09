@@ -978,6 +978,120 @@ def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypat
     assert called == []
 
 
+def test_recipe_build_fails_when_model_not_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "pull_model",
+        lambda repo_id, offline=False: (_ for _ in ()).throw(LocalEntryNotFoundError("nope")),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame model pull" in result.output
+    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+
+
+def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert pulled == [("org/demo", True)]
+    assert (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").is_file()
+
+
+def test_recipe_build_unknown_handle(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "build", "nope"])
+
+    assert result.exit_code == 1
+
+
+def test_recipe_add_plain_neither_pulls_nor_builds(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    assert pulled == []
+    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+
+
+def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    assert pulled == [("org/demo", False)]
+
+
+def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "pull_model",
+        lambda repo_id, offline=False: (_ for _ in ()).throw(LocalEntryNotFoundError("nope")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--build"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "fllame model pull" in result.output
+    # The recipe itself is still saved even though the build step failed.
+    assert (tmp_path / "demo.yaml").is_file()
+    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+
+
+def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull", "--build"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    # --pull's own download, then --build's offline cache check.
+    assert pulled == [("org/demo", False), ("org/demo", True)]
+    assert (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").is_file()
+
+
 def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)

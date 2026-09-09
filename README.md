@@ -80,6 +80,8 @@ fllame recipe show llama-3-8b-instruct         # resolved recipe (image/env/prei
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
 fllame recipe remove llama-3-8b-instruct       # delete it (asks first, unless -y)
 fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
+fllame recipe build llama-3-8b-instruct        # write its docker-compose.yml - fails if not pulled yet
+fllame recipe add --pull --build ...           # or do both right after creating the recipe
 fllame model list                              # what's actually cached locally
 fllame serve llama-3-8b-instruct               # pulls if needed, then runs in the foreground
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
@@ -169,6 +171,20 @@ which is the real backup, not a `.bak` file on disk). Either way, once
 the file validates it's re-saved in fllame's own canonical rendering,
 regardless of how it was actually formatted. `recipe remove` deletes a
 recipe, asking first unless `-y`/`--yes`.
+
+`fllame recipe add` only ever writes the recipe's YAML file - creating
+one doesn't touch `$FLLAME_STATE_DIR` at all, so there's nothing to
+find under it until you actually run `serve`/`status`/`stop`, or one of
+these: `fllame recipe build HANDLE` regenerates just that recipe's
+compose folder standalone, without starting anything - handy for
+inspecting or copying the file elsewhere. It fails with a clear error
+if the model isn't fully downloaded yet (run `fllame model pull` first)
+rather than silently writing a compose file that can't actually be run.
+`recipe add --pull` downloads the model right after saving (a no-op if
+it's already cached); `recipe add --build` regenerates the compose
+folder right after saving, with the same not-yet-cached failure as
+`recipe build` unless combined with `--pull`, in which case the pull
+happens first so the build always succeeds.
 
 `fllame config` holds fllame's own persisted settings - today just
 `default_image`, the Docker image a recipe falls back to when it doesn't
