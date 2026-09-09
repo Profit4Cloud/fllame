@@ -2,9 +2,6 @@
 estimated-VRAM ceiling, ranked best-first - a coarse pre-filter and
 heuristic, not a benchmarked guarantee that a candidate actually fits.
 See `fllame/models/sizing.py` for where the default ceiling comes from.
-`estimate_vram_gb` (below) is the single-repo counterpart of the same
-weights-only estimate, used by `fllame serve`'s pre-flight sanity check
-rather than a search.
 
 Two independent restrictions can narrow a search further: `max_size_gb`
 (always given - explicit, or defaulted from a hardware scan by the
@@ -44,9 +41,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from huggingface_hub import ModelInfo, list_models, model_info
-from huggingface_hub.errors import HfHubHTTPError
-from requests.exceptions import RequestException
+from huggingface_hub import ModelInfo, list_models
 
 _MULTIPLIER_BILLION_PARAMS = {"T": 1000.0, "B": 1.0, "M": 0.001}
 _SIZE_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)([TBM])", re.IGNORECASE)
@@ -301,12 +296,12 @@ def _estimated_vram_gb(info: ModelInfo) -> float | None:
 
     Deliberately not the recipe-level VRAM estimator tracked as
     still-deferred in CLAUDE.md: weights only, no KV cache/activations/
-    concurrency. Powers both `model scan`'s display (via `search_models`
-    above) and `estimate_vram_gb` below (a single-repo lookup of this
-    same figure, for `fllame serve`'s pre-flight sanity check). `None`
-    when there's no safetensors metadata to sum, or when a tensor's
-    dtype isn't one this module knows the byte width of - a partial sum
-    would silently understate the real size.
+    concurrency, and it exists for `model scan`'s display only - `serve`
+    doesn't consult it (see `models/cache.py`'s `local_estimate_vram_gb`
+    for the local-cache counterpart that does). `None` when there's no
+    safetensors metadata to sum, or when a tensor's dtype isn't one this
+    module knows the byte width of - a partial sum would silently
+    understate the real size.
     """
     if info.safetensors is None:
         return None
@@ -318,29 +313,6 @@ def _estimated_vram_gb(info: ModelInfo) -> float | None:
     except KeyError:
         return None
     return total_bytes / (1024**3)
-
-
-def estimate_vram_gb(repo_id: str) -> float | None:
-    """The same weights-only VRAM estimate `search_models` computes for
-    every search result (see `_estimated_vram_gb`), looked up for one
-    already-known repo_id instead of a ranked search - what `fllame
-    serve`'s pre-flight sanity check (`cli.py`) uses to warn, not block,
-    when a recipe's model looks too big for this machine.
-
-    `None` on anything that stops a confident number coming back - no
-    safetensors metadata, a private/gated repo, the Hub being
-    unreachable - never an exception, so a caller that can't get a real
-    answer treats that the same as "don't know," not as "must be fine."
-    This is still the coarse, weights-only figure documented on
-    `_estimated_vram_gb` - not the recipe-level estimator (weights + KV
-    cache + `--max-model-len` + concurrency) tracked as still-deferred
-    in CLAUDE.md.
-    """
-    try:
-        info = model_info(repo_id, expand=["safetensors"])
-    except (HfHubHTTPError, RequestException):
-        return None
-    return _estimated_vram_gb(info)
 
 
 def _rank(

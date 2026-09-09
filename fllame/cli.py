@@ -30,8 +30,8 @@ from fllame.domain.vllm_command import (
     parse_vllm_serve_command,
 )
 from fllame.hardware.scanner import scan_hardware
-from fllame.models.cache import list_cached_models
-from fllame.models.discovery import estimate_vram_gb, search_models
+from fllame.models.cache import list_cached_models, local_estimate_vram_gb
+from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.recipes.naming import derive_handle
@@ -687,14 +687,18 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
     """A weights-only, best-effort heads-up before `serve` launches a
     container - never a blocking verdict, and silently skipped whenever
     a confident comparison isn't possible (no GPU/RAM figure from the
-    hardware scan, no safetensors metadata for this repo_id, the Hub
-    unreachable): a wrong "won't fit" warning is worse than none, so
-    this only ever speaks up when it has a real number on both sides.
-    Not the recipe-level VRAM verdict (weights + KV cache +
-    `--max-model-len` + concurrency) still tracked as deferred in
-    CLAUDE.md - `models/discovery.py`'s `estimate_vram_gb` is the same
-    coarse, weights-only figure `model scan` already shows, just for
-    one already-known repo_id instead of a ranked search.
+    hardware scan, or the model has no cached `.safetensors` files to
+    measure): a wrong "won't fit" warning is worse than none, so this
+    only ever speaks up when it has a real number on both sides. Not
+    the recipe-level VRAM verdict (weights + KV cache + `--max-model-
+    len` + concurrency) still tracked as deferred in CLAUDE.md.
+
+    Runs after `pull_model` has already guaranteed the model is fully
+    cached (see `serve` below), and reads that same local cache
+    (`models/cache.py`'s `local_estimate_vram_gb` - a pure filesystem
+    scan, same data source as `model list`) rather than making a Hub
+    call of its own - so this needs no special-casing under `--offline`
+    the way a Hub-based estimate would.
     """
     profile = scan_hardware()
     budget_gb = memory_budget_gb(profile)
@@ -704,7 +708,7 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
         budget_gb=budget_gb, unified_memory=profile.chip_family == "grace_blackwell"
     )
 
-    estimated_gb = estimate_vram_gb(recipe.repo_id)
+    estimated_gb = local_estimate_vram_gb(recipe.repo_id)
     if estimated_gb is None or estimated_gb <= usable_gb:
         return
 
@@ -730,8 +734,7 @@ def serve(
         help="Never touch the network for the download step - fail if the model "
         "isn't already fully cached (pull it first with `fllame model pull`). The "
         "container itself never touches the network either way - see 'Advanced' "
-        "in the README. Also skips the pre-serve VRAM sanity check below, which "
-        "needs its own Hub lookup.",
+        "in the README.",
     ),
     yes: bool = typer.Option(
         False,
@@ -751,16 +754,15 @@ def serve(
     with a preinstall step runs it as part of the container's own
     startup, every time - there's no separate image build step.
 
-    Before pulling, compares a coarse, weights-only VRAM estimate for
-    this recipe's model against this machine's hardware scan and warns
-    (asking to confirm, unless `-y`) if it looks like it won't fit. Not
-    a benchmarked guarantee either way, and silently skipped whenever a
-    confident comparison isn't possible - see `fllame hardware scan`/
-    `fllame model scan` for the same underlying estimate.
+    Once the model is confirmed cached, compares a coarse, weights-only
+    VRAM estimate (from the cached files themselves, no network) against
+    this machine's hardware scan and warns (asking to confirm, unless
+    `-y`) if it looks like it won't fit. Not a benchmarked guarantee
+    either way, and silently skipped whenever a confident comparison
+    isn't possible - see `fllame hardware scan`/`fllame model scan` for
+    the same underlying estimate.
     """
     recipe = _load_or_exit(handle)
-    if not offline:
-        _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
     if offline:
         typer.echo(f"resolving '{recipe.repo_id}' from the local cache only (--offline)")
     else:
@@ -774,6 +776,8 @@ def serve(
             err=True,
         )
         raise typer.Exit(code=1) from e
+
+    _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
     _write_recipe_compose(recipe)
     args = ["up", "-d", handle] if detach else ["up", handle]

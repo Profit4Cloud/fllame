@@ -36,9 +36,9 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FLLAME_CONFIG_FILE", str(tmp_path / "config.yaml"))
     # `serve`'s pre-flight VRAM sanity check silently skips without a
     # memory-budget figure to compare against - this is the default for
-    # every test so the network-touching `estimate_vram_gb` lookup is
-    # never reached unless a test explicitly opts into exercising that
-    # check (see the test_serve_vram_* tests below).
+    # every test so it never fires (and never scans this machine's real
+    # HF cache) unless a test explicitly opts into exercising it (see
+    # the test_serve_vram_* tests below).
     monkeypatch.setattr(cli, "scan_hardware", lambda: _NO_HARDWARE_SIGNAL)
 
 
@@ -1008,7 +1008,9 @@ def test_serve_vram_warning_aborts_when_declined(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "estimate_vram_gb", lambda repo_id: 100.0)  # over the 68 GB budget
+    monkeypatch.setattr(
+        cli, "local_estimate_vram_gb", lambda repo_id: 100.0
+    )  # over the 68 GB budget
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
@@ -1024,7 +1026,7 @@ def test_serve_vram_warning_continues_when_confirmed(tmp_path: Path, monkeypatch
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "estimate_vram_gb", lambda repo_id: 100.0)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
@@ -1038,7 +1040,7 @@ def test_serve_yes_flag_skips_confirmation_but_still_warns(tmp_path: Path, monke
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "estimate_vram_gb", lambda repo_id: 100.0)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
@@ -1052,7 +1054,7 @@ def test_serve_vram_check_silent_when_estimate_fits_budget(tmp_path: Path, monke
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "estimate_vram_gb", lambda repo_id: 10.0)  # well under budget
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 10.0)  # well under budget
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
@@ -1063,13 +1065,14 @@ def test_serve_vram_check_silent_when_estimate_fits_budget(tmp_path: Path, monke
 
 
 def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypatch):
-    """No safetensors metadata, a private/gated repo, or the Hub being
-    unreachable all come back as `None` - never treated as a positive
-    "it fits" signal, but also never a warning without a real number."""
+    """No cached `.safetensors` files to measure yet (shouldn't happen
+    right after a successful pull, but a GGUF-only download would still
+    hit this) come back as `None` - never treated as a positive "it
+    fits" signal, but also never a warning without a real number."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-    monkeypatch.setattr(cli, "estimate_vram_gb", lambda repo_id: None)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: None)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
@@ -1079,23 +1082,21 @@ def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypat
     assert "warning" not in result.output
 
 
-def test_serve_offline_skips_vram_check_entirely(tmp_path: Path, monkeypatch):
-    """--offline promises no network at all; estimate_vram_gb needs its
-    own Hub lookup, so it must never even be called."""
+def test_serve_vram_check_still_runs_under_offline(tmp_path: Path, monkeypatch):
+    """Unlike a Hub-based estimate, this reads the local cache only
+    (the same one `--offline`'s pull step already relies on being fully
+    populated) - no reason to skip it under `--offline`."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
-
-    def fail_if_called(repo_id):
-        raise AssertionError("estimate_vram_gb should not be called under --offline")
-
-    monkeypatch.setattr(cli, "estimate_vram_gb", fail_if_called)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
-    result = runner.invoke(app, ["serve", "demo", "--offline"])
+    result = runner.invoke(app, ["serve", "demo", "--offline"], input="y\n")
 
     assert result.exit_code == 0
+    assert "estimated at 100.0 GB" in result.output
 
 
 def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):

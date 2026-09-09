@@ -2,11 +2,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from huggingface_hub.errors import HfHubHTTPError
-from requests.exceptions import RequestException
-
 from fllame.models import discovery
-from fllame.models.discovery import estimate_vram_gb, search_models
+from fllame.models.discovery import search_models
 
 
 @dataclass
@@ -358,36 +355,3 @@ def test_quantization_searches_run_concurrently(monkeypatch):
     elapsed = time.monotonic() - start
 
     assert elapsed < per_call_delay * 3
-
-
-def test_estimate_vram_gb_returns_the_same_weights_only_figure(monkeypatch):
-    info = _model_with_vram("org/demo-7B-AWQ", ["awq"], vram_gb=14.0)
-    monkeypatch.setattr(discovery, "model_info", lambda repo_id, expand: info)
-
-    assert estimate_vram_gb("org/demo-7B-AWQ") == 14.0
-
-
-def test_estimate_vram_gb_none_when_no_safetensors_metadata(monkeypatch):
-    monkeypatch.setattr(
-        discovery, "model_info", lambda repo_id, expand: _FakeModelInfo(id=repo_id)
-    )
-
-    assert estimate_vram_gb("org/gguf-only") is None
-
-
-def test_estimate_vram_gb_none_on_hub_http_error(monkeypatch):
-    def fake_model_info(repo_id, expand):
-        raise HfHubHTTPError("not found")
-
-    monkeypatch.setattr(discovery, "model_info", fake_model_info)
-
-    assert estimate_vram_gb("org/private-or-missing") is None
-
-
-def test_estimate_vram_gb_none_when_hub_unreachable(monkeypatch):
-    def fake_model_info(repo_id, expand):
-        raise RequestException("network unreachable")
-
-    monkeypatch.setattr(discovery, "model_info", fake_model_info)
-
-    assert estimate_vram_gb("org/demo") is None

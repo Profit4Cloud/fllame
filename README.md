@@ -203,18 +203,18 @@ VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
 quantizations that hardware supports. It's a live scan, not a persisted
 value - nothing to keep in sync.
 
-Before pulling, `fllame serve` compares a coarse, weights-only VRAM
-estimate for the recipe's model (the same figure `model scan` shows,
-looked up for this one repo_id) against this same hardware scan's
-usable-memory budget, and warns - asking to confirm, unless `-y`/
-`--yes` - if it looks like it won't fit. This is a heads-up, not a
-benchmarked guarantee either way (no KV cache/activations/concurrency
-in the estimate - see CLAUDE.md for the stronger, still-unbuilt
-recipe-level estimator this isn't), and it's silently skipped whenever
-a confident comparison isn't possible: no GPU/RAM figure from the
-hardware scan, no safetensors metadata for this repo_id, the Hub
-unreachable, or `--offline` (the check itself needs a Hub call, so it
-never runs under `--offline` at all).
+Once the model is confirmed cached, `fllame serve` compares a coarse,
+weights-only VRAM estimate - the real on-disk size of that model's
+cached `.safetensors` files, no network involved - against this same
+hardware scan's usable-memory budget, and warns - asking to confirm,
+unless `-y`/`--yes` - if it looks like it won't fit. This is a
+heads-up, not a benchmarked guarantee either way (no KV cache/
+activations/concurrency in the estimate - see CLAUDE.md for the
+stronger, still-unbuilt recipe-level estimator this isn't), and it's
+silently skipped whenever a confident comparison isn't possible: no
+GPU/RAM figure from the hardware scan, or no cached `.safetensors`
+files to measure. Runs the same way under `--offline` as without it -
+it never touches the network either way.
 
 `fllame serve` always downloads the model into Hugging Face's own cache
 first (via `huggingface_hub.snapshot_download`, a no-op if it's already
