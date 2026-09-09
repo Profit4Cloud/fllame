@@ -1,10 +1,14 @@
-"""Loads Recipes from a directory of hand-edited YAML files. The recipe
-directory is meant to live in the operator's own git repo, not fllame's.
+"""Loads Recipes from a directory of hand-edited YAML files, one
+`recipe.yaml` per handle's own subfolder (which also holds that
+handle's generated `compose.yaml` - see `fllame/config.py`'s
+`recipe_dir`). The recipe directory is meant to live in the operator's
+own git repo, not fllame's.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import yaml
@@ -98,10 +102,10 @@ class RecipeStore:
     def list_handles(self) -> list[str]:
         if not self.directory.is_dir():
             return []
-        return sorted(p.stem for p in self.directory.glob("*.yaml"))
+        return sorted(p.parent.name for p in self.directory.glob("*/recipe.yaml"))
 
     def load(self, handle: str) -> Recipe:
-        path = self.directory / f"{handle}.yaml"
+        path = self.directory / handle / "recipe.yaml"
         if not path.is_file():
             raise RecipeError(f"no recipe found for '{handle}' (expected {path})")
 
@@ -131,20 +135,24 @@ class RecipeStore:
         quantization, a different command tuning) is a legitimate,
         separate thing to keep.
         """
-        if not (self.directory / f"{base_handle}.yaml").is_file():
+        if not (self.directory / base_handle / "recipe.yaml").is_file():
             return base_handle
         n = 2
-        while (self.directory / f"{base_handle}_{n}.yaml").is_file():
+        while (self.directory / f"{base_handle}_{n}" / "recipe.yaml").is_file():
             n += 1
         return f"{base_handle}_{n}"
 
     def save(self, recipe: Recipe) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        path = self.directory / f"{recipe.handle}.yaml"
-        path.write_text(recipe.to_yaml())
+        directory = self.directory / recipe.handle
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "recipe.yaml").write_text(recipe.to_yaml())
 
     def remove(self, handle: str) -> None:
-        path = self.directory / f"{handle}.yaml"
+        """Deletes HANDLE's whole folder - both `recipe.yaml` and
+        whatever generated `compose.yaml` sits next to it, since the two
+        live together (see `fllame/config.py`'s `recipe_dir`)."""
+        directory = self.directory / handle
+        path = directory / "recipe.yaml"
         if not path.is_file():
             raise RecipeError(f"no recipe found for '{handle}' (expected {path})")
-        path.unlink()
+        shutil.rmtree(directory)

@@ -17,6 +17,6 @@ class ServingBackend(Protocol):
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
         """A docker-compose service definition (the value under
         `services.<handle>`) for running this recipe - a fully
-        self-contained `docker-compose.yml`, with no separate
+        self-contained `compose.yaml`, with no separate
         Dockerfile/build step to go alongside it."""
         ...

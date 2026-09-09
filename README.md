@@ -42,12 +42,15 @@ next `fllame` invocation picks it up, no reinstall. `pipx install .`
 
 ## Quick start
 
-Recipes live in `~/.config/fllame/recipes/<handle>.yaml` by default
-(override with `FLLAME_RECIPES_DIR`). One file per model handle - see
-`examples/recipes/llama-3-8b-instruct.yaml` for a full example:
+Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` by
+default (override the base directory with `FLLAME_RECIPES_DIR`). One
+folder per model handle - the same folder later holds that handle's
+generated `compose.yaml` too (see "Where compose.yaml lives" below) -
+see `examples/recipes/llama-3-8b-instruct.yaml` for a full recipe
+example:
 
 ```yaml
-# ~/.config/fllame/recipes/llama-3-8b-instruct.yaml
+# ~/.config/fllame/recipes/llama-3-8b-instruct/recipe.yaml
 image: vllm/vllm-openai:v0.27.1
 description: Llama 3 8B Instruct, single-GPU default profile
 command: |-
@@ -80,7 +83,7 @@ fllame recipe show llama-3-8b-instruct         # resolved recipe (image/env/prei
 fllame recipe edit llama-3-8b-instruct         # open the YAML file in $EDITOR, re-validated on save
 fllame recipe remove llama-3-8b-instruct       # delete it (asks first, unless -y)
 fllame model pull llama-3-8b-instruct          # download into the HF cache, standalone
-fllame recipe build llama-3-8b-instruct        # write its docker-compose.yml - fails if not pulled yet
+fllame recipe build llama-3-8b-instruct        # write its compose.yaml - fails if not pulled yet
 fllame recipe add --pull --build ...           # or do both right after creating the recipe
 fllame model list                              # what's actually cached locally
 fllame serve llama-3-8b-instruct               # pulls if needed, then runs in the foreground
@@ -172,19 +175,20 @@ the file validates it's re-saved in fllame's own canonical rendering,
 regardless of how it was actually formatted. `recipe remove` deletes a
 recipe, asking first unless `-y`/`--yes`.
 
-`fllame recipe add` only ever writes the recipe's YAML file - creating
-one doesn't touch `$FLLAME_STATE_DIR` at all, so there's nothing to
-find under it until you actually run `serve`/`status`/`stop`, or one of
-these: `fllame recipe build HANDLE` regenerates just that recipe's
-compose folder standalone, without starting anything - handy for
-inspecting or copying the file elsewhere. It fails with a clear error
-if the model isn't fully downloaded yet (run `fllame model pull` first)
-rather than silently writing a compose file that can't actually be run.
-`recipe add --pull` downloads the model right after saving (a no-op if
-it's already cached); `recipe add --build` regenerates the compose
-folder right after saving, with the same not-yet-cached failure as
-`recipe build` unless combined with `--pull`, in which case the pull
-happens first so the build always succeeds.
+`fllame recipe add` only ever writes `recipe.yaml` - creating one
+doesn't also write that handle's `compose.yaml` (see "Where
+compose.yaml lives" below), so there's nothing to find there until you
+actually run `serve`/`status`/`stop`, or one of these: `fllame recipe
+build HANDLE` regenerates just that recipe's `compose.yaml` standalone,
+without starting anything - handy for inspecting or copying the file
+elsewhere. It fails with a clear error if the model isn't fully
+downloaded yet (run `fllame model pull` first) rather than silently
+writing a compose file that can't actually be run. `recipe add --pull`
+downloads the model right after saving (a no-op if it's already
+cached); `recipe add --build` regenerates `compose.yaml` right after
+saving, with the same not-yet-cached failure as `recipe build` unless
+combined with `--pull`, in which case the pull happens first so the
+build always succeeds.
 
 `fllame config` holds fllame's own persisted settings - today just
 `default_image`, the Docker image a recipe falls back to when it doesn't
@@ -216,30 +220,33 @@ fully offline demo: run `fllame model pull <handle>` while online, then
 the model isn't fully cached, rather than hoping a plain download call
 happens to fall back to cache quickly on a genuinely offline machine).
 
-Each recipe gets its own self-contained compose folder,
-`$FLLAME_STATE_DIR/recipes/<handle>/` (default
-`~/.local/state/fllame/recipes/<handle>/`) - just a `docker-
-compose.yml`, nothing else to build or manage alongside it, even for a
-recipe with a `preinstall` step (see below) - as its own compose
-project (`fllame-<handle>`), entirely independent of every other
-recipe's. `fllame serve`/`status`/`stop` regenerate HANDLE's folder
-before running a `docker compose` command against it (`status` loops
-over every recipe, one `docker compose ps` each, under a
-`== <handle> ==` header). This file is a generated artifact fllame
-fully owns and overwrites on every one of those commands - normal
-changes belong in the recipe, not the compose file, since they'd
-otherwise be silently discarded on the next regeneration. See
-"Advanced" below for the cases where hand-editing it is the right
-move. Being self-contained, the folder can also be copied elsewhere and
-driven with plain `docker compose up -d`, no fllame involved. `recipe
-remove` deletes a recipe's folder along with its YAML file (not a
-container already running under it - `fllame stop` that first if it
-matters).
+### Where compose.yaml lives
+
+Each recipe compiles to its own self-contained `compose.yaml`, written
+right next to that recipe's `recipe.yaml` -
+`~/.config/fllame/recipes/<handle>/` (override the base directory with
+`FLLAME_RECIPES_DIR`) holds both `recipe.yaml` (hand-edited) and
+`compose.yaml` (generated), one folder per handle. Nothing else to
+build or manage alongside it, even for a recipe with a `preinstall`
+step (see below) - each is its own compose project (`fllame-<handle>`),
+entirely independent of every other recipe's. `fllame serve`/`status`/
+`stop` regenerate HANDLE's `compose.yaml` before running a `docker
+compose` command against it (`status` loops over every recipe, one
+`docker compose ps` each, under a `== <handle> ==` header).
+`compose.yaml` is a generated artifact fllame fully owns and overwrites
+on every one of those commands - normal changes belong in the recipe,
+not the compose file, since they'd otherwise be silently discarded on
+the next regeneration. See "Advanced" below for the cases where
+hand-editing it is the right move. Being self-contained, the folder can
+also be copied elsewhere and driven with plain `docker compose up -d`,
+no fllame involved. `recipe remove` deletes a recipe's whole folder -
+`recipe.yaml` and `compose.yaml` together (not a container already
+running under it - `fllame stop` that first if it matters).
 
 A recipe's `preinstall` step runs as part of the container's own
 startup command, every time it starts, through a shell (`sh -c
 "<preinstall> && exec vllm serve ..."`) - there's no separate image
-build step, on purpose: one recipe stays one `docker-compose.yml`, with
+build step, on purpose: one recipe stays one `compose.yaml`, with
 nothing else to manage or go stale alongside it. The trade-off is that
 the preinstall command(s) run again on every container start (a
 restart included), not just the first one - if that install is slow,
@@ -259,16 +266,29 @@ that's the cost of keeping this compose-only.
 
 ## Advanced
 
-`HF_HUB_OFFLINE=1` is unconditional on every generated compose file
+`HF_HUB_OFFLINE=1` is unconditional on every generated `compose.yaml`
 because letting vLLM's own download/update path touch the network is
 unreliable - it can fail silently and leave you waiting indefinitely
 instead of erroring, whereas fllame's own `model pull` step already
 guarantees the model is fully cached before the container ever starts.
 If a specific model genuinely needs network access (e.g. a linked
 tokenizer or base-model repo), the way to work around this is to edit
-that recipe's generated `docker-compose.yml` directly - fllame's job
-ends at producing a working compose file, and an engineer is always
-free to take it from there.
+that recipe's generated `compose.yaml` directly - fllame's job ends at
+producing a working compose file, and an engineer is always free to
+take it from there.
+
+`gpus: all` is likewise a hard default on the generated service
+whenever the recipe's own `gpus` is `all` (the default) - if you need
+something more specific, like pinning particular device IDs instead of
+reserving every GPU on the host, edit `compose.yaml`'s `gpus:` key
+directly rather than looking for a finer-grained recipe field.
+
+`ipc: host` is also always baked in, because vLLM's own multiprocessing
+workers (tensor-parallel, NCCL) routinely need more shared memory than
+Docker's tiny default `/dev/shm`, and running out shows up as an opaque
+crash rather than a clear error. If `ipc: host` is undesirable for
+isolation reasons on your host, edit `compose.yaml` to swap it for an
+explicit `shm_size:` instead.
 
 ## Development
 

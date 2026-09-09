@@ -1,7 +1,9 @@
-"""Compiles one recipe into its own docker-compose file - a generated
+"""Compiles one recipe into its own `compose.yaml` - a generated
 artifact fllame fully owns and overwrites on every command that needs
-it, not something an operator hand-edits. Each recipe gets its own
-folder/project (see `fllame/config.py`'s `recipe_state_dir`), holding
+it, not something an operator hand-edits under normal use (see the
+README's "Advanced" section for the sanctioned exception). Each recipe
+gets its own folder/project (see `fllame/config.py`'s `recipe_dir`,
+which sits right next to that same recipe's `recipe.yaml`), holding
 only that one fllame-managed service; a hand-written compose file that
 adds sibling services (Grafana, OpenWebUI) alongside it via Compose's
 `include:` is a natural next step, not built yet - see CLAUDE.md,

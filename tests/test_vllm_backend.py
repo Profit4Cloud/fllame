@@ -25,7 +25,8 @@ def test_build_service_with_gpus():
         "FOO": "bar",
     }
     assert service["volumes"] == ["/home/user/.cache/huggingface:/root/.cache/huggingface"]
-    assert service["deploy"]["resources"]["reservations"]["devices"][0]["driver"] == "nvidia"
+    assert service["ipc"] == "host"
+    assert service["gpus"] == "all"
 
 
 def test_build_service_command_has_no_duplicate_port():
@@ -56,7 +57,18 @@ def test_build_service_without_gpus():
 
     service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
 
-    assert "deploy" not in service
+    assert "gpus" not in service
+
+
+def test_build_service_ipc_host_is_unconditional():
+    """`ipc: host` is a vLLM-specific default, not tied to whether the
+    recipe reserves a GPU at all - a CPU-only recipe still gets it."""
+    backend = VllmServingBackend()
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img", gpus="none")
+
+    service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
+
+    assert service["ipc"] == "host"
 
 
 def test_build_service_with_preinstall_wraps_command_in_a_shell():

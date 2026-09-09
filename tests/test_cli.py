@@ -13,14 +13,15 @@ runner = CliRunner()
 
 
 def _write_recipe(tmp_path: Path, handle: str = "demo") -> None:
-    (tmp_path / f"{handle}.yaml").write_text(
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "recipe.yaml").write_text(
         "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo\n"
     )
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FLLAME_RECIPES_DIR", str(tmp_path))
-    monkeypatch.setenv("FLLAME_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("FLLAME_CONFIG_FILE", str(tmp_path / "config.yaml"))
 
 
@@ -140,7 +141,7 @@ def test_recipe_add_dialogue_collects_env_and_command(tmp_path: Path, monkeypatc
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "llama-3-8b-instruct.yaml"
+    saved = tmp_path / "llama-3-8b-instruct" / "recipe.yaml"
     assert saved.is_file()
     assert "meta-llama/Llama-3-8B-Instruct" in saved.read_text()
     assert "FOO: bar" in saved.read_text()
@@ -166,7 +167,7 @@ def test_recipe_add_accepts_vllm_serve_line_as_trailing_args(tmp_path: Path, mon
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "qwen3-8b-fp8.yaml"
+    saved = tmp_path / "qwen3-8b-fp8" / "recipe.yaml"
     assert saved.is_file()
     text = saved.read_text()
     assert "Qwen/Qwen3-8B-FP8" in text
@@ -194,8 +195,8 @@ def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, m
     result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
 
     assert result.exit_code == 0
-    assert (tmp_path / "demo.yaml").is_file()
-    assert (tmp_path / "demo_2.yaml").is_file()
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+    assert (tmp_path / "demo_2" / "recipe.yaml").is_file()
 
 
 def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
@@ -232,7 +233,7 @@ def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert list(tmp_path.glob("*.yaml")) == []
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
 
 
 def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, monkeypatch):
@@ -251,7 +252,7 @@ def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, 
     result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
 
     assert result.exit_code == 0
-    text = (tmp_path / "demo.yaml").read_text()
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
     assert "--tensor-parallel-size" in text
     assert "--enable-auto-tool-choice" in text
 
@@ -266,7 +267,7 @@ def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert list(tmp_path.glob("*.yaml")) == []
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
 
 
 def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkeypatch):
@@ -285,7 +286,7 @@ def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkey
     )
 
     assert result.exit_code == 0
-    text = (tmp_path / "demo.yaml").read_text()
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
     assert "preinstall:" in text
     assert "transformers>=5.8.0" in text
 
@@ -323,7 +324,8 @@ def test_recipe_edit_tolerates_stripped_command_indentation_and_renormalizes(
     should come back out re-normalized to fllame's canonical rendering,
     not left in the technically-fragile shape the edit left it in."""
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text(
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
         "image: vllm/vllm-openai:v0.27.1\n"
         "command: |-\n"
         "  vllm serve org/demo \\\n"
@@ -340,7 +342,7 @@ def test_recipe_edit_tolerates_stripped_command_indentation_and_renormalizes(
 
     assert result.exit_code == 0
     assert "saved and valid" in result.output
-    text = (tmp_path / "demo.yaml").read_text()
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
     assert text == (
         "image: vllm/vllm-openai:v0.27.1\n"
         "command: |-\n"
@@ -354,7 +356,7 @@ def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(
 ):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    original = (tmp_path / "demo.yaml").read_text()
+    original = (tmp_path / "demo" / "recipe.yaml").read_text()
 
     def fake_edit(filename):
         Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # command now missing
@@ -367,7 +369,7 @@ def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(
     assert result.exit_code == 1
     assert "no longer a valid recipe" in result.output
     assert "reverted" in result.output
-    assert (tmp_path / "demo.yaml").read_text() == original
+    assert (tmp_path / "demo" / "recipe.yaml").read_text() == original
 
 
 def test_recipe_edit_reopens_editor_and_succeeds_when_accepted(tmp_path: Path, monkeypatch):
@@ -406,7 +408,7 @@ def test_recipe_edit_autofixes_tab_indentation_without_prompting(tmp_path: Path,
 
     assert result.exit_code == 0
     assert "saved and valid" in result.output
-    assert "\t" not in (tmp_path / "demo.yaml").read_text()
+    assert "\t" not in (tmp_path / "demo" / "recipe.yaml").read_text()
 
 
 def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
@@ -416,7 +418,7 @@ def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
 
     assert result.exit_code == 0
-    assert not (tmp_path / "demo.yaml").exists()
+    assert not (tmp_path / "demo" / "recipe.yaml").exists()
 
 
 def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
@@ -426,20 +428,19 @@ def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "demo"], input="n\n")
 
     assert result.exit_code == 0
-    assert (tmp_path / "demo.yaml").exists()
+    assert (tmp_path / "demo" / "recipe.yaml").exists()
 
 
 def test_recipe_remove_deletes_its_generated_compose_folder(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    state_folder = tmp_path / "state" / "recipes" / "demo"
-    state_folder.mkdir(parents=True)
-    (state_folder / "docker-compose.yml").write_text("services: {}\n")
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "compose.yaml").write_text("services: {}\n")
 
     result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
 
     assert result.exit_code == 0
-    assert not state_folder.exists()
+    assert not handle_folder.exists()
 
 
 def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
@@ -462,7 +463,7 @@ def test_recipe_add_dialogue_prompts_for_image_when_no_default_configured(
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "demo.yaml"
+    saved = tmp_path / "demo" / "recipe.yaml"
     assert "image: vllm/vllm-openai:v0.27.1" in saved.read_text()
 
 
@@ -479,7 +480,7 @@ def test_recipe_add_dialogue_accepting_configured_default_leaves_image_unset(
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "demo.yaml"
+    saved = tmp_path / "demo" / "recipe.yaml"
     # Not written into the recipe - it should keep following the
     # configured default even if that default changes later.
     assert "image:" not in saved.read_text()
@@ -498,7 +499,7 @@ def test_recipe_add_dialogue_overriding_configured_default_pins_image(tmp_path: 
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "demo.yaml"
+    saved = tmp_path / "demo" / "recipe.yaml"
     assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
 
 
@@ -513,7 +514,7 @@ def test_recipe_add_explicit_image_flag_overrides_configured_default(tmp_path: P
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "demo.yaml"
+    saved = tmp_path / "demo" / "recipe.yaml"
     assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
 
 
@@ -562,7 +563,8 @@ def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
 
 def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text("command: vllm serve org/demo\n")
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
     result = runner.invoke(app, ["recipe", "show", "demo"])
@@ -575,7 +577,8 @@ def test_recipe_show_falls_back_to_hardcoded_image_when_nothing_configured(
     tmp_path: Path, monkeypatch
 ):
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text("command: vllm serve org/demo\n")
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
 
     result = runner.invoke(app, ["recipe", "show", "demo"])
 
@@ -859,9 +862,7 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
 
     assert result.exit_code == 0
     command = captured["command"]
-    assert command[command.index("-f") + 1] == str(
-        tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml"
-    )
+    assert command[command.index("-f") + 1] == str(tmp_path / "demo" / "compose.yaml")
     assert command[command.index("-p") + 1] == "fllame-demo"
 
 
@@ -883,7 +884,8 @@ def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
 
 def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    (tmp_path / "demo.yaml").write_text(
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
         "image: vllm/vllm-openai:v0.27.1\n"
         "preinstall:\n"
         "- pip install -U transformers\n"
@@ -895,9 +897,9 @@ def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch)
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    compose_text = (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").read_text()
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
     assert "pip install -U transformers" in compose_text
-    assert not (tmp_path / "state" / "recipes" / "demo" / "Dockerfile").exists()
+    assert not (tmp_path / "demo" / "Dockerfile").exists()
 
 
 def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
@@ -905,16 +907,15 @@ def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch)
     build-a-custom-image approach is cleaned up on the next serve."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    state_folder = tmp_path / "state" / "recipes" / "demo"
-    state_folder.mkdir(parents=True)
-    (state_folder / "Dockerfile").write_text("FROM img\n")
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "Dockerfile").write_text("FROM img\n")
     monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
-    assert not (state_folder / "Dockerfile").exists()
+    assert not (handle_folder / "Dockerfile").exists()
 
 
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
@@ -971,7 +972,7 @@ def test_serve_container_is_always_offline_regardless_of_flag(tmp_path: Path, mo
     result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
-    compose_text = (config.recipe_state_dir("demo") / "docker-compose.yml").read_text()
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
 
 
@@ -1006,7 +1007,7 @@ def test_recipe_build_fails_when_model_not_cached(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert "fllame model pull" in result.output
-    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
 
 
 def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypatch):
@@ -1021,7 +1022,7 @@ def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypat
 
     assert result.exit_code == 0
     assert pulled == [("org/demo", True)]
-    assert (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").is_file()
+    assert (tmp_path / "demo" / "compose.yaml").is_file()
 
 
 def test_recipe_build_unknown_handle(tmp_path: Path, monkeypatch):
@@ -1047,7 +1048,7 @@ def test_recipe_add_plain_neither_pulls_nor_builds(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert pulled == []
-    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
 
 
 def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
@@ -1084,8 +1085,8 @@ def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, mon
     assert result.exit_code == 1
     assert "fllame model pull" in result.output
     # The recipe itself is still saved even though the build step failed.
-    assert (tmp_path / "demo.yaml").is_file()
-    assert not (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").exists()
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
 
 
 def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
@@ -1104,7 +1105,7 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     # --pull's own download, then --build's offline cache check.
     assert pulled == [("org/demo", False), ("org/demo", True)]
-    assert (tmp_path / "state" / "recipes" / "demo" / "docker-compose.yml").is_file()
+    assert (tmp_path / "demo" / "compose.yaml").is_file()
 
 
 def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
@@ -1148,7 +1149,8 @@ def test_status_no_recipes(tmp_path: Path, monkeypatch):
 def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path, handle="good")
-    (tmp_path / "bad.yaml").write_text("image: img\n")  # missing command
+    (tmp_path / "bad").mkdir(parents=True)
+    (tmp_path / "bad" / "recipe.yaml").write_text("image: img\n")  # missing command
     commands = []
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
 

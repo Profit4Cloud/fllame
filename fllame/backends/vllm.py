@@ -14,6 +14,20 @@ to set `HF_HUB_OFFLINE` itself, the same way it already rejects
 `HF_HOME` - if a specific model genuinely needs the network for
 something beyond its own repo_id (e.g. a linked tokenizer/base-model
 repo), that's a hand-edit-the-generated-compose-file situation.
+
+Two more hard defaults, unconditional for the same reason (a sane
+baseline for a vLLM container specifically, not something a recipe
+should have to opt into): `ipc: host` gives vLLM's own multiprocessing
+workers (tensor-parallel workers, NCCL) access to the host's shared
+memory rather than Docker's own default `/dev/shm` (usually 64MB),
+which is a routine cause of a worker crashing outright once a recipe
+goes beyond a single-GPU, single-process setup; and `gpus: "all"` (only
+when `recipe.gpus == "all"`, the default) reserves every GPU on the
+host, the Compose Specification's own shorthand for what `docker run
+--gpus all` does. Overriding either - pinning specific device IDs, or
+swapping `ipc: host` for an explicit `shm_size:` - is again a
+hand-edit-the-generated-compose-file situation; see the README's
+"Advanced" section.
 """
 
 from __future__ import annotations
@@ -41,6 +55,10 @@ class VllmServingBackend:
                 **recipe.env,
             },
             "volumes": [f"{hf_cache_dir}:{_CONTAINER_HF_HOME}"],
+            # vLLM's own multiprocessing workers (tensor-parallel, NCCL)
+            # need more shared memory than Docker's tiny default
+            # `/dev/shm` - see the module docstring.
+            "ipc": "host",
         }
 
         # No explicit `--port` inserted here: recipe.port is only for
@@ -56,7 +74,7 @@ class VllmServingBackend:
             # every time it starts (there's no build step to cache it
             # in) - the whole point of this recipe field being a
             # compose-only concept: one self-contained
-            # docker-compose.yml per recipe, nothing else to build or
+            # compose.yaml per recipe, nothing else to build or
             # manage alongside it. `vllm_command` above is already
             # shell-escaped (`shlex.join`), so a repo_id/flag value
             # containing shell syntax stays a literal argument rather
@@ -79,11 +97,5 @@ class VllmServingBackend:
             service["command"] = [recipe.repo_id, *recipe.serve_args]
 
         if recipe.gpus == "all":
-            service["deploy"] = {
-                "resources": {
-                    "reservations": {
-                        "devices": [{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
-                    }
-                }
-            }
+            service["gpus"] = "all"
         return service

@@ -1,9 +1,9 @@
 """A small persisted settings file for cross-invocation CLI defaults -
 today just `default_image`, the Docker image a recipe falls back to when
 it doesn't pin its own (see `Recipe.image`, `fllame config`). Distinct
-from `recipes_dir` (hand-edited recipe data) and `state_dir` (generated
-compose state): this is fllame's own settings, meant to be managed via
-`fllame config`, not hand-edited directly.
+from `recipes_dir` (each recipe's own `recipe.yaml`/`compose.yaml`
+folder): this is fllame's own settings, meant to be managed via `fllame
+config`, not hand-edited directly.
 """
 
 from __future__ import annotations

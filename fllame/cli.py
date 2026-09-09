@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import dataclasses
 import shlex
-import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -84,15 +83,15 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe) -> None:
-    """Regenerates HANDLE's own self-contained compose folder - just
-    `docker-compose.yml`, nothing else to build or manage alongside it
-    (a stale `Dockerfile` from an older fllame version's preinstall
-    handling is removed if found). Its `HF_HUB_OFFLINE=1` is baked in
-    unconditionally by `VllmServingBackend` - not something this
-    invocation controls.
+    """Regenerates HANDLE's `compose.yaml`, written right next to its
+    `recipe.yaml` (`fllame/config.py`'s `recipe_dir`) - nothing else to
+    build or manage alongside it (a stale `Dockerfile` from an older
+    fllame version's preinstall handling is removed if found). Its
+    `HF_HUB_OFFLINE=1` is baked in unconditionally by
+    `VllmServingBackend` - not something this invocation controls.
     """
     resolved = _resolve_image(recipe)
-    directory = config.recipe_state_dir(resolved.handle)
+    directory = config.recipe_dir(resolved.handle)
     compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
 
     directory.mkdir(parents=True, exist_ok=True)
@@ -100,11 +99,11 @@ def _write_recipe_compose(recipe: Recipe) -> None:
     if stale_dockerfile.is_file():
         stale_dockerfile.unlink()
 
-    write_compose_file(compose, directory / "docker-compose.yml")
+    write_compose_file(compose, directory / "compose.yaml")
 
 
 def _build_or_exit(recipe: Recipe) -> None:
-    """Regenerates `recipe`'s compose folder - failing with a clear
+    """Regenerates `recipe`'s `compose.yaml` - failing with a clear
     error, same wording as `serve`'s cache-miss check, if the model
     isn't fully downloaded yet. Shared by `recipe build` and
     `recipe add --build`.
@@ -120,7 +119,7 @@ def _build_or_exit(recipe: Recipe) -> None:
         raise typer.Exit(code=1) from e
 
     _write_recipe_compose(recipe)
-    compose_path = config.recipe_state_dir(recipe.handle) / "docker-compose.yml"
+    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     typer.echo(f"wrote {compose_path}")
 
 
@@ -185,7 +184,7 @@ def _run_compose(handle: str, *args: str) -> int:
         "docker",
         "compose",
         "-f",
-        str(config.recipe_state_dir(handle) / "docker-compose.yml"),
+        str(config.recipe_dir(handle) / "compose.yaml"),
         "-p",
         config.compose_project_name(handle),
         *args,
@@ -372,7 +371,7 @@ def recipe_add(
         raise typer.Exit(code=1) from e
 
     store.save(recipe)
-    typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
+    typer.echo(f"saved recipe '{handle}' -> {config.recipe_dir(handle) / 'recipe.yaml'}")
 
     if pull:
         typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
@@ -384,7 +383,7 @@ def recipe_add(
 
 @recipe_app.command("build")
 def recipe_build(handle: str) -> None:
-    """Regenerate HANDLE's compose folder (`docker-compose.yml`).
+    """Regenerate HANDLE's `compose.yaml`.
 
     Fails with a clear error if the model isn't fully downloaded yet -
     run `fllame model pull HANDLE` (or `recipe add --pull`/`--build`)
@@ -432,7 +431,7 @@ def recipe_edit(handle: str) -> None:
     directory is meant to be git-tracked already, which is the real
     backup).
     """
-    path = config.recipes_dir() / f"{handle}.yaml"
+    path = config.recipe_dir(handle) / "recipe.yaml"
     if not path.is_file():
         typer.echo(f"no recipe found for '{handle}' (expected {path})", err=True)
         raise typer.Exit(code=1)
@@ -465,11 +464,11 @@ def recipe_remove(
     handle: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
-    """Delete HANDLE's recipe file and its generated compose folder.
+    """Delete HANDLE's whole folder - its recipe file and its generated
+    `compose.yaml` together (see `fllame/config.py`'s `recipe_dir`).
 
-    Doesn't stop a container that's still running under it - only the
-    generated `docker-compose.yml`; if `fllame stop HANDLE` matters,
-    run it first.
+    Doesn't stop a container that's still running under it; if `fllame
+    stop HANDLE` matters, run it first.
     """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
@@ -478,7 +477,6 @@ def recipe_remove(
     except RecipeError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
-    shutil.rmtree(config.recipe_state_dir(handle), ignore_errors=True)
     typer.echo(f"removed '{handle}'")
 
 

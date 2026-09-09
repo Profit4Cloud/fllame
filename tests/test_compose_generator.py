@@ -17,7 +17,7 @@ def test_generate_compose_single_service_keyed_by_handle():
 
 def test_write_compose_file_creates_parent_dirs(tmp_path: Path):
     compose = {"services": {"a": {"image": "img-a"}}}
-    path = tmp_path / "nested" / "docker-compose.yml"
+    path = tmp_path / "nested" / "compose.yaml"
 
     write_compose_file(compose, path)
 
