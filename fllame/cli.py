@@ -277,6 +277,32 @@ def _read_command() -> str:
     return joined
 
 
+_UV_PIP_INSTALL_PREFIX = "uv pip install"
+
+
+def _replace_uv_pip_install(preinstall: list[str]) -> tuple[list[str], bool]:
+    """`uv pip install ...` is a common preinstall step lifted straight
+    from a model card, but the vllm/vllm-openai image's own Python
+    environment isn't the uv-managed venv `uv pip install` expects -
+    running it there can install into the wrong place rather than where
+    `vllm serve` actually looks. Plain `pip install` targets the image's
+    own site-packages directly, so it's swapped in automatically; the
+    caller is expected to tell the operator when this fires, since it
+    changes what they typed.
+    """
+    changed = False
+    fixed = []
+    for line in preinstall:
+        stripped = line.lstrip()
+        if stripped.startswith(_UV_PIP_INSTALL_PREFIX):
+            leading_ws = line[: len(line) - len(stripped)]
+            fixed.append(f"{leading_ws}pip install{stripped[len(_UV_PIP_INSTALL_PREFIX):]}")
+            changed = True
+        else:
+            fixed.append(line)
+    return fixed, changed
+
+
 @recipe_app.command("add", context_settings={**_CONTEXT_SETTINGS, "ignore_unknown_options": True})
 def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
@@ -360,6 +386,14 @@ def recipe_add(
             env[key] = value
 
         command = _read_command()
+
+    preinstall, uv_pip_replaced = _replace_uv_pip_install(preinstall)
+    if uv_pip_replaced:
+        typer.echo(
+            "note: replaced 'uv pip install' with 'pip install' in the preinstall "
+            "step - the vllm/vllm-openai image's own Python environment isn't the "
+            "uv-managed venv 'uv pip install' expects."
+        )
 
     warn_image = image if image is not None else config_file.get_default_image()
     if warn_image is not None and (warn_image.endswith(":latest") or ":" not in warn_image):

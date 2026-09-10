@@ -88,7 +88,21 @@ class VllmServingBackend:
     name = "vllm"
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
-        env = {"HF_HOME": _CONTAINER_HF_HOME, "HF_HUB_OFFLINE": "1", **recipe.env}
+        # `hf_cache_dir` (the host side of the volume below) is always
+        # `HF_HUB_CACHE`, not `HF_HOME` - by default one directory
+        # *under* it (`HF_HOME/hub`). Setting only `HF_HOME` here would
+        # leave the container's own huggingface_hub computing its
+        # `HF_HUB_CACHE` as `HF_HOME/hub`, one level below where the
+        # mount actually lands, so it would never find anything cached
+        # regardless of what's really on disk. Setting `HF_HUB_CACHE`
+        # explicitly to the same path the volume is mounted at removes
+        # that implicit derivation entirely.
+        env = {
+            "HF_HOME": _CONTAINER_HF_HOME,
+            "HF_HUB_CACHE": _CONTAINER_HF_HOME,
+            "HF_HUB_OFFLINE": "1",
+            **recipe.env,
+        }
         service: dict = {
             "image": recipe.image,
             "ports": [f"{recipe.port}:{recipe.port}"],

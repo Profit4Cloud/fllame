@@ -187,7 +187,17 @@ Anything else on a line, or a shell metacharacter/substitution in an
 way - fllame parses this text itself rather than handing it to a real
 shell, so it never silently evaluates something dangerous; a `RUN`
 line/the dialogue's preinstall step are the deliberate exception, taken
-verbatim as shell text since that's what they genuinely are.
+verbatim as shell text since that's what they genuinely are - with one
+narrow substitution on top, still in `recipe add` (`cli.py`'s
+`_replace_uv_pip_install`): a preinstall line starting with `uv pip
+install` (common straight off a model card) becomes a plain `pip
+install`, since the vllm/vllm-openai image's own Python environment
+isn't the uv-managed venv `uv pip install` expects and installing there
+instead would land the package somewhere `vllm serve` never looks.
+`recipe add` echoes a note when this fires, since it silently changes
+what the operator pasted; nothing else about `preinstall` is ever
+rewritten, and this never runs outside `recipe add` (not on `recipe
+edit`'s revalidation, nor on any later `serve`/`recipe build`).
 `fllame/recipes/naming.py`
 derives the handle recipe `add` uses from the repo_id (the part after
 the last `/`, slugified). `ServingBackend`
@@ -249,7 +259,19 @@ time, so the generated `compose.yaml` stays correct after being copied
 to a different machine or run under a different account, rather than
 baking in the one home directory it happened to be generated under.
 `fllame/models/cache.py` (`huggingface_hub.scan_cache_dir`) is the
-read-only counterpart, backing `fllame model list`.
+read-only counterpart, backing `fllame model list`. `hf_cache_dir` here
+is always `config.hf_cache_dir()` - `HF_HUB_CACHE`, which defaults to
+`HF_HOME/hub`, one directory *under* `HF_HOME` - not `HF_HOME` itself;
+`build_service` sets the container's `HF_HUB_CACHE` env var explicitly
+to that same mount destination (`_CONTAINER_HF_HOME`) rather than
+leaving the container to derive its own `HF_HUB_CACHE` from `HF_HOME`,
+since that implicit derivation would look one level too deep and find
+nothing - the exact, previously-shipped bug this fixes (every `serve`
+appeared to succeed - the model was genuinely fully cached and
+`is_model_cached` correctly said so - but vLLM inside the container
+failed with `LocalEntryNotFoundError`, unable to see any of it, since
+`HF_HOME`'s implicit `/hub` suffix pointed one directory below where
+the volume actually landed).
 
 Every generated service also gets `HF_HUB_OFFLINE=1` unconditionally
 (`VllmServingBackend.build_service`, not an invocation-time flag) - the
@@ -257,7 +279,8 @@ model is always already fully downloaded by the time the container
 runs, so vLLM has no legitimate need to reach the Hub itself, and
 letting it try is what fails silently and hangs rather than erroring.
 `Recipe.from_dict` rejects a recipe that tries to set `HF_HUB_OFFLINE`
-in `env` itself, the same way it already rejects `HF_HOME` - if a
+in `env` itself, the same way it already rejects `HF_HOME` and
+`HF_HUB_CACHE` (all three now unconditionally fllame's to set) - if a
 specific model genuinely needs the network for something beyond its
 own repo_id (e.g. a linked tokenizer/base-model repo), that's a
 hand-edit-the-generated-compose-file situation (see the README's
@@ -670,3 +693,20 @@ the file (formatting, comments, an unrelated hand edit) is touched.
   hand edits already in those files survive untouched. Skipped
   entirely when there was no previous default to search for, or the new
   image is unchanged from it.
+- Fixed a real bug in every generated service's container env:
+  `VllmServingBackend.build_service` now sets `HF_HUB_CACHE` explicitly
+  to the same path the HF cache volume is mounted at
+  (`_CONTAINER_HF_HOME`), rather than leaving the container to derive
+  its own `HF_HUB_CACHE` from `HF_HOME` (which defaults to `HF_HOME/hub`
+  - one directory below where the mount actually lands). Previously,
+  every `serve` looked like it worked (`is_model_cached` correctly
+  confirmed the model was cached) but vLLM inside the container failed
+  with `LocalEntryNotFoundError`, unable to see any of the mounted
+  cache at all. `Recipe.from_dict` now also rejects `HF_HUB_CACHE` in
+  `env`, alongside `HF_HOME`/`HF_HUB_OFFLINE`.
+- `recipe add` now replaces a preinstall line starting with `uv pip
+  install` (common straight off a model card) with plain `pip install`
+  (`cli.py`'s `_replace_uv_pip_install`), since the vllm/vllm-openai
+  image's own Python environment isn't the uv-managed venv `uv pip
+  install` expects - and echoes a note when this fires, since it
+  silently changes what the operator pasted.

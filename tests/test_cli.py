@@ -291,7 +291,7 @@ def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
 def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
-        'uv pip install -U "transformers>=5.8.0"',
+        "pip install -U 'transformers>=5.8.0'",
         "",  # end preinstall
         "",  # no env vars
         "vllm serve org/demo",
@@ -307,6 +307,53 @@ def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkey
     text = (tmp_path / "demo" / "recipe.yaml").read_text()
     assert "preinstall:" in text
     assert "transformers>=5.8.0" in text
+
+
+def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeypatch):
+    """`uv pip install ...`, common on a pasted model card, targets the
+    uv-managed venv `vllm serve` doesn't actually run in - fllame swaps
+    in plain `pip install` automatically and tells the operator, since
+    it silently changes what they typed."""
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        'uv pip install -U "transformers>=5.8.0"',
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    assert "replaced 'uv pip install' with 'pip install'" in result.output
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "uv pip install" not in text
+    assert 'pip install -U "transformers>=5.8.0"' in text
+
+
+def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        "pip install -U transformers",
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    assert "replaced 'uv pip install'" not in result.output
 
 
 def test_recipe_edit_missing_handle(tmp_path: Path, monkeypatch):

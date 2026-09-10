@@ -82,6 +82,14 @@ def test_from_dict_rejects_env_hf_hub_offline():
         )
 
 
+def test_from_dict_rejects_env_hf_hub_cache():
+    with pytest.raises(RecipeError):
+        Recipe.from_dict(
+            "demo",
+            {"command": "vllm serve org/demo", "image": "img", "env": {"HF_HUB_CACHE": "/x"}},
+        )
+
+
 def test_from_dict_preinstall_defaults_to_empty():
     recipe = Recipe.from_dict("demo", {"command": "vllm serve org/demo", "image": "img"})
     assert recipe.preinstall == []

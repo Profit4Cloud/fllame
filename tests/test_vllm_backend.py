@@ -38,6 +38,7 @@ def test_build_service_with_gpus(monkeypatch):
     assert service["ports"] == ["9000:9000"]
     assert service["environment"] == [
         "HF_HOME=/root/.cache/huggingface",
+        "HF_HUB_CACHE=/root/.cache/huggingface",
         "HF_HUB_OFFLINE=1",
         "FOO=bar",
     ]

@@ -119,6 +119,11 @@ class Recipe:
                 "sets it itself; edit the generated compose file directly if a specific "
                 "model genuinely needs network access"
             )
+        if "HF_HUB_CACHE" in env:
+            raise RecipeError(
+                f"recipe '{handle}': 'env' must not set HF_HUB_CACHE - fllame points it "
+                "at the same in-container path the cache mount and HF_HOME both use"
+            )
 
         preinstall = list(data.get("preinstall") or [])
         for step in preinstall:

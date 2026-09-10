@@ -151,8 +151,14 @@ paste:
    either.
 
 Preinstall commands are taken verbatim as shell text (`&&` and all,
-same as a real shell command) since that's what they genuinely are;
-env var values and the `vllm serve` command are parsed and sanitized,
+same as a real shell command) since that's what they genuinely are,
+with one exception: a line starting with `uv pip install` (common
+straight off a model card) is swapped to plain `pip install` - the
+vllm/vllm-openai image's own Python environment isn't the uv-managed
+venv `uv pip install` expects, and installing there instead would land
+the package somewhere `vllm serve` never looks. `recipe add` prints a
+note when this fires, since it silently changes what you pasted.
+Env var values and the `vllm serve` command are parsed and sanitized,
 not evaluated as shell - a shell metacharacter/substitution (`;`, `&`,
 `|`, `` ` ``, `$(...)`) in either is a hard error and nothing gets
 written. The handle is derived from the repo id (the part
@@ -224,15 +230,18 @@ back to a download of its own. Downloading is exclusively `model
 pull`'s job (or `recipe add HANDLE --pull` right when the recipe is
 created) -
 `serve` only ever confirms, never fetches. That same cache directory
-(wherever `HF_HOME`/`HF_HUB_CACHE` resolves to) is bind-mounted into
-the container, so vLLM's own auto-download inside the container is
-never relied on either. When that directory sits under the current
-user's home (the default, out-of-the-box location), the bind mount's
-host side is written as `${HOME}/...` rather than a literal absolute
-path, so `compose.yaml` stays correct when copied to a different
-machine or run under a different account - Docker Compose interpolates
-`${HOME}` itself from whatever shell environment `docker compose` runs
-in.
+(wherever `HF_HUB_CACHE` resolves to) is bind-mounted into the
+container, so vLLM's own auto-download inside the container is never
+relied on either - and the container's `HF_HUB_CACHE` is set explicitly
+to that same mount point, so the container's own `huggingface_hub`
+looks in exactly the place the volume actually lands rather than
+deriving a (wrong, one-directory-off) location from `HF_HOME` on its
+own. When that directory sits under the current user's home (the
+default, out-of-the-box location), the bind mount's host side is
+written as `${HOME}/...` rather than a literal absolute path, so
+`compose.yaml` stays correct when copied to a different machine or run
+under a different account - Docker Compose interpolates `${HOME}`
+itself from whatever shell environment `docker compose` runs in.
 
 Once the model is confirmed cached, `fllame serve` compares a coarse,
 weights-only VRAM estimate - the real on-disk size of that model's
@@ -326,7 +335,7 @@ that's the cost of keeping this compose-only.
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
 | `gpus`        | no       | `all` (default) or `none` - whether the container gets a GPU reservation |
-| `env`         | no       | environment variables set on the container; must not set `HF_HOME` or `HF_HUB_OFFLINE`, which fllame manages itself |
+| `env`         | no       | environment variables set on the container; must not set `HF_HOME`, `HF_HUB_CACHE`, or `HF_HUB_OFFLINE`, which fllame manages itself |
 | `preinstall`  | no       | shell commands run, in order, before `vllm serve` (e.g. `pip install -U transformers`) - a preinstall step some recipes need on top of the base image |
 
 ## Advanced
