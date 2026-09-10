@@ -579,6 +579,88 @@ def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
     assert "unpinned" in result.output
 
 
+def _write_compose_with_image(tmp_path: Path, handle: str, image: str) -> Path:
+    """A minimal, already-generated-looking compose.yaml, with a hand
+    edit (a custom `shm_size:`) alongside the `image:` line - used to
+    verify that batch image updates touch only the image value."""
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    compose_path = directory / "compose.yaml"
+    compose_path.write_text(
+        f"services:\n  {handle}:\n    image: {image}\n    shm_size: 2gb\n"
+    )
+    return compose_path
+
+
+def test_config_set_default_image_no_prior_default_skips_batch_update(
+    tmp_path: Path, monkeypatch
+):
+    """With no previously configured default, there's no old value to
+    search compose.yaml files for - nothing to prompt about."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:latest")
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    assert result.exit_code == 0
+    assert "compose.yaml" not in result.output
+
+
+def test_config_set_default_image_offers_batch_update_and_applies_on_confirm(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
+    )
+
+    assert result.exit_code == 0
+    assert str(compose_path) in result.output
+    text = compose_path.read_text()
+    assert "image: vllm/vllm-openai:v0.27.1" in text
+    # Nothing else in the hand-edited file was touched.
+    assert "shm_size: 2gb" in text
+
+
+def test_config_set_default_image_batch_update_declined_leaves_files_untouched(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="n\n"
+    )
+
+    assert result.exit_code == 0
+    assert "image: vllm/vllm-openai:v0.26.0" in compose_path.read_text()
+
+
+def test_config_set_default_image_never_touches_a_custom_pinned_image(
+    tmp_path: Path, monkeypatch
+):
+    """A compose.yaml whose image doesn't literally match the previous
+    default - a recipe-level pin, or a hand edit - is never listed or
+    replaced, confirmation or not."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "custom/pinned-image:v1")
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    assert result.exit_code == 0
+    assert "compose.yaml" not in result.output
+    assert "image: custom/pinned-image:v1" in compose_path.read_text()
+
+
 def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo").mkdir(parents=True)
@@ -697,6 +779,25 @@ def test_model_pull_hub_error_gives_friendly_message_not_traceback(monkeypatch):
     assert result.exit_code == 1
     assert "429 Client Error" in result.output
     assert "resume rather than start over" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_model_pull_permission_error_gives_friendly_message(monkeypatch):
+    """The HF cache is shared - something else (e.g. a `serve` container
+    that ran as root) can leave files behind the operator's own account
+    can't write to. This must never surface as a raw traceback either,
+    and the message should point at the fix (chown), not just print the
+    bare OS error."""
+
+    def raise_error(repo_id):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
+
+    assert result.exit_code == 1
+    assert "chown" in result.output
     assert "Traceback" not in result.output
 
 
@@ -833,6 +934,38 @@ def test_model_update_apply_reports_interrupted_download_and_continues(monkeypat
     assert result.exit_code == 0
     assert "org/broken" in result.stdout
     assert "download interrupted" in result.stdout
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
+
+
+def test_model_update_apply_reports_permission_error_and_continues(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/broken"), _FakeRepo("org/fresh")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/broken"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    def fake_pull(repo_id):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", fake_pull)
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert "org/broken" in result.stdout
+    assert "permission denied" in result.stdout
+    assert "chown" in result.output
     assert "org/fresh" in result.stdout
     assert "up to date" in result.stdout
 
@@ -1135,6 +1268,75 @@ def test_serve_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch)
     assert "HF_HUB_OFFLINE" in compose_text
 
 
+def test_serve_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache"))
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    # First serve generates compose.yaml against this same cache location.
+    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "cache location has changed" not in result.output
+
+
+def test_serve_cache_location_changed_aborts_when_declined(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["serve", "demo"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "cache location has changed" in result.output
+    assert "/cache/old" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
+def test_serve_cache_location_changed_continues_when_confirmed(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "cache location has changed" in result.output
+    assert "/cache/new" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
+def test_serve_yes_flag_skips_cache_location_confirmation_but_still_warns(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["serve", "demo", "--yes"])  # no stdin needed
+
+    assert result.exit_code == 0
+    assert "cache location has changed" in result.output
+    assert "/cache/new" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
 _GPU_WITH_BUDGET = HardwareProfile(
     gpu_name="NVIDIA A100 80GB PCIe",
     gpu_count=1,
@@ -1322,6 +1524,28 @@ def test_recipe_add_pull_hub_error_gives_friendly_message(tmp_path: Path, monkey
 
     assert result.exit_code == 1
     assert "resume rather than start over" in result.output
+    # The recipe itself is still saved even though the pull step failed.
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+
+
+def test_recipe_add_pull_permission_error_gives_friendly_message(tmp_path: Path, monkeypatch):
+    """Same fix as `model pull` - a permission error writing to the
+    shared HF cache must not crash with a raw traceback."""
+    _isolate(tmp_path, monkeypatch)
+
+    def raise_error(repo_id, offline=False):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "chown" in result.output
     # The recipe itself is still saved even though the pull step failed.
     assert (tmp_path / "demo" / "recipe.yaml").is_file()
 

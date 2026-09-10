@@ -90,7 +90,7 @@ fllame model update                            # check every cached model agains
 fllame model update meta-llama/Meta-Llama-3-8B-Instruct --apply   # or just one, re-pulling it if stale
 fllame serve llama-3-8b-instruct               # never touches the network - fails if not pulled yet
 fllame serve llama-3-8b-instruct --detach      # same, but backgrounded
-fllame serve llama-3-8b-instruct --yes         # skip the VRAM sanity check's confirmation prompt
+fllame serve llama-3-8b-instruct --yes         # skip the sanity checks' confirmation prompts
 fllame status                                  # docker compose ps
 fllame stop llama-3-8b-instruct                # docker compose stop
 ```
@@ -197,7 +197,15 @@ build always succeeds.
 pin its own (`fllame config set-default-image ...` / `fllame config
 show`), stored in `$FLLAME_CONFIG_FILE` (default
 `~/.config/fllame/config.yaml`). Changing it applies to every recipe
-that doesn't set its own `image` - nothing needs re-adding.
+that doesn't set its own `image` on that recipe's next `serve`/`recipe
+build` - nothing needs re-adding. It doesn't retroactively touch any
+`compose.yaml` already sitting on disk, though: `set-default-image`
+instead looks for existing `compose.yaml` files whose image is still
+exactly the previous default, lists them, and - only if you confirm -
+does a plain text substitution of just that `image:` value in each, so
+any other hand edits already in those files (gpu pinning, `shm_size:`,
+...) are left alone. A recipe pinned to something else, or a
+`compose.yaml` already changed to a different image, is never touched.
 
 `fllame hardware scan` detects NVIDIA GPU(s) via `nvidia-smi` (name, count,
 VRAM per GPU) and RAM via `/proc/meminfo`, and reports which vLLM
@@ -238,6 +246,14 @@ silently skipped whenever a confident comparison isn't possible: no
 GPU/RAM figure from the hardware scan, or no cached `.safetensors`
 files to measure.
 
+`serve` also warns - asking to confirm, unless `-y`/`--yes` - if the HF
+cache location it's about to mount has changed since this recipe's
+`compose.yaml` was last generated (e.g. `HF_HOME`/`HF_HUB_CACHE` moved).
+Regenerating silently would point the container at a different cache
+than before, which may not have this model in it even though the old
+location still does. Skipped on a recipe's first `serve`, or if the
+existing `compose.yaml` can't be read.
+
 Every generated compose file also sets `HF_HUB_OFFLINE=1` on the
 container unconditionally, so vLLM itself never attempts a network call
 either - the model is always already fully downloaded by the time it
@@ -263,7 +279,11 @@ A large download can hit a routine, transient Hub error partway through
 --apply`, and `recipe add --pull` all catch this and report a friendly
 message rather than a raw traceback, noting that already-downloaded
 files stay cached, so re-running the same command resumes rather than
-starting over.
+starting over. The same three commands also catch a permission error
+writing into the cache (the HF cache directory is shared - something
+else, like a container that once wrote there as a different user, can
+leave files behind your account can't touch) and report the exact
+`chown` command to fix it, rather than a bare OS error.
 
 ### Where compose.yaml lives
 

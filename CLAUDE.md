@@ -377,7 +377,53 @@ exception text doesn't say. `model pull`/`recipe add --pull` exit
 non-zero on this; `model update --apply` instead reports that one
 repo's row as "download interrupted - rerun to resume" and continues
 checking the rest, so one bad re-pull doesn't blank out the whole
-table's results.
+table's results. The same three call sites also catch `PermissionError`
+separately, via `cli.py`'s `_friendly_permission_error` - the HF cache
+is a directory shared with anything else that ever writes into it (most
+plausibly a `serve` container that ran without `HF_HUB_OFFLINE` in
+effect, e.g. via the hand-edited-compose-file escape hatch, while the
+vLLM image ran as root - fllame itself never elevates privileges
+anywhere in its own code), and a permission mismatch left behind by
+that is fixed by reclaiming ownership, not by retrying - the message
+names `config.hf_cache_dir()` and the exact `sudo chown -R $(id -u):
+$(id -g) <cache dir>` command rather than just relaying the bare
+`OSError` text.
+
+Before `serve` regenerates a recipe's `compose.yaml` (see the
+architecture paragraph below - it always does, on every invocation),
+`cli.py`'s `_warn_if_cache_location_changed` compares the HF cache
+directory it's about to mount against whatever host path is already
+baked into that recipe's *existing* `compose.yaml`, if one exists
+(`fllame/backends/vllm.py`'s `cache_volume_host_path`, reading the
+volume list already written there rather than needing to know its
+shape from scratch). A silent regeneration here would repoint the
+container at a different cache without saying so, which may not have
+this model in it even though the old location still does - so a
+mismatch warns and asks to confirm (`-y`/`--yes` skips the prompt,
+warning still printed), the same shape as the VRAM check above. Skipped
+entirely on a recipe's first `serve` (nothing to compare against yet)
+or when the existing file can't be parsed - never blocking the routine
+case.
+
+`fllame config set-default-image` only changes what an *unpinned*
+recipe (`image: null`) resolves to on its next `serve`/`recipe build` -
+that already happens for free, since both regenerate `compose.yaml`
+from the recipe and the current config on every invocation (see
+"Layering" above). What it doesn't do on its own is touch any
+`compose.yaml` already sitting on disk from before the change. Since
+`compose.yaml` is meant to be hand-editable (see the architecture
+paragraph below and the README's "Advanced" section - gpu pinning,
+`shm_size:`, a removed `HF_HUB_OFFLINE`), a blanket regeneration to
+pick up the new image would also silently discard any of those edits -
+so `config set-default-image` instead offers a narrower fix: `cli.py`'s
+`_compose_files_using_image` finds every existing `compose.yaml` whose
+service `image:` is a *literal, exact match* for the previous default
+(never a recipe that pins its own image, and never a `compose.yaml`
+already hand-edited to something else - both fail the exact-match
+check on their own), lists them, and asks to confirm before
+`_replace_image_in_compose_file` does a plain text substitution of just
+that `image:` line's value - not a YAML round-trip, so nothing else in
+the file (formatting, comments, an unrelated hand edit) is touched.
 
 ## Explicitly deferred (implemented as an interface/hook, not a concrete answer)
 
@@ -603,3 +649,24 @@ table's results.
   `LocalEntryNotFoundError`) reach the operator - see the architecture
   paragraph above for why no separate `LocalEntryNotFoundError` catch
   is needed.
+- The same three `pull_model` call sites also catch `PermissionError`
+  separately, via `cli.py`'s new `_friendly_permission_error` - a
+  shared-cache ownership mismatch (see the architecture paragraph
+  above) gets a message naming the cache directory and the exact
+  `chown` command to fix it, instead of a bare `OSError` traceback.
+- `fllame serve`'s new `_warn_if_cache_location_changed` (`cli.py`) -
+  warns and asks to confirm, before regenerating a recipe's
+  `compose.yaml`, if the HF cache directory it would now mount differs
+  from what's already baked into that recipe's existing `compose.yaml`
+  (`fllame/backends/vllm.py`'s new `cache_volume_host_path` reads the
+  existing file's volume entry for the comparison). `-y`/`--yes` skips
+  the confirmation, same as the VRAM check; silently skipped on a
+  recipe's first `serve` or an unparseable existing file.
+- `fllame config set-default-image` now offers to update every existing
+  `compose.yaml` whose image is a literal, exact match for the previous
+  default (`cli.py`'s `_compose_files_using_image`) - a plain text
+  substitution of just the `image:` value
+  (`_replace_image_in_compose_file`), not a regeneration, so any other
+  hand edits already in those files survive untouched. Skipped
+  entirely when there was no previous default to search for, or the new
+  image is unchanged from it.

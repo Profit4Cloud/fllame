@@ -1,7 +1,23 @@
 from pathlib import Path
 
-from fllame.backends.vllm import VllmServingBackend
+from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path
 from fllame.domain.recipe import Recipe
+
+
+def test_cache_volume_host_path_extracts_host_side():
+    service = {"volumes": ["/home/alice/.cache/huggingface:/root/.cache/huggingface"]}
+
+    assert cache_volume_host_path(service) == "/home/alice/.cache/huggingface"
+
+
+def test_cache_volume_host_path_none_when_no_volumes():
+    assert cache_volume_host_path({}) is None
+
+
+def test_cache_volume_host_path_none_when_no_matching_mount():
+    service = {"volumes": ["/some/other/path:/some/other/container/path"]}
+
+    assert cache_volume_host_path(service) is None
 
 
 def test_build_service_with_gpus(monkeypatch):

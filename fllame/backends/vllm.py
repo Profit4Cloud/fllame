@@ -69,6 +69,21 @@ def _host_volume_source(hf_cache_dir: Path) -> str:
     return "${HOME}" if str(relative) == "." else f"${{HOME}}/{relative.as_posix()}"
 
 
+def cache_volume_host_path(service: dict) -> str | None:
+    """The host side of `service`'s HF cache bind mount (see
+    `_host_volume_source`/`build_service`), or `None` if `service` has
+    no volumes at all or none of them mount `_CONTAINER_HF_HOME` - lets
+    a caller compare an already-generated `compose.yaml`'s cache mount
+    against what would be generated now, without needing to know the
+    volume list's internal shape itself.
+    """
+    for volume in service.get("volumes", []):
+        host, _, container = volume.partition(":")
+        if container == _CONTAINER_HF_HOME:
+            return host
+    return None
+
+
 class VllmServingBackend:
     name = "vllm"
 
