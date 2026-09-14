@@ -67,11 +67,18 @@ Layers from low to high:
 2. **`recipe`** (`fllame.domain.recipe`, `fllame.recipes.*`)
 3. **`serve`** (`cli.py`)
 
+### Compose.yaml is editable by user
+
+A compose.yaml is generated with `recipe build HANDLE` or with `recipe add [--build]` and at no other time. 
+Advanced users are expected to edit the compose.yaml manually, so fllame should not overwrite these changes.
+The only exception `config set-default-image IMAGE`. The user is asked if the compose.yaml files should be updated. 
+If confirmed, a text replace is done, replaceing the old image with the new image. Manually edited images different from the default are left untouched. 
+
 ## Implemented commands
 
 - recipe list — List every recipe handle in $FLLAME_RECIPES_DIR.
 - recipe show HANDLE — Print HANDLE's resolved recipe as YAML.
-- recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--gpus GPUS] [--pull] [--build] — Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
+- recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] — Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
 - recipe build HANDLE — Regenerate HANDLE's compose.yaml standalone, without starting it.
 - recipe edit HANDLE — Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
 - recipe remove HANDLE [--yes] — Delete HANDLE's whole recipe folder.
