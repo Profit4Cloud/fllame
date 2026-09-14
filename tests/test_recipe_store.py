@@ -3,12 +3,20 @@ from pathlib import Path
 import pytest
 
 from fllame.domain.recipe import Recipe, RecipeError
-from fllame.recipes.store import RecipeStore
+from fllame.recipes.store import RecipeStore, autofix_whitespace
+
+
+def _write(tmp_path: Path, handle: str, text: str) -> None:
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "recipe.yaml").write_text(text)
 
 
 def test_list_and_load(tmp_path: Path):
-    (tmp_path / "demo.yaml").write_text(
-        "repo_id: org/demo\nimage: vllm/vllm-openai:v0.27.1\nport: 9001\n"
+    _write(
+        tmp_path,
+        "demo",
+        "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo --port 9001\n",
     )
     store = RecipeStore(tmp_path)
 
@@ -25,6 +33,123 @@ def test_missing_recipe_raises(tmp_path: Path):
         store.load("nope")
 
 
+def test_load_malformed_yaml_raises_recipe_error_not_yaml_error(tmp_path: Path):
+    _write(
+        tmp_path,
+        "demo",
+        "image: vllm/vllm-openai:v0.27.1\n\tcommand: vllm serve org/demo\n",
+    )
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="invalid YAML"):
+        store.load("demo")
+
+
+def test_load_non_mapping_content_raises_recipe_error(tmp_path: Path):
+    _write(tmp_path, "demo", "- just\n- a\n- list\n")
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="mapping"):
+        store.load("demo")
+
+
+def test_load_empty_file_raises_missing_command(tmp_path: Path):
+    _write(tmp_path, "demo", "")
+    store = RecipeStore(tmp_path)
+
+    with pytest.raises(RecipeError, match="command"):
+        store.load("demo")
+
+
+def test_load_tolerates_stripped_leading_whitespace_on_command_block(tmp_path: Path):
+    """The exact mistake that's easy to make hand-editing a recipe:
+    the command block's leading indentation looks meaningless and gets
+    deleted - which would otherwise break the YAML literal block scalar
+    outright, not just this field."""
+    _write(
+        tmp_path,
+        "demo",
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "vllm serve org/demo \\\n"
+        "--tensor-parallel-size 1 \\\n"
+        "--enable-auto-tool-choice\n",
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.repo_id == "org/demo"
+    assert recipe.serve_args == ["--tensor-parallel-size", "1", "--enable-auto-tool-choice"]
+
+
+def test_load_tolerates_missing_trailing_backslash_on_command_lines(tmp_path: Path):
+    """Some model cards/recipes.vllm.ai examples show one flag per line
+    with no continuation marker at all - fllame shouldn't require one."""
+    _write(
+        tmp_path,
+        "demo",
+        "command: |-\n"
+        "  vllm serve org/demo\n"
+        "  --tensor-parallel-size 1\n"
+        "  --enable-auto-tool-choice\n",
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.serve_args == ["--tensor-parallel-size", "1", "--enable-auto-tool-choice"]
+
+
+def test_load_command_block_stops_at_next_top_level_key(tmp_path: Path):
+    """`command` doesn't strictly have to be last - a following
+    unindented `key:` line (no blank line needed) still ends its
+    section correctly."""
+    _write(
+        tmp_path,
+        "demo",
+        "command: |-\n  vllm serve org/demo \\\n  --tensor-parallel-size 1\n"
+        "image: after-the-command-block\n",
+    )
+    store = RecipeStore(tmp_path)
+
+    recipe = store.load("demo")
+
+    assert recipe.serve_args == ["--tensor-parallel-size", "1"]
+    assert recipe.image == "after-the-command-block"
+
+
+def test_load_flat_single_line_command_without_block_marker(tmp_path: Path):
+    _write(tmp_path, "demo", "command: vllm serve org/demo --port 9000\n")
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").port == 9000
+
+
+def test_load_quoted_flat_command(tmp_path: Path):
+    _write(tmp_path, "demo", 'command: "vllm serve org/demo"\n')
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").repo_id == "org/demo"
+
+
+def test_autofix_whitespace_expands_tabs_and_normalizes_line_endings():
+    text = "image: img\r\nenv:\r\n\tFOO: bar  \r\ncommand: vllm serve org/demo\r\n"
+
+    fixed = autofix_whitespace(text)
+
+    assert "\t" not in fixed
+    assert "\r" not in fixed
+    assert "  \n" not in fixed  # trailing whitespace stripped
+    assert fixed == "image: img\nenv:\n  FOO: bar\ncommand: vllm serve org/demo\n"
+
+
+def test_autofix_whitespace_is_noop_on_clean_text():
+    text = "image: img\ncommand: vllm serve org/demo\n"
+
+    assert autofix_whitespace(text) == text
+
+
 def test_missing_directory_lists_nothing(tmp_path: Path):
     store = RecipeStore(tmp_path / "does-not-exist")
 
@@ -38,28 +163,91 @@ def test_next_available_handle_no_collision(tmp_path: Path):
 
 
 def test_next_available_handle_suffixes_on_collision(tmp_path: Path):
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nimage: img\n")
+    _write(tmp_path, "demo", "command: vllm serve org/demo\nimage: img\n")
     store = RecipeStore(tmp_path)
 
     assert store.next_available_handle("demo") == "demo_2"
 
 
 def test_next_available_handle_skips_multiple_collisions(tmp_path: Path):
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nimage: img\n")
-    (tmp_path / "demo_2.yaml").write_text("repo_id: org/demo\nimage: img\n")
+    _write(tmp_path, "demo", "command: vllm serve org/demo\nimage: img\n")
+    _write(tmp_path, "demo_2", "command: vllm serve org/demo\nimage: img\n")
     store = RecipeStore(tmp_path)
 
     assert store.next_available_handle("demo") == "demo_3"
 
 
 def test_save_then_load_round_trips(tmp_path: Path):
+    """save() canonicalizes `command` into a multi-line block, so the
+    loaded recipe's `command` field isn't byte-identical to the one
+    Recipe(...) was constructed with here - checked via to_dict() (which
+    is idempotent under that canonicalization) rather than raw equality.
+    """
     store = RecipeStore(tmp_path / "nested")
     recipe = Recipe(
         handle="demo",
-        repo_id="org/demo",
+        command="vllm serve org/demo --max-model-len 8192",
         image="vllm/vllm-openai:v0.27.1",
         env={"FOO": "bar"},
-        serve_args=["--max-model-len", "8192"],
+    )
+
+    store.save(recipe)
+    loaded = store.load("demo")
+
+    assert loaded.to_dict() == recipe.to_dict()
+    assert loaded.repo_id == recipe.repo_id
+    assert loaded.serve_args == recipe.serve_args
+
+
+def test_save_writes_recipe_yaml_inside_its_own_handle_folder(tmp_path: Path):
+    """`recipe.yaml` lives at `<recipes_dir>/<handle>/recipe.yaml`, not
+    a flat `<handle>.yaml` - the same folder that later holds this
+    handle's generated `compose.yaml` (see `fllame/config.py`'s
+    `recipe_dir`)."""
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    store.save(recipe)
+
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+    assert not (tmp_path / "demo.yaml").exists()
+
+
+def test_save_omits_empty_env(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    store.save(recipe)
+
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "env:" not in text
+
+
+def test_save_omits_image_when_unset(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(handle="demo", command="vllm serve org/demo")
+
+    store.save(recipe)
+
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "image:" not in text
+    assert store.load("demo").image is None
+
+
+def test_load_recipe_without_image_key(tmp_path: Path):
+    _write(tmp_path, "demo", "command: vllm serve org/demo\n")
+    store = RecipeStore(tmp_path)
+
+    assert store.load("demo").image is None
+
+
+def test_save_then_load_round_trips_preinstall(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo",
+        image="img",
+        preinstall=["pip install -U transformers"],
     )
 
     store.save(recipe)
@@ -68,24 +256,79 @@ def test_save_then_load_round_trips(tmp_path: Path):
     assert loaded == recipe
 
 
-def test_save_omits_empty_env_and_serve_args(tmp_path: Path):
+def test_save_omits_empty_preinstall(tmp_path: Path):
     store = RecipeStore(tmp_path)
-    recipe = Recipe(handle="demo", repo_id="org/demo", image="img")
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
 
     store.save(recipe)
 
-    text = (tmp_path / "demo.yaml").read_text()
-    assert "env:" not in text
-    assert "serve_args:" not in text
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "preinstall:" not in text
 
 
-def test_remove_deletes_file(tmp_path: Path):
-    (tmp_path / "demo.yaml").write_text("repo_id: org/demo\nimage: img\n")
+def test_save_writes_command_last(tmp_path: Path):
+    """`command` is the copy-pasteable part - kept last in the file so
+    it's easy to find and select regardless of what else the recipe
+    sets."""
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo",
+        image="img",
+        env={"FOO": "bar"},
+        preinstall=["pip install -U transformers"],
+    )
+
+    store.save(recipe)
+
+    lines = [
+        line for line in (tmp_path / "demo" / "recipe.yaml").read_text().splitlines() if line
+    ]
+    assert lines[-1] == "command: vllm serve org/demo"
+
+
+def test_save_renders_multi_arg_command_as_literal_block(tmp_path: Path):
+    store = RecipeStore(tmp_path)
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo --tensor-parallel-size 1 --enable-auto-tool-choice",
+    )
+
+    store.save(recipe)
+
+    assert (tmp_path / "demo" / "recipe.yaml").read_text() == (
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1 \\\n"
+        "  --enable-auto-tool-choice\n"
+    )
+    # Round-trips back to the same tokens, backslashes and all.
+    assert store.load("demo").serve_args == [
+        "--tensor-parallel-size",
+        "1",
+        "--enable-auto-tool-choice",
+    ]
+
+
+def test_remove_deletes_folder(tmp_path: Path):
+    _write(tmp_path, "demo", "command: vllm serve org/demo\nimage: img\n")
     store = RecipeStore(tmp_path)
 
     store.remove("demo")
 
-    assert not (tmp_path / "demo.yaml").exists()
+    assert not (tmp_path / "demo").exists()
+
+
+def test_remove_also_deletes_a_sibling_generated_compose_file(tmp_path: Path):
+    """recipe.yaml and compose.yaml live in the same handle folder -
+    removing a recipe takes both, not just recipe.yaml."""
+    _write(tmp_path, "demo", "command: vllm serve org/demo\nimage: img\n")
+    (tmp_path / "demo" / "compose.yaml").write_text("services: {}\n")
+    store = RecipeStore(tmp_path)
+
+    store.remove("demo")
+
+    assert not (tmp_path / "demo").exists()
 
 
 def test_remove_missing_recipe_raises(tmp_path: Path):

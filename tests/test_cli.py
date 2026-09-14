@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError
 from typer.testing import CliRunner
 
 import fllame.cli as cli
@@ -8,17 +8,56 @@ from fllame import config
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.discovery import ModelCandidate
+from fllame.models.updater import UpdateStatus
 
 runner = CliRunner()
 
 
 def _write_recipe(tmp_path: Path, handle: str = "demo") -> None:
-    (tmp_path / f"{handle}.yaml").write_text("repo_id: org/demo\nimage: vllm/vllm-openai:v0.27.1\n")
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo\n"
+    )
+
+
+def _write_compose(tmp_path: Path, handle: str = "demo") -> None:
+    """Writes HANDLE's compose.yaml via `recipe build`, the only command
+    that ever does - callers must already have `is_model_cached` mocked
+    True."""
+    result = runner.invoke(app, ["recipe", "build", handle])
+    assert result.exit_code == 0, result.output
+
+
+_NO_HARDWARE_SIGNAL = HardwareProfile(
+    gpu_name=None,
+    gpu_count=0,
+    vram_gb_per_gpu=None,
+    ram_gb=None,
+    chip_family="none",
+    supported_quantizations=[],
+    scanned_at="",
+)
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FLLAME_RECIPES_DIR", str(tmp_path))
-    monkeypatch.setenv("FLLAME_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("FLLAME_CONFIG_FILE", str(tmp_path / "config.yaml"))
+    # `serve`'s pre-flight VRAM sanity check silently skips without a
+    # memory-budget figure to compare against - this is the default for
+    # every test so it never fires (and never scans this machine's real
+    # HF cache) unless a test explicitly opts into exercising it (see
+    # the test_serve_vram_* tests below).
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _NO_HARDWARE_SIGNAL)
+
+
+def _dialogue_input(*parts: str) -> str:
+    """Builds stdin input for `recipe add`'s guided dialogue: each part
+    is one line. A blank ("") part accepts the image prompt's prefilled
+    default, or ends whichever of the preinstall/env/command blocks is
+    currently being read.
+    """
+    return "\n".join(parts) + "\n"
 
 
 class _FakeCompletedProcess:
@@ -28,6 +67,14 @@ class _FakeCompletedProcess:
 def _capturing_run(captured: dict):
     def fake_run(command):
         captured["command"] = command
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
+def _capturing_run_all(commands: list):
+    def fake_run(command):
+        commands.append(command)
         return _FakeCompletedProcess()
 
     return fake_run
@@ -104,9 +151,14 @@ def test_recipe_show_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
-def test_recipe_add_from_pasted_block(tmp_path: Path, monkeypatch):
+def test_recipe_add_dialogue_collects_env_and_command(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = "export FOO=bar\nvllm serve meta-llama/Llama-3-8B-Instruct --port 8000\n"
+    pasted = _dialogue_input(
+        "",  # no preinstall commands
+        "FOO=bar",
+        "",  # end env vars
+        "vllm serve meta-llama/Llama-3-8B-Instruct --port 8000",
+    )
 
     result = runner.invoke(
         app,
@@ -115,7 +167,7 @@ def test_recipe_add_from_pasted_block(tmp_path: Path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "llama-3-8b-instruct.yaml"
+    saved = tmp_path / "llama-3-8b-instruct" / "recipe.yaml"
     assert saved.is_file()
     assert "meta-llama/Llama-3-8B-Instruct" in saved.read_text()
     assert "FOO: bar" in saved.read_text()
@@ -141,7 +193,7 @@ def test_recipe_add_accepts_vllm_serve_line_as_trailing_args(tmp_path: Path, mon
     )
 
     assert result.exit_code == 0
-    saved = tmp_path / "qwen3-8b-fp8.yaml"
+    saved = tmp_path / "qwen3-8b-fp8" / "recipe.yaml"
     assert saved.is_file()
     text = saved.read_text()
     assert "Qwen/Qwen3-8B-FP8" in text
@@ -163,14 +215,14 @@ def test_recipe_add_trailing_args_bad_paste_still_validates(tmp_path: Path, monk
 
 def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = "vllm serve org/demo\n"
+    pasted = _dialogue_input("", "", "vllm serve org/demo")
 
     runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
     result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
 
     assert result.exit_code == 0
-    assert (tmp_path / "demo.yaml").is_file()
-    assert (tmp_path / "demo_2.yaml").is_file()
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+    assert (tmp_path / "demo_2" / "recipe.yaml").is_file()
 
 
 def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
@@ -179,7 +231,7 @@ def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
-        input="vllm serve org/demo\n",
+        input=_dialogue_input("", "", "vllm serve org/demo"),
     )
 
     assert "unpinned" not in result.output
@@ -191,23 +243,125 @@ def test_recipe_add_unpinned_image_warns(tmp_path: Path, monkeypatch):
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "vllm/vllm-openai:latest"],
-        input="vllm serve org/demo\n",
+        input=_dialogue_input("", "", "vllm serve org/demo"),
     )
 
     assert "unpinned" in result.output
 
 
-def test_recipe_add_rejects_bad_paste(tmp_path: Path, monkeypatch):
+def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(
         app,
         ["recipe", "add", "--image", "img:v1"],
-        input="docker run img:v1\n",
+        input=_dialogue_input("", "", "docker run img:v1"),
     )
 
     assert result.exit_code == 1
-    assert list(tmp_path.glob("*.yaml")) == []
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
+
+
+def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, monkeypatch):
+    """Some model card/recipes.vllm.ai examples show one flag per line
+    with no `\\` continuation marker at all - the dialogue shouldn't
+    require one."""
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        "",
+        "",
+        "vllm serve org/demo",
+        "--tensor-parallel-size 1",
+        "--enable-auto-tool-choice",
+    )
+
+    result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+
+    assert result.exit_code == 0
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "--tensor-parallel-size" in text
+    assert "--enable-auto-tool-choice" in text
+
+
+def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1"],
+        input=_dialogue_input("", ""),
+    )
+
+    assert result.exit_code == 1
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
+
+
+def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        "pip install -U 'transformers>=5.8.0'",
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "preinstall:" in text
+    assert "transformers>=5.8.0" in text
+
+
+def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeypatch):
+    """`uv pip install ...`, common on a pasted model card, targets the
+    uv-managed venv `vllm serve` doesn't actually run in - fllame swaps
+    in plain `pip install` automatically and tells the operator, since
+    it silently changes what they typed."""
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        'uv pip install -U "transformers>=5.8.0"',
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    assert "replaced 'uv pip install' with 'pip install'" in result.output
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert "uv pip install" not in text
+    assert 'pip install -U "transformers>=5.8.0"' in text
+
+
+def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    pasted = _dialogue_input(
+        "pip install -U transformers",
+        "",  # end preinstall
+        "",  # no env vars
+        "vllm serve org/demo",
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        input=pasted,
+    )
+
+    assert result.exit_code == 0
+    assert "replaced 'uv pip install'" not in result.output
 
 
 def test_recipe_edit_missing_handle(tmp_path: Path, monkeypatch):
@@ -233,20 +387,101 @@ def test_recipe_edit_revalidates_after_editing(tmp_path: Path, monkeypatch):
     assert "valid" in result.output
 
 
-def test_recipe_edit_reports_now_invalid_recipe(tmp_path: Path, monkeypatch):
+def test_recipe_edit_tolerates_stripped_command_indentation_and_renormalizes(
+    tmp_path: Path, monkeypatch
+):
+    """The exact mistake reported: hand-editing strips what looks like
+    meaningless leading whitespace from the command block, which would
+    otherwise break the YAML literal block scalar outright. Not only
+    should this load fine (RecipeStore.load's own leniency), the file
+    should come back out re-normalized to fllame's canonical rendering,
+    not left in the technically-fragile shape the edit left it in."""
     _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1\n"
+    )
 
     def fake_edit(filename):
-        Path(filename).write_text("repo_id: org/demo\n")  # image now missing
-        return None
+        p = Path(filename)
+        p.write_text("\n".join(line.lstrip() for line in p.read_text().splitlines()) + "\n")
 
     monkeypatch.setattr(cli.click, "edit", fake_edit)
 
     result = runner.invoke(app, ["recipe", "edit", "demo"])
 
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    text = (tmp_path / "demo" / "recipe.yaml").read_text()
+    assert text == (
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: |-\n"
+        "  vllm serve org/demo \\\n"
+        "  --tensor-parallel-size 1\n"
+    )
+
+
+def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    original = (tmp_path / "demo" / "recipe.yaml").read_text()
+
+    def fake_edit(filename):
+        Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # command now missing
+        return None
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"], input="n\n")
+
     assert result.exit_code == 1
     assert "no longer a valid recipe" in result.output
+    assert "reverted" in result.output
+    assert (tmp_path / "demo" / "recipe.yaml").read_text() == original
+
+
+def test_recipe_edit_reopens_editor_and_succeeds_when_accepted(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    calls = []
+
+    def fake_edit(filename):
+        calls.append(None)
+        if len(calls) == 1:
+            Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # invalid
+        else:
+            Path(filename).write_text("command: vllm serve org/demo\n")  # now fixed
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    assert len(calls) == 2
+
+
+def test_recipe_edit_autofixes_tab_indentation_without_prompting(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    def fake_edit(filename):
+        Path(filename).write_text(
+            "image: vllm/vllm-openai:v0.27.1\nenv:\n\tFOO: bar\ncommand: vllm serve org/demo\n"
+        )
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 0
+    assert "saved and valid" in result.output
+    assert "\t" not in (tmp_path / "demo" / "recipe.yaml").read_text()
 
 
 def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
@@ -256,7 +491,7 @@ def test_recipe_remove_with_yes_flag(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
 
     assert result.exit_code == 0
-    assert not (tmp_path / "demo.yaml").exists()
+    assert not (tmp_path / "demo" / "recipe.yaml").exists()
 
 
 def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
@@ -266,7 +501,19 @@ def test_recipe_remove_prompts_and_respects_no(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "demo"], input="n\n")
 
     assert result.exit_code == 0
-    assert (tmp_path / "demo.yaml").exists()
+    assert (tmp_path / "demo" / "recipe.yaml").exists()
+
+
+def test_recipe_remove_deletes_its_generated_compose_folder(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "compose.yaml").write_text("services: {}\n")
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert not handle_folder.exists()
 
 
 def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
@@ -275,6 +522,223 @@ def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["recipe", "remove", "nope", "--yes"])
 
     assert result.exit_code == 1
+
+
+def test_recipe_add_dialogue_prompts_for_image_when_no_default_configured(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input("vllm/vllm-openai:v0.27.1", "", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo" / "recipe.yaml"
+    assert "image: vllm/vllm-openai:v0.27.1" in saved.read_text()
+
+
+def test_recipe_add_dialogue_accepting_configured_default_leaves_image_unset(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input("", "", "", "vllm serve org/demo"),  # accept the prefilled default
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo" / "recipe.yaml"
+    # Not written into the recipe - it should keep following the
+    # configured default even if that default changes later.
+    assert "image:" not in saved.read_text()
+
+
+def test_recipe_add_dialogue_overriding_configured_default_pins_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input(
+            "vllm/vllm-openai:v0.28.0", "", "", "vllm serve org/demo"
+        ),  # typed something different from the prefilled default
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo" / "recipe.yaml"
+    assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
+
+
+def test_recipe_add_explicit_image_flag_overrides_configured_default(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "vllm/vllm-openai:v0.28.0"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    saved = tmp_path / "demo" / "recipe.yaml"
+    assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
+
+
+def test_recipe_add_warns_when_configured_default_is_unpinned(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add"],
+        input=_dialogue_input("", "", "", "vllm serve org/demo"),  # accept the unpinned default
+    )
+
+    assert "unpinned" in result.output
+
+
+def test_config_show_unset(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert "unset" in result.stdout
+    assert "vllm/vllm-openai:latest" in result.stdout
+
+
+def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert "unpinned" not in set_result.output
+    assert show_result.exit_code == 0
+    assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
+
+
+def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
+
+    assert "unpinned" in result.output
+
+
+def _write_compose_with_image(tmp_path: Path, handle: str, image: str) -> Path:
+    """A minimal, already-generated-looking compose.yaml, with a hand
+    edit (a custom `shm_size:`) alongside the `image:` line - used to
+    verify that batch image updates touch only the image value."""
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    compose_path = directory / "compose.yaml"
+    compose_path.write_text(
+        f"services:\n  {handle}:\n    image: {image}\n    shm_size: 2gb\n"
+    )
+    return compose_path
+
+
+def test_config_set_default_image_no_prior_default_skips_batch_update(
+    tmp_path: Path, monkeypatch
+):
+    """With no previously configured default, there's no old value to
+    search compose.yaml files for - nothing to prompt about."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:latest")
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    assert result.exit_code == 0
+    assert "compose.yaml" not in result.output
+
+
+def test_config_set_default_image_offers_batch_update_and_applies_on_confirm(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
+    )
+
+    assert result.exit_code == 0
+    assert str(compose_path) in result.output
+    text = compose_path.read_text()
+    assert "image: vllm/vllm-openai:v0.27.1" in text
+    # Nothing else in the hand-edited file was touched.
+    assert "shm_size: 2gb" in text
+
+
+def test_config_set_default_image_batch_update_declined_leaves_files_untouched(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="n\n"
+    )
+
+    assert result.exit_code == 0
+    assert "image: vllm/vllm-openai:v0.26.0" in compose_path.read_text()
+
+
+def test_config_set_default_image_never_touches_a_custom_pinned_image(
+    tmp_path: Path, monkeypatch
+):
+    """A compose.yaml whose image doesn't literally match the previous
+    default - a recipe-level pin, or a hand edit - is never listed or
+    replaced, confirmation or not."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "custom/pinned-image:v1")
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    assert result.exit_code == 0
+    assert "compose.yaml" not in result.output
+    assert "image: custom/pinned-image:v1" in compose_path.read_text()
+
+
+def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    result = runner.invoke(app, ["recipe", "show", "demo"])
+
+    assert result.exit_code == 0
+    assert "vllm/vllm-openai:v0.27.1" in result.stdout
+
+
+def test_recipe_show_falls_back_to_hardcoded_image_when_nothing_configured(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+
+    result = runner.invoke(app, ["recipe", "show", "demo"])
+
+    assert result.exit_code == 0
+    assert "vllm/vllm-openai:latest" in result.stdout
 
 
 def test_hardware_scan_with_gpu(monkeypatch):
@@ -343,15 +807,53 @@ def test_hardware_scan_no_gpu(monkeypatch):
     assert "none detected" in result.stdout
 
 
-def test_model_pull_downloads_recipes_model(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
+def test_model_pull_downloads_given_repo_id(monkeypatch):
+    """`model pull` takes a repo_id directly, not a recipe handle -
+    `model` commands never depend on recipes (see CLAUDE.md,
+    "Layering")."""
     monkeypatch.setattr(cli, "pull_model", lambda repo_id: f"/cache/{repo_id}")
 
-    result = runner.invoke(app, ["model", "pull", "demo"])
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
 
     assert result.exit_code == 0
     assert "org/demo" in result.stdout
+
+
+def test_model_pull_hub_error_gives_friendly_message_not_traceback(monkeypatch):
+    """A transient Hub failure mid-download (rate limiting, a connection
+    blip) must never surface as a raw traceback - see CLAUDE.md/git
+    history for the real-world case this guards against."""
+
+    def raise_error(repo_id):
+        raise HfHubHTTPError("429 Client Error: Too Many Requests")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
+
+    assert result.exit_code == 1
+    assert "429 Client Error" in result.output
+    assert "resume rather than start over" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_model_pull_permission_error_gives_friendly_message(monkeypatch):
+    """The HF cache is shared - something else (e.g. a `serve` container
+    that ran as root) can leave files behind the operator's own account
+    can't write to. This must never surface as a raw traceback either,
+    and the message should point at the fix (chown), not just print the
+    bare OS error."""
+
+    def raise_error(repo_id):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(app, ["model", "pull", "org/demo"])
+
+    assert result.exit_code == 1
+    assert "chown" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_model_list_empty(monkeypatch):
@@ -377,6 +879,180 @@ def test_model_list_shows_cached_repos(monkeypatch):
     assert "org/demo" in result.stdout
     assert "16.1GB" in result.stdout
     assert "2 days ago" in result.stdout
+
+
+def test_model_update_no_cached_models(monkeypatch):
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [])
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 0
+    assert "No models cached" in result.stdout
+
+
+def test_model_update_reports_up_to_date_and_stale(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/fresh"), _FakeRepo("org/stale")]
+    )
+
+    def fake_check(repo_id):
+        if repo_id == "org/fresh":
+            return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="a")
+        return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="b")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 0
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
+    assert "org/stale" in result.stdout
+    assert "stale" in result.stdout
+
+
+def test_model_update_checks_only_given_repo_id(monkeypatch):
+    """`model update REPO_ID` takes a repo_id directly, not a recipe
+    handle - same layering reasoning as `model pull`."""
+    seen = []
+
+    def fake_check(repo_id):
+        seen.append(repo_id)
+        return UpdateStatus(repo_id=repo_id, cached_revision="a", latest_revision="a")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update", "org/demo"])
+
+    assert result.exit_code == 0
+    assert seen == ["org/demo"]
+
+
+def test_model_update_apply_repulls_stale_models_only(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/fresh"), _FakeRepo("org/stale")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/stale"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+    pulled = []
+    monkeypatch.setattr(cli, "pull_model", lambda repo_id: pulled.append(repo_id))
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert pulled == ["org/stale"]
+    assert "updated" in result.stdout
+
+
+def test_model_update_apply_reports_interrupted_download_and_continues(monkeypatch):
+    """A stale repo whose re-pull hits a transient Hub failure gets its
+    own row rather than crashing the whole table - the remaining repos'
+    statuses still get reported."""
+
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/broken"), _FakeRepo("org/fresh")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/broken"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    def fake_pull(repo_id):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "pull_model", fake_pull)
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert "org/broken" in result.stdout
+    assert "download interrupted" in result.stdout
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
+
+
+def test_model_update_apply_reports_permission_error_and_continues(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, repo_id):
+            self.repo_id = repo_id
+
+    monkeypatch.setattr(
+        cli, "list_cached_models", lambda: [_FakeRepo("org/broken"), _FakeRepo("org/fresh")]
+    )
+
+    def fake_check(repo_id):
+        stale = repo_id == "org/broken"
+        return UpdateStatus(
+            repo_id=repo_id, cached_revision="a", latest_revision="b" if stale else "a"
+        )
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    def fake_pull(repo_id):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", fake_pull)
+
+    result = runner.invoke(app, ["model", "update", "--apply"])
+
+    assert result.exit_code == 0
+    assert "org/broken" in result.stdout
+    assert "permission denied" in result.stdout
+    assert "chown" in result.output
+    assert "org/fresh" in result.stdout
+    assert "up to date" in result.stdout
+
+
+def test_model_update_reports_not_cached_for_never_pulled_repo(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "check_for_update",
+        lambda repo_id: UpdateStatus(repo_id=repo_id, cached_revision=None, latest_revision="a"),
+    )
+
+    result = runner.invoke(app, ["model", "update", "org/never-pulled"])
+
+    assert result.exit_code == 0
+    assert "not cached" in result.stdout
+
+
+def test_model_update_hub_unreachable_gives_friendly_error(monkeypatch):
+    class _FakeRepo:
+        repo_id = "org/demo"
+
+    monkeypatch.setattr(cli, "list_cached_models", lambda: [_FakeRepo()])
+
+    def fake_check(repo_id):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "check_for_update", fake_check)
+
+    result = runner.invoke(app, ["model", "update"])
+
+    assert result.exit_code == 1
+    assert "unreachable" in result.output
 
 
 def _hardware_profile(**overrides) -> HardwareProfile:
@@ -524,28 +1200,110 @@ def test_model_scan_no_results(monkeypatch):
     assert "No matching models" in result.stdout
 
 
-def test_serve_pulls_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):
+def test_serve_verifies_cache_then_invokes_docker_compose_up(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    pulled = []
-    monkeypatch.setattr(
-        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
-    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
     result = runner.invoke(app, ["serve", "demo", "--detach"])
 
     assert result.exit_code == 0
-    assert pulled == [("org/demo", False)]
     assert captured["command"][:3] == ["docker", "compose", "-f"]
     assert captured["command"][-3:] == ["up", "-d", "demo"]
+
+
+def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    command = captured["command"]
+    assert command[command.index("-f") + 1] == str(tmp_path / "demo" / "compose.yaml")
+    assert command[command.index("-p") + 1] == "fllame-demo"
+
+
+def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
+    """`docker compose up` never gets Docker's own image-build flag -
+    fllame has no custom image/Dockerfile to build, on top of never
+    invoking `docker compose` with `--build` at all."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "--build" not in captured["command"]
+
+
+def test_serve_requires_compose_already_built(tmp_path: Path, monkeypatch):
+    """`serve` never writes or regenerates `compose.yaml` itself -
+    that's `recipe build`'s job alone."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame recipe build" in result.output
+    assert called == []
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "preinstall:\n"
+        "- pip install -U transformers\n"
+        "command: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert "pip install -U transformers" in compose_text
+    assert not (tmp_path / "demo" / "Dockerfile").exists()
+
+
+def test_recipe_build_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
+    """A Dockerfile left over from an older fllame version's
+    build-a-custom-image approach is cleaned up on the next build."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "Dockerfile").write_text("FROM img\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert not (handle_folder / "Dockerfile").exists()
 
 
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -555,10 +1313,10 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     assert captured["command"][-2:] == ["up", "demo"]
 
 
-def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkeypatch):
+def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     called = []
-    monkeypatch.setattr(cli, "pull_model", lambda repo_id, offline=False: called.append("pull"))
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: called.append("cache-check"))
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
     result = runner.invoke(app, ["serve", "nope"])
@@ -567,45 +1325,349 @@ def test_serve_unknown_handle_never_pulls_or_calls_docker(tmp_path: Path, monkey
     assert called == []
 
 
-def test_serve_offline_passes_offline_to_pull_and_sets_container_env(tmp_path: Path, monkeypatch):
+def test_recipe_build_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch):
+    """HF_HUB_OFFLINE=1 is unconditional (VllmServingBackend bakes it
+    into every generated service) - the model is always already fully
+    downloaded by the time the container runs, so vLLM has no
+    legitimate need to reach the Hub itself."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    pulled = []
-    monkeypatch.setattr(
-        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
-    )
-    captured = {}
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
 
-    result = runner.invoke(app, ["serve", "demo", "--offline"])
+    result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
-    assert pulled == [("org/demo", True)]
-    compose_text = config.compose_file_path().read_text()
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
 
 
-def test_serve_offline_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
+def test_recipe_build_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache"))
 
-    def fake_pull(repo_id, offline=False):
-        raise LocalEntryNotFoundError("not cached")
+    # First build generates compose.yaml against this same cache location.
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
 
-    monkeypatch.setattr(cli, "pull_model", fake_pull)
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "cache location has changed" not in result.output
+
+
+def test_recipe_build_cache_location_changed_aborts_when_declined(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["recipe", "build", "demo"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "cache location has changed" in result.output
+    assert "/cache/old" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
+def test_recipe_build_cache_location_changed_continues_when_confirmed(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["recipe", "build", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "cache location has changed" in result.output
+    assert "/cache/new" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
+def test_recipe_build_yes_flag_skips_cache_location_confirmation_but_still_warns(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
+    result = runner.invoke(app, ["recipe", "build", "demo", "--yes"])  # no stdin needed
+
+    assert result.exit_code == 0
+    assert "cache location has changed" in result.output
+    assert "/cache/new" in (tmp_path / "demo" / "compose.yaml").read_text()
+
+
+_GPU_WITH_BUDGET = HardwareProfile(
+    gpu_name="NVIDIA A100 80GB PCIe",
+    gpu_count=1,
+    vram_gb_per_gpu=80.0,
+    ram_gb=256.0,
+    chip_family="nvidia",
+    supported_quantizations=["awq", "gptq", "fp8"],
+    scanned_at="2026-01-01T00:00:00+00:00",
+)
+
+
+def test_serve_vram_warning_aborts_when_declined(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
+    monkeypatch.setattr(
+        cli, "local_estimate_vram_gb", lambda repo_id: 100.0
+    )  # over the 68 GB budget
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
-    result = runner.invoke(app, ["serve", "demo", "--offline"])
+    result = runner.invoke(app, ["serve", "demo"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "estimated at 100.0 GB" in result.output
+    assert called == []
+
+
+def test_serve_vram_warning_continues_when_confirmed(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "estimated at 100.0 GB" in result.output
+
+
+def test_serve_yes_flag_skips_confirmation_but_still_warns(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])  # no stdin needed
+
+    assert result.exit_code == 0
+    assert "estimated at 100.0 GB" in result.output
+
+
+def test_serve_vram_check_silent_when_estimate_fits_budget(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 10.0)  # well under budget
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "warning" not in result.output
+
+
+def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypatch):
+    """No cached `.safetensors` files to measure yet (shouldn't happen
+    right after a successful pull, but a GGUF-only download would still
+    hit this) come back as `None` - never treated as a positive "it
+    fits" signal, but also never a warning without a real number."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
+    monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: None)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "warning" not in result.output
+
+
+def test_serve_cache_miss_gives_friendly_error(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 1
     assert "fllame model pull" in result.output
     assert called == []
 
 
+def test_recipe_build_fails_when_model_not_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame model pull" in result.output
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / "demo" / "compose.yaml").is_file()
+
+
+def test_recipe_build_unknown_handle(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "build", "nope"])
+
+    assert result.exit_code == 1
+
+
+def test_recipe_add_plain_neither_pulls_nor_builds(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    assert pulled == []
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    assert pulled == [("org/demo", False)]
+
+
+def test_recipe_add_pull_hub_error_gives_friendly_message(tmp_path: Path, monkeypatch):
+    """A transient Hub failure during `recipe add --pull`'s download
+    must not crash with a raw traceback - same fix as `model pull`."""
+    _isolate(tmp_path, monkeypatch)
+
+    def raise_error(repo_id, offline=False):
+        raise HfHubHTTPError("boom")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "resume rather than start over" in result.output
+    # The recipe itself is still saved even though the pull step failed.
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+
+
+def test_recipe_add_pull_permission_error_gives_friendly_message(tmp_path: Path, monkeypatch):
+    """Same fix as `model pull` - a permission error writing to the
+    shared HF cache must not crash with a raw traceback."""
+    _isolate(tmp_path, monkeypatch)
+
+    def raise_error(repo_id, offline=False):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "pull_model", raise_error)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "chown" in result.output
+    # The recipe itself is still saved even though the pull step failed.
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+
+
+def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--build"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 1
+    assert "fllame model pull" in result.output
+    # The recipe itself is still saved even though the build step failed.
+    assert (tmp_path / "demo" / "recipe.yaml").is_file()
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pulled = []
+    monkeypatch.setattr(
+        cli, "pull_model", lambda repo_id, offline=False: pulled.append((repo_id, offline))
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "--image", "img:v1", "--pull", "--build"],
+        input=_dialogue_input("", "", "vllm serve org/demo"),
+    )
+
+    assert result.exit_code == 0
+    # --pull's own download; --build's local cache-presence check.
+    assert pulled == [("org/demo", False)]
+    assert (tmp_path / "demo" / "compose.yaml").is_file()
+
+
 def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -615,9 +1677,75 @@ def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
     assert captured["command"][-1] == "ps"
 
 
+def test_status_shows_a_header_and_ps_per_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path, handle="demo-a")
+    _write_recipe(tmp_path, handle="demo-b")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path, handle="demo-a")
+    _write_compose(tmp_path, handle="demo-b")
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "== demo-a ==" in result.output
+    assert "== demo-b ==" in result.output
+    assert len(commands) == 2
+    projects = {command[command.index("-p") + 1] for command in commands}
+    assert projects == {"fllame-demo-a", "fllame-demo-b"}
+
+
+def test_status_no_recipes(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "No recipes found" in result.stdout
+
+
+def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path, handle="good")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path, handle="good")
+    (tmp_path / "bad").mkdir(parents=True)
+    (tmp_path / "bad" / "recipe.yaml").write_text("image: img\n")  # missing command
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "warning" in result.output
+    assert "== good ==" in result.output
+    assert "== bad ==" not in result.output
+    assert len(commands) == 1
+
+
+def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, monkeypatch):
+    """`status` never regenerates `compose.yaml` - a recipe that hasn't
+    been built yet is reported, not silently built or skipped."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "== demo ==" in result.output
+    assert "fllame recipe build" in result.output
+    assert called == []
+
+
 def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -627,9 +1755,24 @@ def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):
     assert captured["command"][-2:] == ["stop", "demo"]
 
 
+def test_stop_requires_compose_already_built(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["stop", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame recipe build" in result.output
+    assert called == []
+
+
 def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
 
     def raise_not_found(command):
         raise FileNotFoundError

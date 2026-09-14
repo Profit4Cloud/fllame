@@ -1,36 +1,38 @@
-"""fllame - a headless CLI for vLLM serving.
-
-`fllame serve <handle>` resolves a hand-edited recipe, guarantees the
-model is fully downloaded, and runs it as a Docker container via
-`docker compose`. See README.md for the recipe file format and CLAUDE.md
-for the architecture this sits on.
-"""
+"""fllame - a headless CLI for vLLM serving."""
 
 from __future__ import annotations
 
+import dataclasses
 import shlex
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import click
 import typer
 import yaml
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
-from fllame import config
-from fllame.backends.vllm import VllmServingBackend
+from fllame import config, config_file
+from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
+from fllame.domain.vllm_command import (
+    VllmCommandError,
+    join_command_lines,
+    parse_vllm_serve_command,
+)
 from fllame.hardware.scanner import scan_hardware
-from fllame.models.cache import list_cached_models
+from fllame.models.cache import is_model_cached, list_cached_models, local_estimate_vram_gb
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
+from fllame.models.updater import check_for_update
 from fllame.recipes.naming import derive_handle
-from fllame.recipes.parser import RecipePasteError, parse_pasted_recipe
-from fllame.recipes.store import RecipeStore
+from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
+from fllame.recipes.store import RecipeStore, autofix_whitespace
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
 # top of it - wired in explicitly since Click doesn't bind it by default.
@@ -43,12 +45,22 @@ hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTI
 app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
+config_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
+app.add_typer(config_app, name="config", help="View and change fllame's persisted settings.")
 
 BACKEND = VllmServingBackend()
+
+_FALLBACK_IMAGE = "vllm/vllm-openai:latest"
 
 
 def _recipe_store() -> RecipeStore:
     return RecipeStore(config.recipes_dir())
+
+
+def _resolve_image(recipe: Recipe) -> Recipe:
+    if recipe.image is not None:
+        return recipe
+    return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
 
 
 def _load_or_exit(handle: str) -> Recipe:
@@ -59,35 +71,55 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_compose_file(*, offline_handle: str | None = None) -> None:
-    """Regenerates the compose file from every valid recipe on file. An
-    invalid recipe is skipped with a warning rather than blocking every
-    other recipe from being served.
+def _write_recipe_compose(recipe: Recipe) -> None:
+    resolved = _resolve_image(recipe)
+    directory = config.recipe_dir(resolved.handle)
+    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
 
-    `offline_handle`, when set, forces that one service to run with
-    HF_HUB_OFFLINE=1 - an invocation-time concern (`fllame serve
-    --offline`), not a property of the recipe itself, so it's applied
-    here rather than threaded through `Recipe`/`ServingBackend`.
-    """
-    store = _recipe_store()
-    recipes = []
-    for handle in store.list_handles():
-        try:
-            recipes.append(store.load(handle))
-        except RecipeError as e:
-            typer.echo(f"warning: {e}", err=True)
-    compose = generate_compose(recipes, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
-    if offline_handle is not None and offline_handle in compose["services"]:
-        compose["services"][offline_handle]["environment"]["HF_HUB_OFFLINE"] = "1"
-    write_compose_file(compose, config.compose_file_path())
+    directory.mkdir(parents=True, exist_ok=True)
+    # Leftover from an older fllame version's preinstall handling.
+    stale_dockerfile = directory / "Dockerfile"
+    if stale_dockerfile.is_file():
+        stale_dockerfile.unlink()
+
+    write_compose_file(compose, directory / "compose.yaml")
+
+
+def _require_model_cached(recipe: Recipe) -> None:
+    if is_model_cached(recipe.repo_id):
+        return
+    typer.echo(
+        f"'{recipe.repo_id}' is not fully cached locally - run "
+        f"`fllame model pull {recipe.repo_id}` first.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _require_compose_built(recipe: Recipe) -> None:
+    if (config.recipe_dir(recipe.handle) / "compose.yaml").is_file():
+        return
+    typer.echo(
+        f"'{recipe.handle}' has no compose.yaml yet - run "
+        f"`fllame recipe build {recipe.handle}` first.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
+    """Shared by `recipe build` and `recipe add --build` - the only
+    two commands that ever write `compose.yaml`."""
+    _require_model_cached(recipe)
+    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes)
+    _write_recipe_compose(recipe)
+    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    typer.echo(f"wrote {compose_path}")
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
-    """Left-aligned, space-padded columns - `docker ps`/`kubectl get`
-    style, no border characters. The point is making a column (size,
-    quantization, ...) comparable at a glance down the page; a border
-    wouldn't add anything padding doesn't already give it.
-    """
+    """Left-aligned, space-padded columns - `docker ps` style, no
+    border characters."""
     all_rows = [headers, *rows]
     widths = [max(len(row[i]) for row in all_rows) for i in range(len(headers))]
     for row in all_rows:
@@ -96,9 +128,7 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
 
 
 def _format_count(n: int | None) -> str:
-    """A compact form of a download count - "12.3k", "1.2M" - so the
-    column stays narrow regardless of magnitude. Not locale-aware; this
-    is a terminal table, not user-facing prose."""
+    """e.g. "12.3k", "1.2M"."""
     if n is None:
         return "unknown"
     if n >= 1_000_000:
@@ -109,11 +139,7 @@ def _format_count(n: int | None) -> str:
 
 
 # (label, seconds-per-unit, largest value still shown in this unit
-# before rolling up to the next one - `None` for the last, open-ended
-# unit). Mirrors huggingface_hub's own `CachedRepoInfo.last_modified_str`
-# (used by `fllame model list`) for a consistent "3 days ago" feel
-# across both tables, without depending on that library's private
-# formatter.
+# before rolling up to the next - None for the last, open-ended unit).
 _RELATIVE_TIME_UNITS = (
     ("second", 1, 59),
     ("minute", 60, 59),
@@ -138,14 +164,14 @@ def _format_relative_time(dt: datetime | None) -> str:
     return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
-def _run_compose(*args: str) -> int:
+def _run_compose(handle: str, *args: str) -> int:
     command = [
         "docker",
         "compose",
         "-f",
-        str(config.compose_file_path()),
+        str(config.recipe_dir(handle) / "compose.yaml"),
         "-p",
-        config.COMPOSE_PROJECT_NAME,
+        config.compose_project_name(handle),
         *args,
     ]
     try:
@@ -172,10 +198,70 @@ def recipe_list() -> None:
 
 @recipe_app.command("show")
 def recipe_show(handle: str) -> None:
-    """Print the resolved docker-compose service for HANDLE."""
-    recipe = _load_or_exit(handle)
-    service = BACKEND.build_service(recipe, hf_cache_dir=config.hf_cache_dir())
-    typer.echo(yaml.safe_dump({recipe.handle: service}, sort_keys=False).rstrip())
+    """Print HANDLE's resolved recipe - the same shape as the recipe
+    file, with `image` filled in from fllame's configured default when
+    the recipe doesn't pin its own. `command` is the last line, ready to
+    copy out and run by hand (`vllm serve ...` on a box with vLLM
+    installed) without going through Docker at all.
+    """
+    recipe = _resolve_image(_load_or_exit(handle))
+    typer.echo(recipe.to_yaml().rstrip())
+
+
+def _read_block(prompt_text: str) -> list[str]:
+    """Reads until a blank line or EOF - unlike `sys.stdin.read()`,
+    which consumes to the *first* EOF and leaves nothing for a later
+    call. `#` comment lines are skipped."""
+    typer.echo(prompt_text)
+    lines: list[str] = []
+    while True:
+        raw = sys.stdin.readline()
+        if raw == "" or raw.strip() == "":
+            break
+        stripped = raw.rstrip("\n")
+        if stripped.strip().startswith("#"):
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _read_command() -> str:
+    lines = _read_block(
+        "vllm serve command (required) - one flag per line works fine, "
+        "with or without a trailing \\ - then a blank line or Ctrl-D:"
+    )
+    if not lines:
+        typer.echo("no `vllm serve <repo_id> ...` command given", err=True)
+        raise typer.Exit(code=1)
+    joined = join_command_lines(lines)
+    try:
+        parse_vllm_serve_command(joined)
+    except VllmCommandError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    return joined
+
+
+_UV_PIP_INSTALL_PREFIX = "uv pip install"
+
+
+def _replace_uv_pip_install(preinstall: list[str]) -> tuple[list[str], bool]:
+    """The vllm/vllm-openai image's own Python environment isn't the
+    uv-managed venv `uv pip install` expects; `pip install` targets its
+    site-packages directly. Caller must tell the operator when the
+    returned bool is True, since it changes what they typed.
+    """
+    changed = False
+    fixed = []
+    for line in preinstall:
+        stripped = line.lstrip()
+        if stripped.startswith(_UV_PIP_INSTALL_PREFIX):
+            leading_ws = line[: len(line) - len(stripped)]
+            fixed.append(f"{leading_ws}pip install{stripped[len(_UV_PIP_INSTALL_PREFIX):]}")
+            changed = True
+        else:
+            fixed.append(line)
+    return fixed, changed
 
 
 @recipe_app.command("add", context_settings={**_CONTEXT_SETTINGS, "ignore_unknown_options": True})
@@ -183,53 +269,111 @@ def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
         None,
         help="Optionally, the whole `vllm serve <repo_id> ...` line as trailing "
-        "arguments instead of pasting it - e.g. `fllame recipe add vllm serve "
-        "org/repo --max-model-len 8192`. Env vars still need the interactive paste.",
+        "arguments instead of the guided dialogue - e.g. `fllame recipe add vllm "
+        "serve org/repo --max-model-len 8192`. A quick one-liner only - env vars/"
+        "preinstall commands need the dialogue (run with no trailing arguments).",
     ),
-    image: str = typer.Option(
-        "vllm/vllm-openai:latest",
+    image: str | None = typer.Option(
+        None,
         "--image",
-        prompt="Docker image (e.g. vllm/vllm-openai:v0.27.1)",
+        show_default=False,
+        help="Docker image to pin this recipe to, overriding fllame's configured "
+        "default (`fllame config show`) - e.g. vllm/vllm-openai:v0.27.1. Omit to "
+        "let this recipe follow the configured default, whatever it is later "
+        "changed to.",
     ),
-    gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
+    pull: bool = typer.Option(
+        False,
+        "--pull",
+        help="Also download the model into the HF cache right after saving "
+        "(a no-op if it's already cached) - see `fllame model pull`.",
+    ),
+    build: bool = typer.Option(
+        False,
+        "--build",
+        help="Also regenerate the compose folder right after saving - see "
+        "`fllame recipe build`. Fails if the model isn't cached yet unless "
+        "combined with --pull.",
+    ),
 ) -> None:
-    """Create a recipe from a `vllm serve ...` line - and optionally
-    `export ...` lines - either as trailing arguments or pasted
-    interactively. This is the shape a recipe typically comes in from a
-    model card or vLLM's own docs.
+    """Create a recipe.
+
+    Given trailing arguments, treats them as a quick one-liner: the
+    whole `vllm serve <repo_id> <args...>` line, same as today, no
+    prompts beyond the Docker image if neither `--image` nor a
+    configured default exists. With no trailing arguments, walks
+    through a short dialogue instead - Docker image, then preinstall
+    commands, then env vars, then the `vllm serve` command - the shape
+    a recipe typically comes in from a model card or vLLM's own docs.
     """
-    if image.endswith(":latest") or ":" not in image:
+    if vllm_serve_line:
+        pasted = shlex.join(vllm_serve_line)
+        try:
+            parsed = parse_pasted_recipe(pasted)
+        except RecipePasteError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from e
+        command, env, preinstall = parsed.command, parsed.env, parsed.preinstall
+
+        if image is None and config_file.get_default_image() is None:
+            image = typer.prompt(
+                "Docker image (e.g. vllm/vllm-openai:v0.27.1) - or set a default "
+                "with `fllame config set-default-image` to skip this next time",
+                default=_FALLBACK_IMAGE,
+            )
+    else:
+        if image is None:
+            configured_default = config_file.get_default_image()
+            image = typer.prompt("Docker image", default=configured_default or _FALLBACK_IMAGE)
+            if configured_default is not None and image == configured_default:
+                image = None  # follow the configured default rather than pin it
+
+        preinstall = _read_block(
+            "Preinstall commands to run before `vllm serve`, one per line "
+            "(e.g. `pip install -U transformers`) - blank line or Ctrl-D to skip:"
+        )
+
+        env = {}
+        for line in _read_block(
+            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D "
+            "to skip:"
+        ):
+            try:
+                key, value = parse_env_line(line)
+            except RecipePasteError as e:
+                typer.echo(str(e), err=True)
+                raise typer.Exit(code=1) from e
+            env[key] = value
+
+        command = _read_command()
+
+    preinstall, uv_pip_replaced = _replace_uv_pip_install(preinstall)
+    if uv_pip_replaced:
+        typer.echo(
+            "note: replaced 'uv pip install' with 'pip install' in the preinstall "
+            "step - the vllm/vllm-openai image's own Python environment isn't the "
+            "uv-managed venv 'uv pip install' expects."
+        )
+
+    warn_image = image if image is not None else config_file.get_default_image()
+    if warn_image is not None and (warn_image.endswith(":latest") or ":" not in warn_image):
         typer.echo(
             "warning: using an unpinned image tag - pin it to a specific "
             "version once you've confirmed this recipe works.",
             err=True,
         )
 
-    if vllm_serve_line:
-        pasted = shlex.join(vllm_serve_line)
-    else:
-        typer.echo(
-            "Paste the recipe's `export ...` lines and `vllm serve ...` line, " "then press Ctrl-D."
-        )
-        pasted = sys.stdin.read()
-
-    try:
-        parsed = parse_pasted_recipe(pasted)
-    except RecipePasteError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(code=1) from e
-
+    repo_id, _ = parse_vllm_serve_command(command)
     store = _recipe_store()
-    handle = store.next_available_handle(derive_handle(parsed.repo_id))
+    handle = store.next_available_handle(derive_handle(repo_id))
     try:
         recipe = Recipe.from_dict(
             handle,
             {
-                "repo_id": parsed.repo_id,
+                "command": command,
                 "image": image,
-                "gpus": gpus,
-                "env": parsed.env,
-                "serve_args": parsed.serve_args,
+                "env": env,
+                "preinstall": preinstall,
             },
         )
     except RecipeError as e:
@@ -237,25 +381,104 @@ def recipe_add(
         raise typer.Exit(code=1) from e
 
     store.save(recipe)
-    typer.echo(f"saved recipe '{handle}' -> {config.recipes_dir() / f'{handle}.yaml'}")
+    typer.echo(f"saved recipe '{handle}' -> {config.recipe_dir(handle) / 'recipe.yaml'}")
+
+    if pull:
+        typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
+        try:
+            pull_model(recipe.repo_id)
+        except (HfHubHTTPError, RequestException) as e:
+            typer.echo(_friendly_download_error(e), err=True)
+            raise typer.Exit(code=1) from e
+        except PermissionError as e:
+            typer.echo(_friendly_permission_error(e), err=True)
+            raise typer.Exit(code=1) from e
+
+    if build:
+        _build_or_exit(recipe)
+
+
+@recipe_app.command("build")
+def recipe_build(
+    handle: str,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the cache-location-changed confirmation prompt - the "
+        "warning (if any) is still printed.",
+    ),
+) -> None:
+    """Write (or overwrite) HANDLE's `compose.yaml` - the only command,
+    besides `recipe add --build`, that ever does.
+
+    Fails with a clear error if the model isn't fully downloaded yet -
+    run `fllame model pull <repo_id>` (or `recipe add --pull`/`--build`)
+    first. `serve`/`status`/`stop` never write or regenerate
+    `compose.yaml` themselves - it's meant to be hand-edited, and only
+    ever touched again by explicitly re-running this command.
+    """
+    _build_or_exit(_load_or_exit(handle), assume_yes=yes)
+
+
+def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
+    """Tries `autofix_whitespace` once before giving up."""
+    try:
+        return _recipe_store().load(handle)
+    except RecipeError as first_error:
+        raw = path.read_text()
+        fixed = autofix_whitespace(raw)
+        if fixed == raw:
+            return first_error
+
+    path.write_text(fixed)
+    try:
+        return _recipe_store().load(handle)
+    except RecipeError as second_error:
+        return second_error
 
 
 @recipe_app.command("edit")
 def recipe_edit(handle: str) -> None:
-    """Open HANDLE's recipe file in $EDITOR, then re-validate it."""
-    path = config.recipes_dir() / f"{handle}.yaml"
+    """Open HANDLE's recipe file in $EDITOR, then re-validate it.
+
+    Lenient about how the `command` block ends up formatted (missing
+    indentation, a missing trailing `\\`, ...) and about a stray tab or
+    CRLF line ending elsewhere - fixed automatically before anything is
+    reported, and the file is re-saved in fllame's own canonical
+    rendering once it validates, regardless of which of those kicked in.
+    Anything else invalid offers a choice: reopen $EDITOR to fix it, or
+    revert to the version from before this edit (kept in memory for the
+    length of this command, not written to a backup file - the recipes
+    directory is meant to be git-tracked already, which is the real
+    backup).
+    """
+    path = config.recipe_dir(handle) / "recipe.yaml"
     if not path.is_file():
         typer.echo(f"no recipe found for '{handle}' (expected {path})", err=True)
         raise typer.Exit(code=1)
 
+    original_text = path.read_text()
     click.edit(filename=str(path))
 
-    try:
-        _recipe_store().load(handle)
-    except RecipeError as e:
-        typer.echo(f"'{handle}' is no longer a valid recipe: {e}", err=True)
-        raise typer.Exit(code=1) from e
-    typer.echo(f"'{handle}' saved and valid.")
+    while True:
+        result = _validate_after_edit(handle, path)
+        if isinstance(result, Recipe):
+            _recipe_store().save(result)
+            typer.echo(f"'{handle}' saved and valid.")
+            return
+
+        typer.echo(f"'{handle}' is no longer a valid recipe: {result}", err=True)
+        if typer.confirm(
+            "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
+            default=True,
+        ):
+            click.edit(filename=str(path))
+            continue
+
+        path.write_text(original_text)
+        typer.echo(f"reverted '{handle}' to its previous version")
+        raise typer.Exit(code=1)
 
 
 @recipe_app.command("remove")
@@ -263,7 +486,12 @@ def recipe_remove(
     handle: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
-    """Delete HANDLE's recipe file."""
+    """Delete HANDLE's whole folder - its recipe file and its generated
+    `compose.yaml` together (see `fllame/config.py`'s `recipe_dir`).
+
+    Doesn't stop a container that's still running under it; if `fllame
+    stop HANDLE` matters, run it first.
+    """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
     try:
@@ -272,6 +500,82 @@ def recipe_remove(
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"removed '{handle}'")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print fllame's current persisted settings."""
+    default_image = config_file.get_default_image()
+    if default_image is not None:
+        typer.echo(f"default_image: {default_image}")
+    else:
+        typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
+
+
+def _compose_files_using_image(image: str) -> list[Path]:
+    """Recipes whose `compose.yaml` service `image` is an exact match -
+    never one pinned to something else or already hand-edited."""
+    matches = []
+    for handle in _recipe_store().list_handles():
+        compose_path = config.recipe_dir(handle) / "compose.yaml"
+        if not compose_path.is_file():
+            continue
+        try:
+            existing = yaml.safe_load(compose_path.read_text())
+            current_image = existing["services"][handle]["image"]
+        except (yaml.YAMLError, KeyError, TypeError):
+            continue
+        if current_image == image:
+            matches.append(compose_path)
+    return matches
+
+
+def _replace_image_in_compose_file(path: Path, old_image: str, new_image: str) -> None:
+    """A text substitution, not a regeneration - other hand edits in
+    `path` survive untouched."""
+    text = path.read_text()
+    updated = text.replace(f"image: {old_image}", f"image: {new_image}", 1)
+    path.write_text(updated)
+
+
+@config_app.command("set-default-image")
+def config_set_default_image(image: str) -> None:
+    """Set the Docker image recipes fall back to when they don't pin
+    their own.
+
+    Only affects recipes that don't pin their own `image` - those keep
+    using whatever they're pinned to either way. Existing `compose.yaml`
+    files aren't regenerated by this command; if any currently use the
+    previous default image verbatim, offers to update just that one
+    value in place, in every such file, without touching anything else
+    already there.
+    """
+    if image.endswith(":latest") or ":" not in image:
+        typer.echo(
+            "warning: using an unpinned image tag - pin it to a specific "
+            "version once you've confirmed recipes work with it.",
+            err=True,
+        )
+    old_default = config_file.get_default_image()
+    config_file.set_default_image(image)
+    typer.echo(f"default image set to '{image}'")
+
+    if old_default is None or old_default == image:
+        return
+
+    affected = _compose_files_using_image(old_default)
+    if not affected:
+        return
+
+    typer.echo(f"{len(affected)} compose.yaml file(s) still use the previous default image:")
+    for path in affected:
+        typer.echo(f"  {path}")
+    if not typer.confirm("Replace it with the new image in these files?", default=False):
+        return
+
+    for path in affected:
+        _replace_image_in_compose_file(path, old_default, image)
+    typer.echo(f"updated {len(affected)} file(s)")
 
 
 @hardware_app.command("scan")
@@ -293,13 +597,112 @@ def hardware_scan() -> None:
     typer.echo(f"quantizations:  {quantizations}")
 
 
+def _friendly_download_error(e: Exception) -> str:
+    return (
+        f"{e}\n"
+        "Already-downloaded files stay cached - running the same command "
+        "again will resume rather than start over."
+    )
+
+
+def _friendly_permission_error(e: PermissionError) -> str:
+    cache_dir = config.hf_cache_dir()
+    return (
+        f"{e}\n"
+        f"The Hugging Face cache ({cache_dir}) has files this user can't write to - "
+        "likely left behind by something else (e.g. a container) that wrote there as "
+        "a different user. Fix with:\n"
+        f"  sudo chown -R $(id -u):$(id -g) {cache_dir}"
+    )
+
+
 @model_app.command("pull")
-def model_pull(handle: str) -> None:
-    """Download HANDLE's model into the Hugging Face cache."""
-    recipe = _load_or_exit(handle)
-    typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
-    path = pull_model(recipe.repo_id)
+def model_pull(repo_id: str) -> None:
+    """Download REPO_ID into the Hugging Face cache.
+
+    Takes a Hugging Face repo_id directly (e.g. `org/repo`), not a
+    recipe handle - `model` commands never depend on recipes at all,
+    since a recipe is a higher-level abstraction built on top of a
+    model, not the other way around (see CLAUDE.md, "Layering"). To
+    pull the model a specific recipe needs, either `recipe show
+    HANDLE` first to see its repo_id, or use `recipe add --pull`/
+    `recipe build HANDLE` instead.
+    """
+    typer.echo(f"pulling '{repo_id}' into {config.hf_cache_dir()}")
+    try:
+        path = pull_model(repo_id)
+    except (HfHubHTTPError, RequestException) as e:
+        typer.echo(_friendly_download_error(e), err=True)
+        raise typer.Exit(code=1) from e
+    except PermissionError as e:
+        typer.echo(_friendly_permission_error(e), err=True)
+        raise typer.Exit(code=1) from e
     typer.echo(f"done: {path}")
+
+
+@model_app.command("update")
+def model_update(
+    repo_id: str | None = typer.Argument(
+        None,
+        help="Check only REPO_ID; omit to check every model currently in "
+        "the local cache.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Re-pull any model found stale, via the same download path "
+        "`model pull` uses. Check-only by default - reports status, "
+        "downloads nothing.",
+    ),
+) -> None:
+    """Check cached models against the Hub for a newer revision.
+
+    A setup-phase command, like `model pull`/`model scan` - `fllame
+    serve` never checks this itself (see CLAUDE.md, "Setup vs.
+    running"), so this is the only place staleness is ever surfaced.
+    Check-only by default; `--apply` re-pulls anything stale, a no-op
+    download-wise if nothing has actually changed, since it goes
+    through the same `pull_model` `model pull` already uses.
+
+    Takes a repo_id directly, not a recipe handle - same reasoning as
+    `model pull` above.
+    """
+    if repo_id is not None:
+        repo_ids = [repo_id]
+    else:
+        repo_ids = [repo.repo_id for repo in list_cached_models()]
+
+    if not repo_ids:
+        typer.echo("No models cached.")
+        raise typer.Exit(code=0)
+
+    try:
+        statuses = [check_for_update(repo_id) for repo_id in repo_ids]
+    except (HfHubHTTPError, RequestException) as e:
+        typer.echo(f"Hugging Face Hub unreachable: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+    rows = []
+    for status in statuses:
+        if status.cached_revision is None:
+            rows.append([status.repo_id, "not cached - run `model pull` first"])
+        elif not status.is_stale:
+            rows.append([status.repo_id, "up to date"])
+        elif apply:
+            try:
+                pull_model(status.repo_id)
+            except (HfHubHTTPError, RequestException):
+                rows.append([status.repo_id, "download interrupted - rerun to resume"])
+                continue
+            except PermissionError as e:
+                typer.echo(_friendly_permission_error(e), err=True)
+                rows.append([status.repo_id, "permission denied - see message above"])
+                continue
+            rows.append([status.repo_id, "updated"])
+        else:
+            rows.append([status.repo_id, "stale"])
+
+    _print_table(["REPO_ID", "STATUS"], rows)
 
 
 @model_app.command("list")
@@ -454,55 +857,146 @@ def model_scan(
     _print_table(headers, rows)
 
 
+def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> None:
+    """Silently skipped whenever a confident comparison isn't possible -
+    a wrong "won't fit" warning is worse than none."""
+    profile = scan_hardware()
+    budget_gb = memory_budget_gb(profile)
+    if budget_gb is None:
+        return
+    usable_gb = usable_memory_gb(
+        budget_gb=budget_gb, unified_memory=profile.chip_family == "grace_blackwell"
+    )
+
+    estimated_gb = local_estimate_vram_gb(recipe.repo_id)
+    if estimated_gb is None or estimated_gb <= usable_gb:
+        return
+
+    typer.echo(
+        f"warning: '{recipe.repo_id}' is estimated at {estimated_gb:.1f} GB of "
+        f"weights alone - this machine's usable budget is {usable_gb:.1f} GB. This "
+        "is a coarse, weights-only estimate (no KV cache/activations/concurrency), "
+        "not a benchmarked verdict - it may still fit, or may not even with this "
+        "margin.",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm("Continue anyway?", default=False):
+        raise typer.Exit(code=1)
+
+
+def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None:
+    """Overwriting silently would point the container at a cache that
+    may not have this model in it. Skipped on a recipe's first build,
+    or an unparseable existing file."""
+    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    if not compose_path.is_file():
+        return
+    try:
+        existing = yaml.safe_load(compose_path.read_text())
+        old_host = cache_volume_host_path(existing["services"][recipe.handle])
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError):
+        return
+
+    new_service = generate_compose(recipe, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    new_host = cache_volume_host_path(new_service["services"][recipe.handle])
+    if old_host is None or old_host == new_host:
+        return
+
+    typer.echo(
+        f"warning: the Hugging Face cache location has changed since this recipe's "
+        f"compose.yaml was last generated:\n"
+        f"  was: {old_host}\n"
+        f"  now: {new_host}\n"
+        "Continuing will point the container at the new location - make sure the "
+        "model is cached there too (`fllame model pull` again if not).",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm("Continue and update compose.yaml?", default=False):
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(
     handle: str,
     detach: bool = typer.Option(False, "--detach", "-d", help="Run in the background."),
-    offline: bool = typer.Option(
+    yes: bool = typer.Option(
         False,
-        "--offline",
-        help="Never touch the network - fail if the model isn't already fully cached "
-        "(pull it first with `fllame model pull`).",
+        "--yes",
+        "-y",
+        help="Skip the pre-serve VRAM sanity check's confirmation prompt - "
+        "the warning (if any) is still printed.",
     ),
 ) -> None:
-    """Launch the recipe for HANDLE as a Docker container via `docker compose`.
+    """Launch the recipe for HANDLE as a Docker container via `docker
+    compose`, from HANDLE's own self-contained compose folder
+    (`fllame config` aside, entirely independent of every other
+    recipe's).
 
-    Always downloads the model first (see `model pull`) - vLLM's own
-    auto-download inside the container is never relied on.
+    Never touches the network, full stop: the model must already be
+    fully present in the HF cache - `fllame model pull <repo_id>`, or
+    `recipe add HANDLE --pull` when the recipe was created, does that
+    separately - and this only ever verifies that via a filesystem
+    check, failing with a clear error if it isn't there rather than
+    falling back to a download of its own. vLLM's own auto-download
+    inside the container is never relied on either.
+
+    Never writes or regenerates `compose.yaml` either - that's `recipe
+    build`'s job alone, so a hand edit to it survives every `serve`.
+    Fails with a clear error pointing at `fllame recipe build HANDLE`
+    if it doesn't exist yet.
+
+    Once the model is confirmed cached, compares a coarse, weights-only
+    VRAM estimate (from the cached files themselves, no network) against
+    this machine's hardware scan and warns (asking to confirm, unless
+    `-y`) if it looks like it won't fit. Not a benchmarked guarantee
+    either way, and silently skipped whenever a confident comparison
+    isn't possible - see `fllame hardware scan`/`fllame model scan` for
+    the same underlying estimate.
     """
     recipe = _load_or_exit(handle)
-    if offline:
-        typer.echo(f"resolving '{recipe.repo_id}' from the local cache only (--offline)")
-    else:
-        typer.echo(f"pulling '{recipe.repo_id}' into {config.hf_cache_dir()}")
-    try:
-        pull_model(recipe.repo_id, offline=offline)
-    except LocalEntryNotFoundError as e:
-        typer.echo(
-            f"'{recipe.repo_id}' is not fully cached locally - run "
-            f"`fllame model pull {handle}` while online first.",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
+    _require_model_cached(recipe)
+    _require_compose_built(recipe)
+    _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
-    _write_compose_file(offline_handle=handle if offline else None)
     args = ["up", "-d", handle] if detach else ["up", handle]
-    raise typer.Exit(code=_run_compose(*args))
+    raise typer.Exit(code=_run_compose(handle, *args))
 
 
 @app.command()
 def status() -> None:
-    """Show the state of fllame-managed containers via `docker compose ps`."""
-    _write_compose_file()
-    raise typer.Exit(code=_run_compose("ps"))
+    """Show the state of every recipe's container via `docker compose
+    ps`, one recipe at a time (each is its own compose project). Reads
+    whatever `compose.yaml` is already on disk - never regenerates it."""
+    store = _recipe_store()
+    handles = store.list_handles()
+    if not handles:
+        typer.echo(f"No recipes found in {config.recipes_dir()}")
+        raise typer.Exit(code=0)
+
+    exit_code = 0
+    for handle in handles:
+        try:
+            store.load(handle)
+        except RecipeError as e:
+            typer.echo(f"warning: {e}", err=True)
+            continue
+        typer.echo(f"== {handle} ==")
+        if not (config.recipe_dir(handle) / "compose.yaml").is_file():
+            typer.echo(f"not built - run `fllame recipe build {handle}`")
+            continue
+        code = _run_compose(handle, "ps")
+        if code != 0:
+            exit_code = code
+    raise typer.Exit(code=exit_code)
 
 
 @app.command()
 def stop(handle: str) -> None:
-    """Stop HANDLE's container via `docker compose stop`."""
-    _load_or_exit(handle)
-    _write_compose_file()
-    raise typer.Exit(code=_run_compose("stop", handle))
+    """Stop HANDLE's container via `docker compose stop`. Reads
+    whatever `compose.yaml` is already on disk - never regenerates it."""
+    recipe = _load_or_exit(handle)
+    _require_compose_built(recipe)
+    raise typer.Exit(code=_run_compose(handle, "stop", handle))
 
 
 if __name__ == "__main__":

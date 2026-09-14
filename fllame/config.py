@@ -7,8 +7,6 @@ from pathlib import Path
 
 from huggingface_hub import constants as hf_constants
 
-COMPOSE_PROJECT_NAME = "fllame"
-
 
 def recipes_dir() -> Path:
     override = os.environ.get("FLLAME_RECIPES_DIR")
@@ -17,23 +15,24 @@ def recipes_dir() -> Path:
     return Path.home() / ".config" / "fllame" / "recipes"
 
 
-def state_dir() -> Path:
-    override = os.environ.get("FLLAME_STATE_DIR")
+def recipe_dir(handle: str) -> Path:
+    """HANDLE's folder - holds both `recipe.yaml` and its generated
+    `compose.yaml`, side by side."""
+    return recipes_dir() / handle
+
+
+def compose_project_name(handle: str) -> str:
+    return f"fllame-{handle}"
+
+
+def config_file_path() -> Path:
+    override = os.environ.get("FLLAME_CONFIG_FILE")
     if override:
         return Path(override)
-    return Path.home() / ".local" / "state" / "fllame"
-
-
-def compose_file_path() -> Path:
-    """The docker-compose file fllame generates and owns - see
-    `fllame/compose/generator.py`. Not something an operator hand-edits.
-    """
-    return state_dir() / "docker-compose.yml"
+    return Path.home() / ".config" / "fllame" / "config.yaml"
 
 
 def hf_cache_dir() -> Path:
-    """Wherever huggingface_hub itself resolves its cache to (honoring
-    HF_HOME/HF_HUB_CACHE) - fllame deliberately has no opinion of its own
-    about where models live on disk.
-    """
+    """Wherever huggingface_hub itself resolves HF_HOME/HF_HUB_CACHE
+    to - fllame has no opinion of its own."""
     return Path(hf_constants.HF_HUB_CACHE)

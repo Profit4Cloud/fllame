@@ -65,16 +65,10 @@ def _supported_quantizations(chip_family: str) -> list[str]:
 
 
 def _scan_nvidia_gpus() -> tuple[str, int, float | None] | None:
-    """The first GPU's name and per-GPU VRAM, plus how many GPUs were
-    found. Assumes a homogeneous set of GPUs, since `nvidia-smi`'s
-    per-line output gives no cheaper way to summarize a mixed one.
-
-    VRAM can come back as `None`: on unified-memory boards (e.g. a DGX
-    Spark's GB10 - the same "grace_blackwell" chip family
-    `_chip_family` already special-cases for quantizations) `nvidia-smi`
-    reports `memory.total` as the literal string "[N/A]", since there's
-    no dedicated VRAM pool separate from system RAM to report. `ram_gb`
-    on `HardwareProfile` is the number that means something there.
+    """Assumes a homogeneous set of GPUs. VRAM comes back `None` on
+    unified-memory boards (e.g. a DGX Spark's GB10), where `nvidia-smi`
+    reports `memory.total` as "[N/A]" - use `HardwareProfile.ram_gb`
+    there instead.
     """
     if shutil.which("nvidia-smi") is None:
         return None

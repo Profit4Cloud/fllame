@@ -1,7 +1,4 @@
-"""The seam a future non-vLLM backend would implement. Exactly one
-implementation exists today (`VllmServingBackend`) - see CLAUDE.md,
-"Explicitly deferred".
-"""
+"""Seam for a future non-vLLM backend; only `VllmServingBackend` exists."""
 
 from __future__ import annotations
 
@@ -15,6 +12,5 @@ class ServingBackend(Protocol):
     name: str
 
     def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
-        """A docker-compose service definition (the value under
-        `services.<handle>`) for running this recipe."""
+        """The `services.<handle>` value for this recipe's compose.yaml."""
         ...

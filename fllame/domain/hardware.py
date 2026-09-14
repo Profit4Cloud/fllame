@@ -1,6 +1,5 @@
-"""What one scan of the local machine found - a snapshot, not a live
-handle. Nothing here is persisted: scanning is cheap enough that callers
-(the CLI today, model-filtering/OOM-guard code later) just re-scan.
+"""A snapshot from one hardware scan - never persisted; re-scanned on
+every use since it's cheap.
 """
 
 from __future__ import annotations
