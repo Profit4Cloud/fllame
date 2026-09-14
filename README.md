@@ -45,19 +45,7 @@ next `fllame` invocation picks it up, no reinstall. `pipx install .`
 Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` by
 default (override the base directory with `FLLAME_RECIPES_DIR`). One
 folder per model handle - the same folder later holds that handle's
-generated `compose.yaml` too (see "Where compose.yaml lives" below) -
-see `examples/recipes/llama-3-8b-instruct.yaml` for a full recipe
-example:
-
-```yaml
-# ~/.config/fllame/recipes/llama-3-8b-instruct/recipe.yaml
-image: vllm/vllm-openai:v0.27.1
-description: Llama 3 8B Instruct, single-GPU default profile
-command: |-
-  vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-  --gpu-memory-utilization=0.9 \
-  --max-model-len=8192
-```
+generated `compose.yaml` too (see "Where compose.yaml lives" below).
 
 `command` is the whole `vllm serve <repo_id> <args...>` invocation -
 not split into separate `repo_id`/`serve_args`/`port` keys - rendered
