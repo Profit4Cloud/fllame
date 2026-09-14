@@ -51,7 +51,7 @@ Every command also takes `-h`/`--help`.
 | Field         | Required | Meaning |
 |---------------|----------|---------|
 | `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation, not split into separate keys - `repo_id` and the host port mapping are derived from it |
-| `image`       | no       | Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use `fllame config`'s default, or `vllm/vllm-openai:latest` if none is set |
+| `image`       | no       | Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use `fllame config`'s default, or `vllm/vllm-openai:latest` if no default is set |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships |
 | `description` | no       | free text, shown by `recipe show` |
 | `env`         | no       | environment variables; must not set `HF_HOME`, `HF_HUB_CACHE`, or `HF_HUB_OFFLINE`, which fllame manages itself |
