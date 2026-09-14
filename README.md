@@ -17,9 +17,8 @@ vLLM itself.
 pipx install .
 ```
 
-Developing fllame: `poetry install`, then `poetry run fllame ...`. To
-get a global `fllame` command backed by your checkout (edits picked up
-immediately, no reinstall): `pipx install --editable .`.
+Developing fllame: `poetry install`, then `eval $(poetry env activate)`.
+Then you can run the fllame commands below within the activated environment.
 
 ## Commands
 
@@ -40,10 +39,12 @@ immediately, no reinstall): `pipx install --editable .`.
 - fllame status # Show every recipe's container state via docker compose ps.
 - fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
 
-Every command also takes `-h`/`--help`. Recipes live in
-`~/.config/fllame/recipes/<handle>/recipe.yaml` (override with
-`FLLAME_RECIPES_DIR`) - that same folder gets that handle's generated
-`compose.yaml` too, fully rewritten on every `serve`/`status`/`stop`.
+Every command also takes `-h`/`--help`.
+
+## Storage location
+
+ Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). 
+ That same folder gets that handle's generated `compose.yaml` too, fully rewritten on every `serve`/`status`/`stop`.
 
 ## Recipe format
 
