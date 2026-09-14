@@ -109,14 +109,14 @@ def test_load_command_block_stops_at_next_top_level_key(tmp_path: Path):
         tmp_path,
         "demo",
         "command: |-\n  vllm serve org/demo \\\n  --tensor-parallel-size 1\n"
-        "description: after the command block\n",
+        "image: after-the-command-block\n",
     )
     store = RecipeStore(tmp_path)
 
     recipe = store.load("demo")
 
     assert recipe.serve_args == ["--tensor-parallel-size", "1"]
-    assert recipe.description == "after the command block"
+    assert recipe.image == "after-the-command-block"
 
 
 def test_load_flat_single_line_command_without_block_marker(tmp_path: Path):

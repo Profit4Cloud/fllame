@@ -21,6 +21,14 @@ def _write_recipe(tmp_path: Path, handle: str = "demo") -> None:
     )
 
 
+def _write_compose(tmp_path: Path, handle: str = "demo") -> None:
+    """Writes HANDLE's compose.yaml via `recipe build`, the only command
+    that ever does - callers must already have `is_model_cached` mocked
+    True."""
+    result = runner.invoke(app, ["recipe", "build", handle])
+    assert result.exit_code == 0, result.output
+
+
 _NO_HARDWARE_SIGNAL = HardwareProfile(
     gpu_name=None,
     gpu_count=0,
@@ -1196,6 +1204,7 @@ def test_serve_verifies_cache_then_invokes_docker_compose_up(tmp_path: Path, mon
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1210,6 +1219,7 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1222,12 +1232,13 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
 
 
 def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
-    """No separate build step exists at all, with or without a
-    preinstall step - preinstall runs as part of the container's own
-    startup command instead (see backends/vllm.py)."""
+    """`docker compose up` never gets Docker's own image-build flag -
+    fllame has no custom image/Dockerfile to build, on top of never
+    invoking `docker compose` with `--build` at all."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1237,7 +1248,24 @@ def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
     assert "--build" not in captured["command"]
 
 
-def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
+def test_serve_requires_compose_already_built(tmp_path: Path, monkeypatch):
+    """`serve` never writes or regenerates `compose.yaml` itself -
+    that's `recipe build`'s job alone."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame recipe build" in result.output
+    assert called == []
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo").mkdir(parents=True)
     (tmp_path / "demo" / "recipe.yaml").write_text(
@@ -1247,9 +1275,8 @@ def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch)
         "command: vllm serve org/demo\n"
     )
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
-    result = runner.invoke(app, ["serve", "demo", "--detach"])
+    result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
     compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
@@ -1257,17 +1284,16 @@ def test_serve_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch)
     assert not (tmp_path / "demo" / "Dockerfile").exists()
 
 
-def test_serve_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
+def test_recipe_build_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
     """A Dockerfile left over from an older fllame version's
-    build-a-custom-image approach is cleaned up on the next serve."""
+    build-a-custom-image approach is cleaned up on the next build."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     handle_folder = tmp_path / "demo"
     (handle_folder / "Dockerfile").write_text("FROM img\n")
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
-    result = runner.invoke(app, ["serve", "demo"])
+    result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
     assert not (handle_folder / "Dockerfile").exists()
@@ -1277,6 +1303,7 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1298,7 +1325,7 @@ def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path,
     assert called == []
 
 
-def test_serve_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch):
+def test_recipe_build_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch):
     """HF_HUB_OFFLINE=1 is unconditional (VllmServingBackend bakes it
     into every generated service) - the model is always already fully
     downloaded by the time the container runs, so vLLM has no
@@ -1306,78 +1333,75 @@ def test_serve_container_always_sets_hf_hub_offline(tmp_path: Path, monkeypatch)
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
-    result = runner.invoke(app, ["serve", "demo"])
+    result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
     compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
 
 
-def test_serve_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
+def test_recipe_build_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache"))
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
-    # First serve generates compose.yaml against this same cache location.
-    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+    # First build generates compose.yaml against this same cache location.
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
 
-    result = runner.invoke(app, ["serve", "demo"])
+    result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
     assert "cache location has changed" not in result.output
 
 
-def test_serve_cache_location_changed_aborts_when_declined(tmp_path: Path, monkeypatch):
+def test_recipe_build_cache_location_changed_aborts_when_declined(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
-    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
-    result = runner.invoke(app, ["serve", "demo"], input="n\n")
+    result = runner.invoke(app, ["recipe", "build", "demo"], input="n\n")
 
     assert result.exit_code == 1
     assert "cache location has changed" in result.output
     assert "/cache/old" in (tmp_path / "demo" / "compose.yaml").read_text()
 
 
-def test_serve_cache_location_changed_continues_when_confirmed(tmp_path: Path, monkeypatch):
+def test_recipe_build_cache_location_changed_continues_when_confirmed(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
-    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
-    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+    result = runner.invoke(app, ["recipe", "build", "demo"], input="y\n")
 
     assert result.exit_code == 0
     assert "cache location has changed" in result.output
     assert "/cache/new" in (tmp_path / "demo" / "compose.yaml").read_text()
 
 
-def test_serve_yes_flag_skips_cache_location_confirmation_but_still_warns(
+def test_recipe_build_yes_flag_skips_cache_location_confirmation_but_still_warns(
     tmp_path: Path, monkeypatch
 ):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/old"))
-    assert runner.invoke(app, ["serve", "demo"]).exit_code == 0
+    assert runner.invoke(app, ["recipe", "build", "demo"]).exit_code == 0
 
     monkeypatch.setattr(config, "hf_cache_dir", lambda: Path("/cache/new"))
-    result = runner.invoke(app, ["serve", "demo", "--yes"])  # no stdin needed
+    result = runner.invoke(app, ["recipe", "build", "demo", "--yes"])  # no stdin needed
 
     assert result.exit_code == 0
     assert "cache location has changed" in result.output
@@ -1403,6 +1427,7 @@ def test_serve_vram_warning_aborts_when_declined(tmp_path: Path, monkeypatch):
         cli, "local_estimate_vram_gb", lambda repo_id: 100.0
     )  # over the 68 GB budget
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     called = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
 
@@ -1419,6 +1444,7 @@ def test_serve_vram_warning_continues_when_confirmed(tmp_path: Path, monkeypatch
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"], input="y\n")
@@ -1433,6 +1459,7 @@ def test_serve_yes_flag_skips_confirmation_but_still_warns(tmp_path: Path, monke
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 100.0)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo", "--yes"])  # no stdin needed
@@ -1447,6 +1474,7 @@ def test_serve_vram_check_silent_when_estimate_fits_budget(tmp_path: Path, monke
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: 10.0)  # well under budget
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -1465,6 +1493,7 @@ def test_serve_vram_check_silent_when_estimate_unknown(tmp_path: Path, monkeypat
     monkeypatch.setattr(cli, "scan_hardware", lambda: _GPU_WITH_BUDGET)
     monkeypatch.setattr(cli, "local_estimate_vram_gb", lambda repo_id: None)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
 
     result = runner.invoke(app, ["serve", "demo"])
@@ -1637,6 +1666,8 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
 def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1650,6 +1681,9 @@ def test_status_shows_a_header_and_ps_per_recipe(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path, handle="demo-a")
     _write_recipe(tmp_path, handle="demo-b")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path, handle="demo-a")
+    _write_compose(tmp_path, handle="demo-b")
     commands = []
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
 
@@ -1675,6 +1709,8 @@ def test_status_no_recipes(tmp_path: Path, monkeypatch):
 def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path, handle="good")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path, handle="good")
     (tmp_path / "bad").mkdir(parents=True)
     (tmp_path / "bad" / "recipe.yaml").write_text("image: img\n")  # missing command
     commands = []
@@ -1689,9 +1725,27 @@ def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
     assert len(commands) == 1
 
 
+def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, monkeypatch):
+    """`status` never regenerates `compose.yaml` - a recipe that hasn't
+    been built yet is reported, not silently built or skipped."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "== demo ==" in result.output
+    assert "fllame recipe build" in result.output
+    assert called == []
+
+
 def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
@@ -1701,9 +1755,24 @@ def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):
     assert captured["command"][-2:] == ["stop", "demo"]
 
 
+def test_stop_requires_compose_already_built(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["stop", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame recipe build" in result.output
+    assert called == []
+
+
 def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
 
     def raise_not_found(command):
         raise FileNotFoundError

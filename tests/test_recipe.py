@@ -11,7 +11,6 @@ def test_from_dict_minimal():
     assert recipe.repo_id == "org/demo"
     assert recipe.command == "vllm serve org/demo"
     assert recipe.image == "vllm/vllm-openai:v0.27.1"
-    assert recipe.backend == "vllm"
     assert recipe.port == 8000
 
 
@@ -43,13 +42,6 @@ def test_from_dict_handle_mismatch():
     with pytest.raises(RecipeError):
         Recipe.from_dict(
             "demo", {"command": "vllm serve org/demo", "image": "img", "handle": "other"}
-        )
-
-
-def test_from_dict_rejects_non_vllm_backend():
-    with pytest.raises(RecipeError):
-        Recipe.from_dict(
-            "demo", {"command": "vllm serve org/demo", "image": "img", "backend": "llamacpp"}
         )
 
 
@@ -121,7 +113,6 @@ def test_to_dict_round_trips_through_from_dict():
         {
             "command": "vllm serve org/demo --max-model-len 8192",
             "image": "img",
-            "description": "a demo recipe",
             "env": {"FOO": "bar"},
             "preinstall": ["pip install -U transformers"],
         },
@@ -153,5 +144,4 @@ def test_to_dict_omits_unset_optional_fields():
     assert "image" not in data
     assert "env" not in data
     assert "preinstall" not in data
-    assert "description" not in data
     assert data["command"] == "vllm serve org/demo"

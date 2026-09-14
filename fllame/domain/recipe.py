@@ -31,8 +31,6 @@ class Recipe:
     # `fllame config set-default-image` applies to recipes that didn't
     # pin their own.
     image: str | None = None
-    backend: str = "vllm"
-    description: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     # Whole command lines, not tokenized like `command`'s args - shell
     # text run verbatim (may contain its own quoting, `&&`, etc.).
@@ -70,13 +68,6 @@ class Recipe:
                 "which must match the filename"
             )
 
-        backend = data.get("backend", "vllm")
-        if backend != "vllm":
-            raise RecipeError(
-                f"recipe '{handle}': backend '{backend}' is not supported - "
-                "fllame only ships a vLLM backend today"
-            )
-
         env = dict(data.get("env") or {})
         if "HF_HOME" in env:
             raise RecipeError(
@@ -107,8 +98,6 @@ class Recipe:
             handle=handle,
             command=command,
             image=data.get("image"),
-            backend=backend,
-            description=data.get("description"),
             env=env,
             preinstall=preinstall,
         )
@@ -118,8 +107,6 @@ class Recipe:
         per line via `render_multiline_command`, regardless of how it
         was originally authored."""
         data: dict = {}
-        if self.description:
-            data["description"] = self.description
         if self.image:
             data["image"] = self.image
         if self.env:

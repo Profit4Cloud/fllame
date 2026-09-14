@@ -25,7 +25,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame recipe list # List every recipe handle.
 - fllame recipe show HANDLE # Print HANDLE's resolved recipe as YAML.
 - fllame recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] # Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
-- fllame recipe build HANDLE # Regenerate HANDLE's compose.yaml standalone, without starting it.
+- fllame recipe build HANDLE [--yes] # Write (or overwrite) HANDLE's compose.yaml - the only command that does.
 - fllame recipe edit HANDLE # Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
 - fllame recipe remove HANDLE [--yes] # Delete HANDLE's whole recipe folder.
 - fllame hardware scan # Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
@@ -43,8 +43,11 @@ Every command also takes `-h`/`--help`.
 
 ## Storage location
 
- Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). 
- That same folder gets that handle's generated `compose.yaml` too, fully rewritten on every `serve`/`status`/`stop`.
+Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override
+with `FLLAME_RECIPES_DIR`). That same folder gets that handle's
+`compose.yaml` too, written only by `recipe build`/`recipe add --build`.
+`serve`/`status`/`stop` never touch it, so a hand-edited `compose.yaml` is
+safe to keep indefinitely.
 
 ## Recipe format
 
@@ -52,8 +55,6 @@ Every command also takes `-h`/`--help`.
 |---------------|----------|---------|
 | `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation, not split into separate keys - `repo_id` and the host port mapping are derived from it |
 | `image`       | no       | Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use `fllame config`'s default, or `vllm/vllm-openai:latest` if no default is set |
-| `backend`     | no       | must be `vllm` if set - the only backend fllame ships |
-| `description` | no       | free text, shown by `recipe show` |
 | `env`         | no       | environment variables; must not set `HF_HOME`, `HF_HUB_CACHE`, or `HF_HUB_OFFLINE`, which fllame manages itself |
 | `preinstall`  | no       | shell commands run, in order, before `vllm serve` |
 

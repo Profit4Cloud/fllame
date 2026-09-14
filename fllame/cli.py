@@ -96,9 +96,22 @@ def _require_model_cached(recipe: Recipe) -> None:
     raise typer.Exit(code=1)
 
 
-def _build_or_exit(recipe: Recipe) -> None:
-    """Shared by `recipe build` and `recipe add --build`."""
+def _require_compose_built(recipe: Recipe) -> None:
+    if (config.recipe_dir(recipe.handle) / "compose.yaml").is_file():
+        return
+    typer.echo(
+        f"'{recipe.handle}' has no compose.yaml yet - run "
+        f"`fllame recipe build {recipe.handle}` first.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
+    """Shared by `recipe build` and `recipe add --build` - the only
+    two commands that ever write `compose.yaml`."""
     _require_model_cached(recipe)
+    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes)
     _write_recipe_compose(recipe)
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     typer.echo(f"wrote {compose_path}")
@@ -386,14 +399,26 @@ def recipe_add(
 
 
 @recipe_app.command("build")
-def recipe_build(handle: str) -> None:
-    """Regenerate HANDLE's `compose.yaml`.
+def recipe_build(
+    handle: str,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the cache-location-changed confirmation prompt - the "
+        "warning (if any) is still printed.",
+    ),
+) -> None:
+    """Write (or overwrite) HANDLE's `compose.yaml` - the only command,
+    besides `recipe add --build`, that ever does.
 
     Fails with a clear error if the model isn't fully downloaded yet -
     run `fllame model pull <repo_id>` (or `recipe add --pull`/`--build`)
-    first.
+    first. `serve`/`status`/`stop` never write or regenerate
+    `compose.yaml` themselves - it's meant to be hand-edited, and only
+    ever touched again by explicitly re-running this command.
     """
-    _build_or_exit(_load_or_exit(handle))
+    _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
 
 def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
@@ -860,8 +885,8 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
 
 
 def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None:
-    """A silent switch here would point the container at a cache that
-    may not have this model in it. Skipped on a recipe's first `serve`
+    """Overwriting silently would point the container at a cache that
+    may not have this model in it. Skipped on a recipe's first build,
     or an unparseable existing file."""
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     if not compose_path.is_file():
@@ -898,8 +923,8 @@ def serve(
         False,
         "--yes",
         "-y",
-        help="Skip the pre-serve VRAM/cache-location sanity checks' confirmation "
-        "prompts - warnings (if any) are still printed.",
+        help="Skip the pre-serve VRAM sanity check's confirmation prompt - "
+        "the warning (if any) is still printed.",
     ),
 ) -> None:
     """Launch the recipe for HANDLE as a Docker container via `docker
@@ -913,9 +938,12 @@ def serve(
     separately - and this only ever verifies that via a filesystem
     check, failing with a clear error if it isn't there rather than
     falling back to a download of its own. vLLM's own auto-download
-    inside the container is never relied on either. A recipe with a
-    preinstall step runs it as part of the container's own startup,
-    every time - there's no separate image build step.
+    inside the container is never relied on either.
+
+    Never writes or regenerates `compose.yaml` either - that's `recipe
+    build`'s job alone, so a hand edit to it survives every `serve`.
+    Fails with a clear error pointing at `fllame recipe build HANDLE`
+    if it doesn't exist yet.
 
     Once the model is confirmed cached, compares a coarse, weights-only
     VRAM estimate (from the cached files themselves, no network) against
@@ -924,18 +952,12 @@ def serve(
     either way, and silently skipped whenever a confident comparison
     isn't possible - see `fllame hardware scan`/`fllame model scan` for
     the same underlying estimate.
-
-    Also warns (asking to confirm, unless `-y`) if the HF cache location
-    this recipe's `compose.yaml` would now mount has changed since it was
-    last generated - a silent switch there could point the container at
-    a cache that doesn't have this model in it.
     """
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
+    _require_compose_built(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
-    _warn_if_cache_location_changed(recipe, assume_yes=yes)
 
-    _write_recipe_compose(recipe)
     args = ["up", "-d", handle] if detach else ["up", handle]
     raise typer.Exit(code=_run_compose(handle, *args))
 
@@ -943,7 +965,8 @@ def serve(
 @app.command()
 def status() -> None:
     """Show the state of every recipe's container via `docker compose
-    ps`, one recipe at a time (each is its own compose project)."""
+    ps`, one recipe at a time (each is its own compose project). Reads
+    whatever `compose.yaml` is already on disk - never regenerates it."""
     store = _recipe_store()
     handles = store.list_handles()
     if not handles:
@@ -953,12 +976,14 @@ def status() -> None:
     exit_code = 0
     for handle in handles:
         try:
-            recipe = store.load(handle)
+            store.load(handle)
         except RecipeError as e:
             typer.echo(f"warning: {e}", err=True)
             continue
-        _write_recipe_compose(recipe)
         typer.echo(f"== {handle} ==")
+        if not (config.recipe_dir(handle) / "compose.yaml").is_file():
+            typer.echo(f"not built - run `fllame recipe build {handle}`")
+            continue
         code = _run_compose(handle, "ps")
         if code != 0:
             exit_code = code
@@ -967,9 +992,10 @@ def status() -> None:
 
 @app.command()
 def stop(handle: str) -> None:
-    """Stop HANDLE's container via `docker compose stop`."""
+    """Stop HANDLE's container via `docker compose stop`. Reads
+    whatever `compose.yaml` is already on disk - never regenerates it."""
     recipe = _load_or_exit(handle)
-    _write_recipe_compose(recipe)
+    _require_compose_built(recipe)
     raise typer.Exit(code=_run_compose(handle, "stop", handle))
 
 
