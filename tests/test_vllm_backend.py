@@ -112,20 +112,20 @@ def test_build_service_without_explicit_port_defaults_to_8000():
     assert service["ports"] == ["8000:8000"]
 
 
-def test_build_service_without_gpus():
+def test_build_service_gpus_all_is_unconditional():
+    """`gpus: "all"` is a hard default, not a recipe-level knob - pin
+    specific device IDs by hand-editing the generated compose.yaml."""
     backend = VllmServingBackend()
-    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img", gpus="none")
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
 
     service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
 
-    assert "gpus" not in service
+    assert service["gpus"] == "all"
 
 
 def test_build_service_ipc_host_is_unconditional():
-    """`ipc: host` is a vLLM-specific default, not tied to whether the
-    recipe reserves a GPU at all - a CPU-only recipe still gets it."""
     backend = VllmServingBackend()
-    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img", gpus="none")
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
 
     service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
 

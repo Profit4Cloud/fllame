@@ -13,7 +13,6 @@ def test_from_dict_minimal():
     assert recipe.image == "vllm/vllm-openai:v0.27.1"
     assert recipe.backend == "vllm"
     assert recipe.port == 8000
-    assert recipe.gpus == "all"
 
 
 def test_from_dict_missing_command():
@@ -52,18 +51,6 @@ def test_from_dict_rejects_non_vllm_backend():
         Recipe.from_dict(
             "demo", {"command": "vllm serve org/demo", "image": "img", "backend": "llamacpp"}
         )
-
-
-def test_from_dict_gpus_none():
-    recipe = Recipe.from_dict(
-        "demo", {"command": "vllm serve org/demo", "image": "img", "gpus": "none"}
-    )
-    assert recipe.gpus == "none"
-
-
-def test_from_dict_rejects_invalid_gpus():
-    with pytest.raises(RecipeError):
-        Recipe.from_dict("demo", {"command": "vllm serve org/demo", "image": "img", "gpus": "2"})
 
 
 def test_from_dict_rejects_env_hf_home():
@@ -167,13 +154,4 @@ def test_to_dict_omits_unset_optional_fields():
     assert "env" not in data
     assert "preinstall" not in data
     assert "description" not in data
-    assert "gpus" not in data
     assert data["command"] == "vllm serve org/demo"
-
-
-def test_to_dict_includes_gpus_only_when_not_default():
-    recipe = Recipe.from_dict(
-        "demo", {"command": "vllm serve org/demo", "gpus": "none"}
-    )
-
-    assert recipe.to_dict()["gpus"] == "none"

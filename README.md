@@ -334,7 +334,6 @@ that's the cost of keeping this compose-only.
 | `image`       | no       | the Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use fllame's configured default (`fllame config`), falling back to `vllm/vllm-openai:latest` if none is configured |
 | `backend`     | no       | must be `vllm` if set - the only backend fllame ships today |
 | `description` | no       | free text, shown by `recipe show` |
-| `gpus`        | no       | `all` (default) or `none` - whether the container gets a GPU reservation |
 | `env`         | no       | environment variables set on the container; must not set `HF_HOME`, `HF_HUB_CACHE`, or `HF_HUB_OFFLINE`, which fllame manages itself |
 | `preinstall`  | no       | shell commands run, in order, before `vllm serve` (e.g. `pip install -U transformers`) - a preinstall step some recipes need on top of the base image |
 
@@ -351,11 +350,11 @@ that recipe's generated `compose.yaml` directly - fllame's job ends at
 producing a working compose file, and an engineer is always free to
 take it from there.
 
-`gpus: all` is likewise a hard default on the generated service
-whenever the recipe's own `gpus` is `all` (the default) - if you need
-something more specific, like pinning particular device IDs instead of
-reserving every GPU on the host, edit `compose.yaml`'s `gpus:` key
-directly rather than looking for a finer-grained recipe field.
+`gpus: all` is likewise a hard default on every generated service,
+unconditionally - not a recipe field at all. If you need something more
+specific, like pinning particular device IDs instead of reserving every
+GPU on the host, edit `compose.yaml`'s `gpus:` key directly; fllame
+never verifies that edit, so it's entirely on you to keep it correct.
 
 `ipc: host` is also always baked in, because vLLM's own multiprocessing
 workers (tensor-parallel, NCCL) routinely need more shared memory than

@@ -26,8 +26,6 @@ from fllame.domain.vllm_command import (
     render_multiline_command,
 )
 
-_VALID_GPUS = ("all", "none")
-
 
 class RecipeError(ValueError):
     """A recipe file is missing a required field or otherwise malformed."""
@@ -48,10 +46,6 @@ class Recipe:
     image: str | None = None
     backend: str = "vllm"
     description: str | None = None
-    # Docker GPU reservation: "all" (every GPU on the host) or "none"
-    # (CPU-only). Anything more granular - specific device IDs, a count -
-    # isn't supported yet; see CLAUDE.md, "Explicitly deferred".
-    gpus: str = "all"
     env: dict[str, str] = field(default_factory=dict)
     # Shell commands run, in order, before `vllm serve` - e.g. the "extra
     # install" step some recipes need on top of the base image (a newer
@@ -101,12 +95,6 @@ class Recipe:
                 "fllame only ships a vLLM backend today"
             )
 
-        gpus = data.get("gpus", "all")
-        if gpus not in _VALID_GPUS:
-            raise RecipeError(
-                f"recipe '{handle}': 'gpus' must be one of {_VALID_GPUS}, got '{gpus}'"
-            )
-
         env = dict(data.get("env") or {})
         if "HF_HOME" in env:
             raise RecipeError(
@@ -139,7 +127,6 @@ class Recipe:
             image=data.get("image"),
             backend=backend,
             description=data.get("description"),
-            gpus=gpus,
             env=env,
             preinstall=preinstall,
         )
@@ -160,8 +147,6 @@ class Recipe:
             data["description"] = self.description
         if self.image:
             data["image"] = self.image
-        if self.gpus != "all":
-            data["gpus"] = self.gpus
         if self.env:
             data["env"] = self.env
         if self.preinstall:

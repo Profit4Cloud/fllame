@@ -321,7 +321,6 @@ def recipe_add(
         "let this recipe follow the configured default, whatever it is later "
         "changed to.",
     ),
-    gpus: str = typer.Option("all", "--gpus", help="GPU reservation: 'all' or 'none'."),
     pull: bool = typer.Option(
         False,
         "--pull",
@@ -412,7 +411,6 @@ def recipe_add(
             {
                 "command": command,
                 "image": image,
-                "gpus": gpus,
                 "env": env,
                 "preinstall": preinstall,
             },
