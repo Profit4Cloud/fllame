@@ -1,13 +1,4 @@
-"""fllame - a headless CLI for vLLM serving.
-
-`fllame serve <handle>` resolves a hand-edited recipe, verifies the
-model is already fully downloaded via a pure filesystem check - never
-touching the network itself; `model pull`/`recipe add --pull` are the
-only things that ever download - and runs it as a Docker container via
-`docker compose`. See README.md for the recipe file format and
-CLAUDE.md for the architecture this sits on, including the setup/
-running boundary this split enforces.
-"""
+"""fllame - a headless CLI for vLLM serving."""
 
 from __future__ import annotations
 
@@ -59,9 +50,6 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 
 BACKEND = VllmServingBackend()
 
-# The image used when a recipe doesn't pin its own and no default has
-# been configured via `fllame config set-default-image` - the last resort,
-# not something an operator is expected to rely on long-term.
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
 
 
@@ -70,10 +58,6 @@ def _recipe_store() -> RecipeStore:
 
 
 def _resolve_image(recipe: Recipe) -> Recipe:
-    """A recipe whose `image` is unset means "use fllame's configured
-    default" - resolved here, at the point a Recipe is turned into a
-    compose service, rather than baked into the recipe file itself.
-    """
     if recipe.image is not None:
         return recipe
     return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
@@ -88,18 +72,12 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe) -> None:
-    """Regenerates HANDLE's `compose.yaml`, written right next to its
-    `recipe.yaml` (`fllame/config.py`'s `recipe_dir`) - nothing else to
-    build or manage alongside it (a stale `Dockerfile` from an older
-    fllame version's preinstall handling is removed if found). Its
-    `HF_HUB_OFFLINE=1` is baked in unconditionally by
-    `VllmServingBackend` - not something this invocation controls.
-    """
     resolved = _resolve_image(recipe)
     directory = config.recipe_dir(resolved.handle)
     compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
 
     directory.mkdir(parents=True, exist_ok=True)
+    # Leftover from an older fllame version's preinstall handling.
     stale_dockerfile = directory / "Dockerfile"
     if stale_dockerfile.is_file():
         stale_dockerfile.unlink()
@@ -108,16 +86,6 @@ def _write_recipe_compose(recipe: Recipe) -> None:
 
 
 def _require_model_cached(recipe: Recipe) -> None:
-    """Fails with a clear, consistent error if `recipe`'s model isn't
-    already fully present in the local HF cache - the shared "verify,
-    never fetch" gate for `serve` and `recipe build`/`recipe add
-    --build`. Deliberately never calls `models/puller.py`'s
-    `pull_model` (which can touch the network): `models/cache.py`'s
-    `is_model_cached` is a pure filesystem scan, so this can never be
-    the thing that lets one of these commands cross the internet
-    boundary. Downloading is exclusively `fllame model pull`/
-    `recipe add --pull`'s job - see CLAUDE.md's setup/running boundary.
-    """
     if is_model_cached(recipe.repo_id):
         return
     typer.echo(
@@ -129,11 +97,7 @@ def _require_model_cached(recipe: Recipe) -> None:
 
 
 def _build_or_exit(recipe: Recipe) -> None:
-    """Regenerates `recipe`'s `compose.yaml` - failing with a clear
-    error, same wording as `serve`'s cache-miss check, if the model
-    isn't fully downloaded yet. Shared by `recipe build` and
-    `recipe add --build`.
-    """
+    """Shared by `recipe build` and `recipe add --build`."""
     _require_model_cached(recipe)
     _write_recipe_compose(recipe)
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
@@ -141,11 +105,8 @@ def _build_or_exit(recipe: Recipe) -> None:
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
-    """Left-aligned, space-padded columns - `docker ps`/`kubectl get`
-    style, no border characters. The point is making a column (size,
-    quantization, ...) comparable at a glance down the page; a border
-    wouldn't add anything padding doesn't already give it.
-    """
+    """Left-aligned, space-padded columns - `docker ps` style, no
+    border characters."""
     all_rows = [headers, *rows]
     widths = [max(len(row[i]) for row in all_rows) for i in range(len(headers))]
     for row in all_rows:
@@ -154,9 +115,7 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
 
 
 def _format_count(n: int | None) -> str:
-    """A compact form of a download count - "12.3k", "1.2M" - so the
-    column stays narrow regardless of magnitude. Not locale-aware; this
-    is a terminal table, not user-facing prose."""
+    """e.g. "12.3k", "1.2M"."""
     if n is None:
         return "unknown"
     if n >= 1_000_000:
@@ -167,11 +126,7 @@ def _format_count(n: int | None) -> str:
 
 
 # (label, seconds-per-unit, largest value still shown in this unit
-# before rolling up to the next one - `None` for the last, open-ended
-# unit). Mirrors huggingface_hub's own `CachedRepoInfo.last_modified_str`
-# (used by `fllame model list`) for a consistent "3 days ago" feel
-# across both tables, without depending on that library's private
-# formatter.
+# before rolling up to the next - None for the last, open-ended unit).
 _RELATIVE_TIME_UNITS = (
     ("second", 1, 59),
     ("minute", 60, 59),
@@ -241,12 +196,9 @@ def recipe_show(handle: str) -> None:
 
 
 def _read_block(prompt_text: str) -> list[str]:
-    """Reads lines from stdin until a blank line or EOF (Ctrl-D) -
-    works the same whether stdin is an interactive terminal or
-    redirected/piped input, unlike `sys.stdin.read()` (which consumes
-    to the *first* EOF and leaves nothing for a later step). `#` comment
-    lines are skipped; everything else is collected verbatim, in order.
-    """
+    """Reads until a blank line or EOF - unlike `sys.stdin.read()`,
+    which consumes to the *first* EOF and leaves nothing for a later
+    call. `#` comment lines are skipped."""
     typer.echo(prompt_text)
     lines: list[str] = []
     while True:
@@ -281,14 +233,10 @@ _UV_PIP_INSTALL_PREFIX = "uv pip install"
 
 
 def _replace_uv_pip_install(preinstall: list[str]) -> tuple[list[str], bool]:
-    """`uv pip install ...` is a common preinstall step lifted straight
-    from a model card, but the vllm/vllm-openai image's own Python
-    environment isn't the uv-managed venv `uv pip install` expects -
-    running it there can install into the wrong place rather than where
-    `vllm serve` actually looks. Plain `pip install` targets the image's
-    own site-packages directly, so it's swapped in automatically; the
-    caller is expected to tell the operator when this fires, since it
-    changes what they typed.
+    """The vllm/vllm-openai image's own Python environment isn't the
+    uv-managed venv `uv pip install` expects; `pip install` targets its
+    site-packages directly. Caller must tell the operator when the
+    returned bool is True, since it changes what they typed.
     """
     changed = False
     fixed = []
@@ -449,14 +397,7 @@ def recipe_build(handle: str) -> None:
 
 
 def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
-    """Validates HANDLE's just-edited recipe file, trying a narrow
-    whitespace autofix (see `autofix_whitespace`) once before giving up -
-    catches a stray tab/CRLF from an editor without ever guessing at the
-    file's intended structure (`RecipeStore.load`'s own leniency about a
-    `command` block's indentation/trailing `\\` handles the far more
-    common edit mistake before this is even needed). Returns the loaded
-    Recipe on success.
-    """
+    """Tries `autofix_whitespace` once before giving up."""
     try:
         return _recipe_store().load(handle)
     except RecipeError as first_error:
@@ -547,12 +488,8 @@ def config_show() -> None:
 
 
 def _compose_files_using_image(image: str) -> list[Path]:
-    """Every recipe's `compose.yaml` whose service currently has `image`
-    set to exactly this string - the literal-match set `config
-    set-default-image` offers to update in place. A recipe pinned to
-    something else, or a compose.yaml already hand-edited to a
-    different image, is never included.
-    """
+    """Recipes whose `compose.yaml` service `image` is an exact match -
+    never one pinned to something else or already hand-edited."""
     matches = []
     for handle in _recipe_store().list_handles():
         compose_path = config.recipe_dir(handle) / "compose.yaml"
@@ -569,12 +506,8 @@ def _compose_files_using_image(image: str) -> list[Path]:
 
 
 def _replace_image_in_compose_file(path: Path, old_image: str, new_image: str) -> None:
-    """A literal text substitution of just the `image:` value, not a
-    full regeneration - any other hand edits already in `path` (gpu
-    pinning, an `shm_size:`, a removed `HF_HUB_OFFLINE`, ...) survive
-    untouched, since compose.yaml is expected to be hand-edited at
-    times (see README's "Advanced" section).
-    """
+    """A text substitution, not a regeneration - other hand edits in
+    `path` survive untouched."""
     text = path.read_text()
     updated = text.replace(f"image: {old_image}", f"image: {new_image}", 1)
     path.write_text(updated)
@@ -640,14 +573,6 @@ def hardware_scan() -> None:
 
 
 def _friendly_download_error(e: Exception) -> str:
-    """A large multi-file `snapshot_download` can fail partway through
-    on a routine, transient Hub error (rate limiting, a connection
-    blip) - `huggingface_hub`'s own retry logic already handles a lot
-    of this internally, but not every case, and its own exception
-    message doesn't mention the one thing that matters most to the
-    operator: files already downloaded stay in the cache, so re-running
-    the same command resumes rather than starting over.
-    """
     return (
         f"{e}\n"
         "Already-downloaded files stay cached - running the same command "
@@ -656,16 +581,6 @@ def _friendly_download_error(e: Exception) -> str:
 
 
 def _friendly_permission_error(e: PermissionError) -> str:
-    """The HF cache is a shared directory - anything else that has ever
-    written into it as a different user (most commonly: a `fllame
-    serve` container that ran without `HF_HUB_OFFLINE` in effect, e.g.
-    via the hand-edited-compose-file escape hatch, while the vLLM image
-    ran as root) can leave files there this operator's own account no
-    longer has permission to touch. fllame itself never elevates
-    privileges anywhere in `pull_model`'s call graph, so this is always
-    an external ownership mismatch, not a bug in the download itself -
-    the fix is reclaiming ownership of the cache, not retrying.
-    """
     cache_dir = config.hf_cache_dir()
     return (
         f"{e}\n"
@@ -918,22 +833,8 @@ def model_scan(
 
 
 def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> None:
-    """A weights-only, best-effort heads-up before `serve` launches a
-    container - never a blocking verdict, and silently skipped whenever
-    a confident comparison isn't possible (no GPU/RAM figure from the
-    hardware scan, or the model has no cached `.safetensors` files to
-    measure): a wrong "won't fit" warning is worse than none, so this
-    only ever speaks up when it has a real number on both sides. Not
-    the recipe-level VRAM verdict (weights + KV cache + `--max-model-
-    len` + concurrency) still tracked as deferred in CLAUDE.md.
-
-    Runs after `_require_model_cached` has already confirmed the model
-    is fully cached (see `serve` below), and reads that same local
-    cache (`models/cache.py`'s `local_estimate_vram_gb` - a pure
-    filesystem scan, same data source as `model list`) rather than
-    making a network call of its own - consistent with `serve` never
-    touching the network at all.
-    """
+    """Silently skipped whenever a confident comparison isn't possible -
+    a wrong "won't fit" warning is worse than none."""
     profile = scan_hardware()
     budget_gb = memory_budget_gb(profile)
     if budget_gb is None:
@@ -959,17 +860,9 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
 
 
 def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None:
-    """Warns and asks to confirm, before `serve` regenerates
-    `compose.yaml`, if the HF cache directory it would now mount (see
-    `config.hf_cache_dir`, which honors `HF_HOME`/`HF_HUB_CACHE`)
-    differs from what's already baked into this recipe's existing
-    `compose.yaml` - a silent switch here would point the container at
-    a different cache than it last ran against, which may not have this
-    model in it even though the old location still does. Silently
-    skipped when there's no existing `compose.yaml` to compare against
-    (first `serve`), or it can't be read/parsed - nothing to warn about
-    either way, and letting the routine regeneration proceed is safe.
-    """
+    """A silent switch here would point the container at a cache that
+    may not have this model in it. Skipped on a recipe's first `serve`
+    or an unparseable existing file."""
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     if not compose_path.is_file():
         return

@@ -1,16 +1,7 @@
-"""A recipe is the curated, hand-editable answer to "how do I serve this
-model" for one model handle - the thing an operator commits to git and
-reviews in a PR, not a runtime artifact.
-
-Its `command` field holds the whole `vllm serve <repo_id> <args...>`
-invocation - not split into separate `repo_id`/`args` YAML keys - so it
-can be copied straight out of the recipe file and run by hand (`vllm
-serve ...` on a box with vLLM installed) with no reassembly. Written
-out (`to_dict`/`to_yaml`, used by both `RecipeStore.save` and `recipe
-show`) as a canonical one-flag-per-line block regardless of how it was
-originally authored. `repo_id`/`serve_args`/`port` are derived
-properties for the rest of fllame (`model pull`, the compose backend,
-...), parsed from `command` on access rather than stored a second time.
+"""`command` holds the whole `vllm serve <repo_id> <args...>` line rather
+than separate `repo_id`/`args` fields, so it can be copied straight out
+of the recipe file and run by hand. `repo_id`/`serve_args`/`port` are
+derived from it on access, not stored a second time.
 """
 
 from __future__ import annotations
@@ -34,26 +25,17 @@ class RecipeError(ValueError):
 @dataclass(frozen=True)
 class Recipe:
     handle: str
-    # The whole `vllm serve <repo_id> <args...>` line, exactly as
-    # authored - see the module docstring for why this isn't split into
-    # separate fields.
     command: str
-    # `None` means "use fllame's configured default image" (`fllame
-    # config`), resolved at the point a Recipe becomes a compose service -
-    # not persisted into the recipe file, so a later `fllame config
-    # set-default-image` change applies to every recipe that didn't pin
-    # its own.
+    # None means "use fllame's configured default image", resolved when
+    # a Recipe becomes a compose service - not persisted, so a later
+    # `fllame config set-default-image` applies to recipes that didn't
+    # pin their own.
     image: str | None = None
     backend: str = "vllm"
     description: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    # Shell commands run, in order, before `vllm serve` - e.g. the "extra
-    # install" step some recipes need on top of the base image (a newer
-    # `transformers`, a plugin package). Each entry is a whole command
-    # line, not a token list like `command`'s args: unlike a `vllm serve`
-    # flag value, a preinstall command is genuinely meant to be shell
-    # text (it may legitimately contain its own quoting, `&&`, etc.), so
-    # it's stored and later run verbatim rather than tokenized.
+    # Whole command lines, not tokenized like `command`'s args - shell
+    # text run verbatim (may contain its own quoting, `&&`, etc.).
     preinstall: list[str] = field(default_factory=list)
 
     @property
@@ -132,16 +114,9 @@ class Recipe:
         )
 
     def to_dict(self) -> dict:
-        """The inverse of `from_dict` - also what `recipe show` prints
-        (with `image` already resolved to fllame's configured default,
-        see `cli._resolve_image`), so the file on disk and the resolved
-        view share one shape: `command` last and on its own, since it's
-        the part meant to be copied out and run by hand. Rendered as a
-        canonical multi-line block (see `render_multiline_command`) -
-        one flag per line - regardless of how `command` happened to be
-        authored (a single line, different spacing, ...), so the same
-        recipe always looks the same on disk/in `recipe show`.
-        """
+        """Inverse of `from_dict`. `command` is always rendered one flag
+        per line via `render_multiline_command`, regardless of how it
+        was originally authored."""
         data: dict = {}
         if self.description:
             data["description"] = self.description
@@ -155,13 +130,10 @@ class Recipe:
         return data
 
     def to_yaml(self) -> str:
-        """`to_dict()` rendered with no line-wrap width limit (the
-        default YAML dumper would otherwise fold a long line mid-flag),
-        and `command` forced to YAML's literal block style (`|`) when
-        it's actually multi-line, so each `--flag` lands on its own
-        physical line rather than PyYAML's default single-quoted
-        folding (which would visually blank-line-separate them instead).
-        """
+        """No line-wrap width limit, or the default YAML dumper would
+        fold a long line mid-flag; `command` forced to literal block
+        style (`|`) when multi-line, or PyYAML's default folding would
+        blank-line-separate each flag instead of one-per-line."""
         data = self.to_dict()
         if "\n" in data["command"]:
             data["command"] = _LiteralStr(data["command"])
@@ -169,10 +141,8 @@ class Recipe:
 
 
 class _LiteralStr(str):
-    """A marker type telling `_literal_str_representer` to dump this
-    particular string in YAML's literal block style (`|`) - forcing it
-    only for this one value, not every string in the document.
-    """
+    """Marks one string to dump in YAML's literal block style (`|`),
+    not every string in the document."""
 
 
 def _literal_str_representer(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:

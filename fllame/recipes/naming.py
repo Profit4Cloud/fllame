@@ -1,8 +1,5 @@
-"""Derives a recipe handle from a repo_id: the part after the last `/`
-(the model name, not the org/provider), lowercased and slugified.
-Purely a starting point - `RecipeStore.next_available_handle` is what
-actually guarantees uniqueness against what's on file.
-"""
+"""Not unique on its own - `RecipeStore.next_available_handle` handles
+collisions."""
 
 from __future__ import annotations
 

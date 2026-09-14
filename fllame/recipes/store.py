@@ -1,8 +1,5 @@
 """Loads Recipes from a directory of hand-edited YAML files, one
-`recipe.yaml` per handle's own subfolder (which also holds that
-handle's generated `compose.yaml` - see `fllame/config.py`'s
-`recipe_dir`). The recipe directory is meant to live in the operator's
-own git repo, not fllame's.
+`recipe.yaml` per handle's own subfolder.
 """
 
 from __future__ import annotations
@@ -16,34 +13,21 @@ import yaml
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import join_command_lines
 
-# A top-level `key:` line - used to find where a `command:` section
-# ends when it isn't followed by a blank line or EOF first (see
-# `_extract_command_section`).
+# Matches an unindented `key:` line - where a `command:` section ends
+# if not followed by a blank line first.
 _TOP_LEVEL_KEY = re.compile(r"^[A-Za-z_][\w-]*:(\s|$)")
 _QUOTED = re.compile(r"^(['\"]).*\1$")
 _BLOCK_SCALAR_INDICATOR = re.compile(r"^[|>][+-]?$")
 
 
 def _extract_command_section(text: str) -> tuple[str, str | None]:
-    """Splits raw recipe file text into (everything else, the `command`
-    field's raw value) at the first line starting with `command:`.
-
-    `command` is deliberately never handed to `yaml.safe_load` as part
-    of the rest of the document: its own multi-line rendering (see
-    `Recipe.to_dict`) is a YAML literal block scalar, which requires
-    consistent, sufficient indentation on every continuation line to
-    remain valid YAML at all - an easy thing to break by hand (e.g.
-    stripping what looks like meaningless leading whitespace) that
-    would otherwise fail YAML parsing outright, not just this one
-    field. Extracting it here and parsing it with `join_command_lines`
-    instead sidesteps that fragility entirely: only its own line-based
-    grammar applies, indentation and trailing `\\` continuations optional.
-
-    The command section runs from the `command:` line to the next
-    blank line, the next unindented `key:` line, or EOF - so `command`
-    doesn't strictly have to be the last field (though `RecipeStore.save`
-    always writes it last), just not interrupted by another field
-    without a blank line separating them.
+    """Splits raw recipe text into (everything else, `command`'s raw
+    value), never handing `command` to `yaml.safe_load`: its rendering
+    is a YAML literal block scalar, which needs consistent indentation
+    on every line to stay valid at all - easy to break by hand.
+    Extracting and parsing it with `join_command_lines` instead sidesteps
+    that fragility, at the cost of `command` not being interruptible by
+    another field without a blank line first.
     """
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines) if line.startswith("command:")), None)
@@ -77,20 +61,10 @@ def _parse_lenient_command(command_lines: list[str]) -> str:
 
 
 def autofix_whitespace(text: str) -> str:
-    r"""A narrow cleanup pass for the most common accidental YAML
-    breakage from a text editor - CRLF line endings, tab indentation
-    (which YAML forbids outright - most often introduced when an
-    editor auto-indents a pasted block with tabs standing in for
-    spaces at the same intended depth, the case this is really for),
-    and trailing whitespace. Deliberately not a structural fix that
-    changes a key's indentation *level* to what it "should" be - that
-    would mean guessing the file's intended nesting. Full schema
-    validation (`Recipe.from_dict`) still runs after this either way,
-    so the rare case where tab-expansion happens to shift structure
-    (e.g. a stray leading tab on an otherwise unindented line) is still
-    caught rather than silently accepted - this isn't a guarantee of a
-    correct parse, just a better shot at one before giving up.
-    """
+    """Fixes CRLF endings, tab indentation (which YAML forbids), and
+    trailing whitespace - not a structural fix that guesses a key's
+    intended indentation *level*. `Recipe.from_dict` still validates
+    afterward either way."""
     text = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(2)
     return "\n".join(line.rstrip() for line in text.split("\n"))
 
@@ -129,12 +103,8 @@ class RecipeStore:
         return [self.load(handle) for handle in self.list_handles()]
 
     def next_available_handle(self, base_handle: str) -> str:
-        """`base_handle` itself if free, else `base_handle`_2, _3, ...
-        Never overwrites an existing recipe - not even one for the same
-        repo_id, since a second recipe for the same model (a different
-        quantization, a different command tuning) is a legitimate,
-        separate thing to keep.
-        """
+        """`base_handle` itself if free, else `_2`, `_3`, ... - never
+        overwrites, even for a second recipe on the same repo_id."""
         if not (self.directory / base_handle / "recipe.yaml").is_file():
             return base_handle
         n = 2
@@ -148,9 +118,6 @@ class RecipeStore:
         (directory / "recipe.yaml").write_text(recipe.to_yaml())
 
     def remove(self, handle: str) -> None:
-        """Deletes HANDLE's whole folder - both `recipe.yaml` and
-        whatever generated `compose.yaml` sits next to it, since the two
-        live together (see `fllame/config.py`'s `recipe_dir`)."""
         directory = self.directory / handle
         path = directory / "recipe.yaml"
         if not path.is_file():

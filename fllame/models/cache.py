@@ -1,12 +1,6 @@
-"""Lists models already present in HF's own local cache - a pure
-filesystem scan (`huggingface_hub.scan_cache_dir`), no network involved,
-so this always works offline. `is_model_cached`, `local_estimate_vram_gb`,
-and `cached_revision_hash` (below) are `fllame serve`/`recipe build`'s
-presence/VRAM checks and `model update`'s local half respectively -
-deliberately built on this same filesystem scan rather than
-`models/puller.py`'s `pull_model`, which can touch the network: this
-module belongs entirely to the "verify, never fetch" side of the
-setup/running boundary (see CLAUDE.md).
+"""Reads HF's local cache via `huggingface_hub.scan_cache_dir` - a pure
+filesystem scan, never `models/puller.py`'s network-touching
+`pull_model`.
 """
 
 from __future__ import annotations
@@ -19,8 +13,7 @@ def list_cached_models() -> list[CachedRepoInfo]:
     try:
         cache_info = scan_cache_dir()
     except CacheNotFound:
-        # Nothing has ever been pulled - a normal state on a fresh
-        # install, not an error.
+        # Nothing pulled yet - normal on a fresh install, not an error.
         return []
     return sorted(
         (repo for repo in cache_info.repos if repo.repo_type == "model"),
@@ -39,14 +32,8 @@ def _most_recent_revision(repo: CachedRepoInfo) -> CachedRevisionInfo | None:
 
 
 def is_model_cached(repo_id: str) -> bool:
-    """Whether repo_id has at least one revision fully present in the
-    local HF cache. This is the presence check `fllame serve` and
-    `recipe build`/`recipe add --build` use to decide whether to
-    proceed at all - a pure filesystem scan, never a network call, so
-    it can never be the thing that lets `serve` cross the internet
-    boundary. `False` for a repo that was never pulled, same as one
-    that's only partially there.
-    """
+    """`False` both for a repo never pulled and one only partially
+    cached."""
     try:
         cache_info = scan_cache_dir()
     except CacheNotFound:
@@ -56,23 +43,9 @@ def is_model_cached(repo_id: str) -> bool:
 
 
 def local_estimate_vram_gb(repo_id: str) -> float | None:
-    """A weights-only VRAM estimate for a model already present in the
-    local HF cache, summed directly from the real on-disk size of its
-    cached `.safetensors` files - a pure filesystem scan, same as
-    `list_cached_models`/`is_model_cached` above, no network involved.
-    This is `fllame serve`'s pre-flight sanity check's data source
-    (`cli.py`'s `_warn_if_vram_likely_insufficient`), run only after
-    `is_model_cached` has already confirmed the model is present - so
-    there's no need for a Hub lookup the way `models/discovery.py`'s
-    `_estimated_vram_gb` (used by `model scan`, for a model that isn't
-    downloaded yet) has to make - and this on-disk figure is the
-    literal physical size, not one derived from a per-dtype element
-    count.
-
-    `None` when the repo isn't cached at all, has no revisions on
-    disk, or its most recently used revision has no `.safetensors`
-    files (e.g. a GGUF-only download) - never a guess.
-    """
+    """Weights-only, from the real on-disk size of cached `.safetensors`
+    files. `None` if uncached, or the most recent revision has no
+    `.safetensors` (e.g. GGUF-only)."""
     try:
         cache_info = scan_cache_dir()
     except CacheNotFound:
@@ -91,15 +64,6 @@ def local_estimate_vram_gb(repo_id: str) -> float | None:
 
 
 def cached_revision_hash(repo_id: str) -> str | None:
-    """The commit hash of repo_id's most recently used cached revision -
-    a pure filesystem scan, same as the rest of this module, no network
-    involved. This is `models/updater.py`'s local half of "is this
-    model stale": compared against the Hub's current commit hash for
-    the repo (a separate, network-touching lookup - `model update` is a
-    setup-phase command, so making that call there is fine; this
-    function itself still never does). `None` when the repo isn't
-    cached at all or has no revisions on disk.
-    """
     try:
         cache_info = scan_cache_dir()
     except CacheNotFound:

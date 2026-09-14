@@ -1,24 +1,8 @@
 """Parses a pasted `export KEY=VALUE` + `RUN <command>` +
-`vllm serve <repo_id> <args...>` block - the shape a recipe typically
-comes in when copied from a model card or vLLM's own docs - into the
-pieces a Recipe needs. Rejects anything that isn't literally one of
-those three line shapes.
-
-The `vllm serve` line may span several physical lines with trailing
-`\\` continuations, exactly as it's often shown on a model card or
-recipes.vllm.ai - joined into one logical line before parsing (see
-`domain.vllm_command.join_line_continuations`).
-
-`export` values and the `vllm serve` line itself are rejected if they
-contain a shell metacharacter: those are meant to become a single argv
-token/env var value, so fllame parses this text itself rather than
-handing it to a real shell, and a pasted `$(cat /etc/passwd)` there must
-never become a literal wrong string silently baked into a recipe. A
-`RUN` line is different in kind - it's meant to genuinely be a shell
-command (a preinstall step run before `vllm serve`, e.g. `RUN pip
-install -U transformers`) - so it's stored and later run verbatim, not
-rejected for containing shell syntax that would be perfectly legitimate
-there.
+`vllm serve <repo_id> <args...>` block. `export` values and the `vllm
+serve` line reject shell metacharacters (parsed by fllame, never a real
+shell); a `RUN` line is genuinely meant to be shell text, so it's stored
+and run verbatim instead.
 """
 
 from __future__ import annotations
@@ -39,9 +23,7 @@ _ENV_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 class RecipePasteError(ValueError):
-    """A pasted recipe block couldn't be parsed, or contained something
-    fllame won't evaluate (shell substitution, command chaining, ...).
-    """
+    pass
 
 
 @dataclass(frozen=True)
@@ -96,11 +78,8 @@ def parse_pasted_recipe(text: str) -> ParsedRecipe:
 
 
 def parse_env_line(line: str) -> tuple[str, str]:
-    """Parses a bare `KEY=VALUE` line - the shape `recipe add`'s guided
-    dialogue collects env vars in, no `export` keyword needed since
-    that step is only ever env vars, unlike the mixed-line paste grammar
-    `parse_pasted_recipe` handles.
-    """
+    """Bare `KEY=VALUE`, no `export` keyword - the shape `recipe add`'s
+    guided dialogue collects env vars in."""
     match = _ENV_PATTERN.match(line)
     if not match:
         raise RecipePasteError(f"not a KEY=VALUE line: {line!r}")
