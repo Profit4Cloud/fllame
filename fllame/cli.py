@@ -548,10 +548,14 @@ def recipe_remove(
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
     """Delete HANDLE's whole folder - its recipe file and its generated
-    `compose.yaml` together (see `fllame/config.py`'s `recipe_dir`).
+    `compose.yaml`/`Dockerfile` together (see `fllame/config.py`'s
+    `recipe_dir`).
 
     Doesn't stop a container that's still running under it; if `fllame
-    stop HANDLE` matters, run it first.
+    stop HANDLE` matters, run it first. Also doesn't remove any Docker
+    image built or pulled for it - Docker holds that state, not fllame,
+    regardless of whether this recipe had a `Dockerfile`; `docker image
+    prune`/`docker rmi` is the way to reclaim that space.
     """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
@@ -561,6 +565,10 @@ def recipe_remove(
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"removed '{handle}'")
+    typer.echo(
+        "note: this did not remove any Docker image built or pulled for it - "
+        "run `docker image prune`/`docker rmi` yourself if you want that space back."
+    )
 
 
 @config_app.command("show")

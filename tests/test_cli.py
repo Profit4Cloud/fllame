@@ -530,6 +530,35 @@ def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
+def test_recipe_remove_warns_docker_image_is_not_cleaned_up(tmp_path: Path, monkeypatch):
+    """The warning is the same whether or not the recipe had a
+    Dockerfile - either way, Docker holds state fllame doesn't track."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert "docker image prune" in result.output or "docker rmi" in result.output
+
+
+def test_recipe_remove_warns_docker_image_for_preinstall_recipe_too(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    (directory / "Dockerfile").write_text("FROM img\nRUN pip install foo\n")
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert "docker image prune" in result.output or "docker rmi" in result.output
+
+
 def test_recipe_add_dialogue_prompts_for_image_when_no_default_configured(
     tmp_path: Path, monkeypatch
 ):
