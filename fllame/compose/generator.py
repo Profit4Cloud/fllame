@@ -9,11 +9,15 @@ from pathlib import Path
 import yaml
 
 from fllame.backends.base import ServingBackend
+from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe
 
 
-def generate_compose(recipe: Recipe, *, backend: ServingBackend, hf_cache_dir: Path) -> dict:
-    return {"services": {recipe.handle: backend.build_service(recipe, hf_cache_dir=hf_cache_dir)}}
+def generate_compose(
+    recipe: Recipe, *, backend: ServingBackend, hf_cache_dir: Path, hardware: HardwareProfile
+) -> dict:
+    service = backend.build_service(recipe, hf_cache_dir=hf_cache_dir, hardware=hardware)
+    return {"services": {recipe.handle: service}}
 
 
 def write_compose_file(compose: dict, path: Path) -> None:

@@ -91,3 +91,11 @@ def extract_port(serve_args: list[str], *, default: int = 8000) -> int:
         if token.startswith("--port="):
             return int(token.split("=", 1)[1])
     return default
+
+
+def has_flag(serve_args: list[str], name: str) -> bool:
+    """Whether `name` (e.g. `--gpu-memory-utilization`) already appears
+    in `serve_args`, in either `--flag value` or `--flag=value` form -
+    used to avoid overriding a value the recipe's own command already
+    sets explicitly."""
+    return any(token == name or token.startswith(f"{name}=") for token in serve_args)

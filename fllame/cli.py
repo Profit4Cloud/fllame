@@ -18,6 +18,7 @@ from requests.exceptions import RequestException
 from fllame import config, config_file
 from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path, generate_dockerfile
 from fllame.compose.generator import generate_compose, write_compose_file
+from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
     VllmCommandError,
@@ -72,7 +73,7 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(recipe: Recipe) -> str | None:
+def _write_recipe_compose(recipe: Recipe, *, hardware: HardwareProfile) -> str | None:
     """Writes `compose.yaml` and, for a recipe with `preinstall`, the
     `Dockerfile` it builds from - `compose.yaml`'s `image:` then points
     at the local tag `recipe build` is about to build, not the base
@@ -86,7 +87,9 @@ def _write_recipe_compose(recipe: Recipe) -> str | None:
     directory.mkdir(parents=True, exist_ok=True)
 
     dockerfile_content = generate_dockerfile(resolved)
-    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    compose = generate_compose(
+        resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir(), hardware=hardware
+    )
     service = compose["services"][resolved.handle]
     # A stable, predictable name (matching the compose project name)
     # instead of docker compose's own auto-generated
@@ -152,8 +155,12 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     image before `serve` ever tries to use it.
     """
     _require_model_cached(recipe)
-    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes)
-    dockerfile_content = _write_recipe_compose(recipe)
+    # Scanned once and reused below - a hardware change mid-command
+    # would be a strange thing to chase, and scanning is cheap either
+    # way (see `HardwareProfile`'s own docstring).
+    hardware = scan_hardware()
+    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes, hardware=hardware)
+    dockerfile_content = _write_recipe_compose(recipe, hardware=hardware)
     directory = config.recipe_dir(recipe.handle)
     compose_path = directory / "compose.yaml"
 
@@ -989,7 +996,9 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
         raise typer.Exit(code=1)
 
 
-def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None:
+def _warn_if_cache_location_changed(
+    recipe: Recipe, *, assume_yes: bool, hardware: HardwareProfile
+) -> None:
     """Overwriting silently would point the container at a cache that
     may not have this model in it. Skipped on a recipe's first build,
     or an unparseable existing file."""
@@ -1002,7 +1011,9 @@ def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None
     except (yaml.YAMLError, KeyError, TypeError, AttributeError):
         return
 
-    new_service = generate_compose(recipe, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    new_service = generate_compose(
+        recipe, backend=BACKEND, hf_cache_dir=config.hf_cache_dir(), hardware=hardware
+    )
     new_host = cache_volume_host_path(new_service["services"][recipe.handle])
     if old_host is None or old_host == new_host:
         return

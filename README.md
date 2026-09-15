@@ -82,6 +82,16 @@ that's a heads-up, not a check that the edit itself is sound). The same
 goes for a `Dockerfile`, for a recipe with `preinstall` - hand-edit it
 and re-run `recipe build` to pick the change up.
 
+`recipe build` also adds `--gpu-memory-utilization` to the `vllm serve`
+command whenever the recipe's own `command` doesn't already set one -
+left unset, vLLM happily reserves the whole GPU for itself, which on a
+unified-memory machine means starving the OS, not just other processes
+on the GPU. The value is `0.92` (matching vLLM's own out-of-the-box
+default) on a discrete GPU, or on unified memory, whichever is lower of
+`0.92` and the fraction of total memory left after reserving 5 GB for
+the OS/everything else on the box. Pin your own value in the recipe's
+`command` (`--gpu-memory-utilization 0.8`) to override it.
+
 ## Development
 
 ```

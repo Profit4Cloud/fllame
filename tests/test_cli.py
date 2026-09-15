@@ -1787,6 +1787,70 @@ def test_recipe_build_container_always_sets_hf_hub_offline(tmp_path: Path, monke
     assert "HF_HUB_OFFLINE" in compose_text
 
 
+def test_recipe_build_sets_gpu_memory_utilization_by_default(tmp_path: Path, monkeypatch):
+    """Left to vLLM's own default, a recipe with no explicit
+    `--gpu-memory-utilization` can reserve the whole GPU - starving the
+    rest of the box on a unified-memory machine. `recipe build` always
+    bakes in a safe value unless the recipe's own command already sets
+    one (see `fllame/backends/vllm.py`)."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--gpu-memory-utilization" in compose_text
+    assert "0.92" in compose_text
+
+
+def test_recipe_build_gpu_memory_utilization_reserves_headroom_on_unified_memory(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA GB10",
+            gpu_count=1,
+            vram_gb_per_gpu=None,
+            ram_gb=32.0,
+            chip_family="grace_blackwell",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    # (32 - 5) / 32 = 0.84375 -> "0.84", well under the 0.92 flat cap.
+    assert "--gpu-memory-utilization" in compose_text
+    assert "0.84" in compose_text
+
+
+def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --gpu-memory-utilization 0.6\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert compose_text.count("--gpu-memory-utilization") == 1
+    assert "0.6" in compose_text
+    assert "0.92" not in compose_text
+
+
 def test_recipe_build_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
