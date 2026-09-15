@@ -56,8 +56,7 @@ folder, recording what it last built - purely local-machine bookkeeping
 for that warning, not meant to be portable or backed up.
 
 fllame's scope ends once Docker and vLLM are running correctly on this
-one machine: it's single-machine, single-user by design (see
-`CLAUDE.md`, "Any multi-user or remote-access concern"). Backing up or
+one machine: it's single-machine, single-user by design. Backing up or
 versioning the recipes directory - `.fllame-build.yaml` included - is
 entirely your own responsibility; fllame doesn't manage or assume any
 of that itself.
