@@ -648,6 +648,36 @@ def config_set_default_image(image: str) -> None:
         _replace_image_in_compose_file(path, old_default, image)
     typer.echo(f"updated {len(affected)} file(s)")
 
+    # fllame's own edit, not a hand-edit - recalculate compose_hash right
+    # away so `serve`'s hand-edit check (point 5a) never mistakes this
+    # for one, and mark the image as not yet re-validated (point 5c)
+    # until the shared pull below confirms - or fails to confirm - it.
+    for path in affected:
+        directory = path.parent
+        state = build_state.load(directory)
+        build_state.save(
+            directory,
+            dataclasses.replace(
+                state,
+                compose_hash=build_state.hash_text(path.read_text()),
+                image_synced_via_config=True,
+            ),
+        )
+
+    typer.echo(f"pulling '{image}' to confirm it resolves ...")
+    if _run_docker("pull", image) == 0:
+        for path in affected:
+            directory = path.parent
+            state = build_state.load(directory)
+            build_state.save(directory, dataclasses.replace(state, image_synced_via_config=False))
+    else:
+        typer.echo(
+            f"warning: couldn't pull '{image}' - the config change and the file "
+            "update above are kept either way, but `fllame serve` will keep noting "
+            "that this image hasn't been re-validated until it does.",
+            err=True,
+        )
+
 
 @hardware_app.command("scan")
 def hardware_scan() -> None:
@@ -986,6 +1016,80 @@ def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None
         raise typer.Exit(code=1)
 
 
+def _warn_if_compose_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
+    """Case (a): `compose.yaml` no longer matches what the last
+    successful `recipe build` wrote - skipped when there's no recorded
+    hash to compare against at all (an old build-state-less compose.yaml,
+    or a compose.yaml written some other way)."""
+    directory = config.recipe_dir(recipe.handle)
+    state = build_state.load(directory)
+    if state.compose_hash is None:
+        return
+    current_hash = build_state.hash_text((directory / "compose.yaml").read_text())
+    if current_hash == state.compose_hash:
+        return
+
+    typer.echo(
+        f"warning: compose.yaml no longer matches the last build for '{recipe.handle}' - "
+        "it looks hand-edited since `fllame recipe build` last wrote it.",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm(
+        "Continue serving the current compose.yaml?", default=False
+    ):
+        raise typer.Exit(code=1)
+
+
+def _warn_if_dockerfile_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
+    """Case (b): same idea as above for `Dockerfile`, when this recipe
+    has one - the message names the exact command to run, since a stale
+    image is otherwise invisible (the container keeps running whatever
+    was last actually built)."""
+    directory = config.recipe_dir(recipe.handle)
+    dockerfile_path = directory / "Dockerfile"
+    if not dockerfile_path.is_file():
+        return
+    state = build_state.load(directory)
+    if state.dockerfile_hash is None:
+        return
+    if build_state.hash_text(dockerfile_path.read_text()) == state.dockerfile_hash:
+        return
+
+    typer.echo(
+        f"warning: Dockerfile no longer matches the last build for '{recipe.handle}' - "
+        "it looks hand-edited since. The running image won't reflect that change until "
+        f"it's rebuilt - run `fllame recipe build {recipe.handle}` (or `docker build -t "
+        f"{config.local_image_tag(recipe.handle)} {directory}`).",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm(
+        "Continue serving the current image anyway?", default=False
+    ):
+        raise typer.Exit(code=1)
+
+
+def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
+    """Case (c): `config set-default-image` already edited this
+    recipe's compose.yaml itself, so it's not a hand-edit and doesn't go
+    through the two checks above at all - it's flagged separately (see
+    `image_synced_via_config`) and only ever informational, never a
+    confirmation prompt, since it was already validated once via a
+    `docker pull` at the time (or the warning from that failed pull
+    already told the operator about it)."""
+    directory = config.recipe_dir(recipe.handle)
+    if not build_state.load(directory).image_synced_via_config:
+        return
+    try:
+        compose = yaml.safe_load((directory / "compose.yaml").read_text())
+        image = compose["services"][recipe.handle]["image"]
+    except (yaml.YAMLError, KeyError, TypeError):
+        image = "the configured default image"
+    typer.echo(
+        f"note: default image changed to '{image}' since this was last built - not "
+        "re-validated with a full `fllame recipe build`."
+    )
+
+
 @app.command()
 def serve(
     handle: str,
@@ -1023,10 +1127,20 @@ def serve(
     either way, and silently skipped whenever a confident comparison
     isn't possible - see `fllame hardware scan`/`fllame model scan` for
     the same underlying estimate.
+
+    Also compares `compose.yaml`/`Dockerfile` against the hashes
+    recorded by the last successful `recipe build`: a hand-edit to
+    either warns and asks to confirm (unless `-y`); an image changed
+    only by `fllame config set-default-image` since then is just noted,
+    never blocked on, since that edit was already validated with its own
+    `docker pull` at the time.
     """
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
+    _warn_if_compose_hand_edited(recipe, assume_yes=yes)
+    _warn_if_dockerfile_hand_edited(recipe, assume_yes=yes)
+    _note_if_image_not_yet_revalidated(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
     args = ["up", "-d", handle] if detach else ["up", handle]
