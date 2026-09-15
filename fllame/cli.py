@@ -16,7 +16,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
 from fllame import config, config_file
-from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path
+from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path, generate_dockerfile
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
@@ -71,18 +71,27 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(recipe: Recipe) -> None:
+def _write_recipe_compose(recipe: Recipe) -> str | None:
+    """Writes `compose.yaml` and, for a recipe with `preinstall`, the
+    `Dockerfile` it builds from - `compose.yaml`'s `image:` then points
+    at the local tag `recipe build` is about to build, not the base
+    image. Returns the Dockerfile content written, or `None` when this
+    recipe has no `preinstall` (nothing to build - `Dockerfile` is left
+    untouched either way, since it's a real, hand-editable artifact now,
+    not cleanup-on-sight cruft from an older fllame version).
+    """
     resolved = _resolve_image(recipe)
     directory = config.recipe_dir(resolved.handle)
-    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
-
     directory.mkdir(parents=True, exist_ok=True)
-    # Leftover from an older fllame version's preinstall handling.
-    stale_dockerfile = directory / "Dockerfile"
-    if stale_dockerfile.is_file():
-        stale_dockerfile.unlink()
+
+    dockerfile_content = generate_dockerfile(resolved)
+    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    if dockerfile_content is not None:
+        (directory / "Dockerfile").write_text(dockerfile_content)
+        compose["services"][resolved.handle]["image"] = config.local_image_tag(resolved.handle)
 
     write_compose_file(compose, directory / "compose.yaml")
+    return dockerfile_content
 
 
 def _require_model_cached(recipe: Recipe) -> None:
@@ -107,13 +116,55 @@ def _require_compose_built(recipe: Recipe) -> None:
     raise typer.Exit(code=1)
 
 
+def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
+    rebuild = f"fllame recipe build {handle}"
+    if dockerfile:
+        return (
+            f"`recipe build` couldn't build the Docker image for '{handle}' - see the "
+            "`docker build` output above for the underlying error (a failing "
+            "`preinstall` command is the usual cause). Fix the recipe's `preinstall` "
+            f"list (or the generated Dockerfile directly), then re-run `{rebuild}`."
+        )
+    return (
+        f"`recipe build` couldn't pull the image configured for '{handle}' - see the "
+        "`docker compose pull` output above for the underlying error (a bad image tag, "
+        "an unreachable registry, or missing credentials are the usual causes). Fix the "
+        f"recipe's (or the configured default) image, then re-run `{rebuild}`."
+    )
+
+
 def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
-    """Shared by `recipe build` and `recipe add --build` - the only
-    two commands that ever write `compose.yaml`."""
+    """Shared by `recipe build` and `recipe add --build` - the only two
+    commands that ever write `compose.yaml`/`Dockerfile`.
+
+    Always validates the result with a real `docker build` (a recipe
+    with `preinstall`) or `docker compose pull` (one without) - setup
+    phase, so the network access and repeat-run cost are both fine
+    (Docker's layer cache makes an unchanged rebuild cheap), and this is
+    the only way to catch a broken preinstall command or an unresolvable
+    image before `serve` ever tries to use it.
+    """
     _require_model_cached(recipe)
     _warn_if_cache_location_changed(recipe, assume_yes=assume_yes)
-    _write_recipe_compose(recipe)
-    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    dockerfile_content = _write_recipe_compose(recipe)
+    directory = config.recipe_dir(recipe.handle)
+    compose_path = directory / "compose.yaml"
+
+    if dockerfile_content is not None:
+        tag = config.local_image_tag(recipe.handle)
+        typer.echo(f"building '{tag}' from {directory / 'Dockerfile'} ...")
+        code = _run_docker("build", "-t", tag, str(directory))
+    else:
+        typer.echo("validating the configured image with `docker compose pull` ...")
+        code = _run_compose(recipe.handle, "pull")
+
+    if code != 0:
+        typer.echo(
+            _friendly_docker_build_error(recipe.handle, dockerfile=dockerfile_content is not None),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     typer.echo(f"wrote {compose_path}")
 
 
@@ -164,18 +215,9 @@ def _format_relative_time(dt: datetime | None) -> str:
     return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
-def _run_compose(handle: str, *args: str) -> int:
-    command = [
-        "docker",
-        "compose",
-        "-f",
-        str(config.recipe_dir(handle) / "compose.yaml"),
-        "-p",
-        config.compose_project_name(handle),
-        *args,
-    ]
+def _run_docker(*args: str) -> int:
     try:
-        return subprocess.run(command).returncode
+        return subprocess.run(["docker", *args]).returncode
     except FileNotFoundError as e:
         typer.echo(
             "docker (or the compose plugin) was not found on PATH - fllame runs "
@@ -183,6 +225,17 @@ def _run_compose(handle: str, *args: str) -> int:
             err=True,
         )
         raise typer.Exit(code=1) from e
+
+
+def _run_compose(handle: str, *args: str) -> int:
+    return _run_docker(
+        "compose",
+        "-f",
+        str(config.recipe_dir(handle) / "compose.yaml"),
+        "-p",
+        config.compose_project_name(handle),
+        *args,
+    )
 
 
 @recipe_app.command("list")
@@ -417,6 +470,14 @@ def recipe_build(
     first. `serve`/`status`/`stop` never write or regenerate
     `compose.yaml` themselves - it's meant to be hand-edited, and only
     ever touched again by explicitly re-running this command.
+
+    Also validates the result with real Docker: a recipe with
+    `preinstall` gets a `Dockerfile` (same hand-edit contract as
+    `compose.yaml`) built into a local image `compose.yaml` then points
+    at; one without gets its configured image checked with `docker
+    compose pull`. Both catch a broken preinstall command or an
+    unresolvable image now, in this setup-phase command, rather than
+    later at `serve` time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 

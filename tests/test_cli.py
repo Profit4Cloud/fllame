@@ -49,6 +49,12 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     # HF cache) unless a test explicitly opts into exercising it (see
     # the test_serve_vram_* tests below).
     monkeypatch.setattr(cli, "scan_hardware", lambda: _NO_HARDWARE_SIGNAL)
+    # `recipe build`'s Docker validation step (a real `docker build` or
+    # `docker compose pull`) defaults to a fake success so ordinary
+    # tests never need a real docker daemon - tests exercising the
+    # invoked command or a failure override `cli.subprocess.run`
+    # themselves afterward.
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FakeCompletedProcess())
 
 
 def _dialogue_input(*parts: str) -> str:
@@ -1265,7 +1271,91 @@ def test_serve_requires_compose_already_built(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "demo" / "compose.yaml").exists()
 
 
-def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
+def test_recipe_build_with_preinstall_writes_dockerfile_and_builds_local_image(
+    tmp_path: Path, monkeypatch
+):
+    """A recipe with `preinstall` gets a `Dockerfile` next to
+    compose.yaml, and compose.yaml's `image:` points at the local tag
+    that Dockerfile is built into - not the base image."""
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "preinstall:\n"
+        "- pip install -U transformers\n"
+        "command: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    dockerfile_text = (tmp_path / "demo" / "Dockerfile").read_text()
+    assert dockerfile_text == "FROM vllm/vllm-openai:v0.27.1\nRUN pip install -U transformers\n"
+    # `preinstall` is now a Dockerfile-build-time concern - it never
+    # appears embedded in compose.yaml's command/entrypoint.
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert "pip install -U transformers" not in compose_text
+    assert "image: fllame-demo:latest" in compose_text
+    assert captured["command"] == [
+        "docker",
+        "build",
+        "-t",
+        "fllame-demo:latest",
+        str(tmp_path / "demo"),
+    ]
+
+
+def test_recipe_build_without_preinstall_never_writes_a_dockerfile(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert not (tmp_path / "demo" / "Dockerfile").exists()
+
+
+def test_recipe_build_without_preinstall_validates_image_via_compose_pull(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert captured["command"][:3] == ["docker", "compose", "-f"]
+    assert captured["command"][-1] == "pull"
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert "image: vllm/vllm-openai:v0.27.1" in compose_text
+
+
+def test_recipe_build_dockerfile_left_untouched_when_recipe_has_no_preinstall(
+    tmp_path: Path, monkeypatch
+):
+    """`Dockerfile` is a real, permanent, hand-editable artifact once a
+    recipe has one - a later build of a recipe with no `preinstall`
+    doesn't delete it out from under the user."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "Dockerfile").write_text("FROM img\nRUN echo hand-edited\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert (handle_folder / "Dockerfile").read_text() == "FROM img\nRUN echo hand-edited\n"
+
+
+def test_recipe_build_docker_build_failure_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo").mkdir(parents=True)
     (tmp_path / "demo" / "recipe.yaml").write_text(
@@ -1276,28 +1366,35 @@ def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monke
     )
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
 
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
-    assert result.exit_code == 0
-    # `preinstall` is now a Dockerfile-build-time concern - it never
-    # appears embedded in compose.yaml's command/entrypoint.
-    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
-    assert "pip install -U transformers" not in compose_text
+    assert result.exit_code == 1
+    assert "docker build" in result.output
+    assert "fllame recipe build demo" in result.output
 
 
-def test_recipe_build_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
-    """A Dockerfile left over from an older fllame version's
-    build-a-custom-image approach is cleaned up on the next build."""
+def test_recipe_build_docker_compose_pull_failure_gives_friendly_error(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    handle_folder = tmp_path / "demo"
-    (handle_folder / "Dockerfile").write_text("FROM img\n")
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
-    assert result.exit_code == 0
-    assert not (handle_folder / "Dockerfile").exists()
+    assert result.exit_code == 1
+    assert "docker compose pull" in result.output
+    assert "fllame recipe build demo" in result.output
 
 
 def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):

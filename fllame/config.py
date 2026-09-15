@@ -25,6 +25,14 @@ def compose_project_name(handle: str) -> str:
     return f"fllame-{handle}"
 
 
+def local_image_tag(handle: str) -> str:
+    """The local image tag `recipe build` builds and tags a preinstall
+    recipe's Dockerfile under - retagged fresh on every build, not
+    content-hash-derived; that level of image/version management is out
+    of scope for now."""
+    return f"fllame-{handle}:latest"
+
+
 def config_file_path() -> Path:
     override = os.environ.get("FLLAME_CONFIG_FILE")
     if override:
