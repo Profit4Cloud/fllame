@@ -30,6 +30,7 @@ from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
+from fllame.recipes import build_state
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
@@ -165,6 +166,7 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
         )
         raise typer.Exit(code=1)
 
+    build_state.save(directory, build_state.for_current_files(directory))
     typer.echo(f"wrote {compose_path}")
 
 

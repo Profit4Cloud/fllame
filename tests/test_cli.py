@@ -9,6 +9,7 @@ from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.discovery import ModelCandidate
 from fllame.models.updater import UpdateStatus
+from fllame.recipes import build_state
 
 runner = CliRunner()
 
@@ -1664,6 +1665,56 @@ def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypat
 
     assert result.exit_code == 0
     assert (tmp_path / "demo" / "compose.yaml").is_file()
+
+
+def test_recipe_build_writes_build_state_matching_compose_hash(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    state = build_state.load(tmp_path / "demo")
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert state.compose_hash == build_state.hash_text(compose_text)
+    assert state.dockerfile_hash is None
+    assert state.image_synced_via_config is False
+
+
+def test_recipe_build_with_preinstall_writes_build_state_with_dockerfile_hash(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    state = build_state.load(directory)
+    dockerfile_text = (directory / "Dockerfile").read_text()
+    assert state.dockerfile_hash == build_state.hash_text(dockerfile_text)
+
+
+def test_recipe_build_does_not_write_build_state_on_docker_failure(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert not build_state.path_for(tmp_path / "demo").exists()
 
 
 def test_recipe_build_unknown_handle(tmp_path: Path, monkeypatch):
