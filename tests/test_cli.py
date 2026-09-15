@@ -1279,9 +1279,10 @@ def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monke
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
+    # `preinstall` is now a Dockerfile-build-time concern - it never
+    # appears embedded in compose.yaml's command/entrypoint.
     compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
-    assert "pip install -U transformers" in compose_text
-    assert not (tmp_path / "demo" / "Dockerfile").exists()
+    assert "pip install -U transformers" not in compose_text
 
 
 def test_recipe_build_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):

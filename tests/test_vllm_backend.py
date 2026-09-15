@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path
+from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path, generate_dockerfile
 from fllame.domain.recipe import Recipe
 
 
@@ -132,7 +132,10 @@ def test_build_service_ipc_host_is_unconditional():
     assert service["ipc"] == "host"
 
 
-def test_build_service_with_preinstall_wraps_command_in_a_shell():
+def test_build_service_preinstall_never_changes_entrypoint_or_command():
+    """`preinstall` is now a Dockerfile-build-time concern (see
+    `generate_dockerfile`) - the generated service always runs the
+    plain `vllm serve` form, whether or not the recipe has one."""
     backend = VllmServingBackend()
     recipe = Recipe(
         handle="demo",
@@ -144,41 +147,39 @@ def test_build_service_with_preinstall_wraps_command_in_a_shell():
     service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
 
     assert "build" not in service
-    assert service["image"] == "vllm/vllm-openai:v0.27.1"
-    assert service["entrypoint"] == ["sh", "-c"]
-    assert service["command"] == [
-        "pip install -U transformers && exec vllm serve org/demo --tensor-parallel-size 1"
-    ]
+    assert service["entrypoint"] == ["vllm", "serve"]
+    assert service["command"] == ["org/demo", "--tensor-parallel-size", "1"]
 
 
-def test_build_service_with_multiple_preinstall_steps_in_order():
-    backend = VllmServingBackend()
+def test_generate_dockerfile_none_without_preinstall():
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    assert generate_dockerfile(recipe) is None
+
+
+def test_generate_dockerfile_one_run_line_per_preinstall_entry_in_order():
+    """One `RUN` per entry, not joined with `&&` into a single layer -
+    keeps Docker's layer cache reusing an unchanged earlier step even
+    when a later one changes."""
     recipe = Recipe(
         handle="demo",
         command="vllm serve org/demo",
-        image="img",
-        preinstall=["pip install foo", "pip install bar"],
+        image="vllm/vllm-openai:v0.27.1",
+        preinstall=["pip install -U transformers", "pip install foo"],
     )
 
-    service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
+    dockerfile = generate_dockerfile(recipe)
 
-    assert service["command"] == ["pip install foo && pip install bar && exec vllm serve org/demo"]
+    assert dockerfile == (
+        "FROM vllm/vllm-openai:v0.27.1\n"
+        "RUN pip install -U transformers\n"
+        "RUN pip install foo\n"
+    )
 
 
-def test_build_service_preinstall_shell_escapes_vllm_serve_args():
-    """Preinstall entries are joined in as trusted shell text verbatim,
-    but the vllm serve portion still needs escaping now that it's
-    embedded in a shell string rather than passed as literal argv."""
-    backend = VllmServingBackend()
+def test_generate_dockerfile_single_preinstall_entry():
     recipe = Recipe(
-        handle="demo",
-        command='vllm serve org/demo --served-model-name "my model"',
-        image="img",
-        preinstall=["pip install foo"],
+        handle="demo", command="vllm serve org/demo", image="img", preinstall=["pip install foo"]
     )
 
-    service = backend.build_service(recipe, hf_cache_dir=Path("/cache"))
-
-    assert service["command"] == [
-        "pip install foo && exec vllm serve org/demo --served-model-name 'my model'"
-    ]
+    assert generate_dockerfile(recipe) == "FROM img\nRUN pip install foo\n"

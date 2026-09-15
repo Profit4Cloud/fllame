@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
 from pathlib import Path
 
 from fllame.domain.recipe import Recipe
@@ -46,6 +45,8 @@ class VllmServingBackend:
         }
         service: dict = {
             "image": recipe.image,
+            "entrypoint": ["vllm", "serve"],
+            "command": [recipe.repo_id, *recipe.serve_args],
             "ports": [f"{recipe.port}:{recipe.port}"],
             "environment": [f"{key}={value}" for key, value in env.items()],
             "volumes": [f"{_host_volume_source(hf_cache_dir)}:{_CONTAINER_HF_HOME}"],
@@ -53,19 +54,17 @@ class VllmServingBackend:
             "gpus": "all",
         }
 
-        vllm_command = shlex.join(["vllm", "serve", recipe.repo_id, *recipe.serve_args])
-
-        if recipe.preinstall:
-            # `recipe.preinstall` entries are joined in verbatim, as
-            # shell text; `vllm_command` is shlex-escaped so a repo_id/
-            # flag value containing shell syntax stays a literal
-            # argument. `exec` replaces the shell with vLLM so it
-            # becomes PID 1 and receives SIGTERM directly.
-            segments = [*recipe.preinstall, f"exec {vllm_command}"]
-            service["entrypoint"] = ["sh", "-c"]
-            service["command"] = [" && ".join(segments)]
-        else:
-            service["entrypoint"] = ["vllm", "serve"]
-            service["command"] = [recipe.repo_id, *recipe.serve_args]
-
         return service
+
+
+def generate_dockerfile(recipe: Recipe) -> str | None:
+    """`FROM <image>` plus one `RUN <preinstall line>` per entry, in
+    order - never joined with `&&` into a single `RUN`, so an unchanged
+    earlier step stays cache-hit on a later rebuild even if a later one
+    changes. `None` when there's nothing to install: a no-op Dockerfile
+    would only obscure that this recipe runs the base image verbatim.
+    """
+    if not recipe.preinstall:
+        return None
+    lines = [f"FROM {recipe.image}", *(f"RUN {step}" for step in recipe.preinstall)]
+    return "\n".join(lines) + "\n"
