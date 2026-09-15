@@ -518,9 +518,7 @@ def recipe_edit(handle: str) -> None:
     rendering once it validates, regardless of which of those kicked in.
     Anything else invalid offers a choice: reopen $EDITOR to fix it, or
     revert to the version from before this edit (kept in memory for the
-    length of this command, not written to a backup file - the recipes
-    directory is meant to be git-tracked already, which is the real
-    backup).
+    length of this command, not written to a backup file).
     """
     path = config.recipe_dir(handle) / "recipe.yaml"
     if not path.is_file():
