@@ -1245,7 +1245,7 @@ def test_serve_verifies_cache_then_invokes_docker_compose_up(tmp_path: Path, mon
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
-    result = runner.invoke(app, ["serve", "demo", "--detach"])
+    result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
     assert captured["command"][:3] == ["docker", "compose", "-f"]
@@ -1270,8 +1270,8 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
 
 def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
     """`docker compose up` never gets Docker's own image-build flag -
-    fllame has no custom image/Dockerfile to build, on top of never
-    invoking `docker compose` with `--build` at all."""
+    `recipe build` already built/validated the image, `serve` only ever
+    runs what's already there."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1635,7 +1635,10 @@ def test_config_set_default_image_pull_not_attempted_when_no_files_affected(
     assert pulls == []
 
 
-def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
+def test_serve_always_runs_detached(tmp_path: Path, monkeypatch):
+    """There's no foreground mode any more - `serve` always runs `up
+    -d`, since a well-defined "did it start OK" exit code is what lets
+    it clear the drift markers below right after a successful start."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1646,7 +1649,114 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
-    assert captured["command"][-2:] == ["up", "demo"]
+    assert captured["command"][-3:] == ["up", "-d", "demo"]
+
+
+def test_serve_has_no_detach_option_any_more():
+    result = runner.invoke(app, ["serve", "--help"])
+
+    assert "--detach" not in result.output
+
+
+def test_serve_sets_container_name_on_the_compose_service(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+
+    assert "container_name: fllame-demo" in compose_text
+
+
+def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "docker logs -f fllame-demo" in result.output
+    assert "can take several minutes" in result.output
+
+
+def test_serve_omits_docker_logs_hint_on_failure(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert "docker logs" not in result.output
+
+
+def test_serve_success_clears_compose_hand_edit_marker(tmp_path: Path, monkeypatch):
+    """A successful start refreshes the recorded hashes to match
+    whatever's on disk right now - so a hand-edit that turned out fine
+    doesn't keep re-prompting on every later `serve`."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text() + "# hand-edited\n")
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+    assert result.exit_code == 0
+
+    second = runner.invoke(app, ["serve", "demo"])
+
+    assert second.exit_code == 0
+    assert "no longer matches" not in second.output
+
+
+def test_serve_success_clears_image_synced_via_config_marker(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    directory = tmp_path / "demo"
+    state = build_state.load(directory)
+    build_state.save(directory, dataclasses.replace(state, image_synced_via_config=True))
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert not build_state.load(directory).image_synced_via_config
+
+
+def test_serve_failure_does_not_clear_any_drift_marker(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    directory = tmp_path / "demo"
+    state = build_state.load(directory)
+    build_state.save(directory, dataclasses.replace(state, image_synced_via_config=True))
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert build_state.load(directory).image_synced_via_config
 
 
 def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):

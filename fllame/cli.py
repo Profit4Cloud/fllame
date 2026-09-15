@@ -87,9 +87,15 @@ def _write_recipe_compose(recipe: Recipe) -> str | None:
 
     dockerfile_content = generate_dockerfile(resolved)
     compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    service = compose["services"][resolved.handle]
+    # A stable, predictable name (matching the compose project name)
+    # instead of docker compose's own auto-generated
+    # `<project>-<service>-1` - lets `serve` print the right `docker
+    # logs` command without an extra `docker compose ps` round-trip.
+    service["container_name"] = config.compose_project_name(resolved.handle)
     if dockerfile_content is not None:
         (directory / "Dockerfile").write_text(dockerfile_content)
-        compose["services"][resolved.handle]["image"] = config.local_image_tag(resolved.handle)
+        service["image"] = config.local_image_tag(resolved.handle)
 
     write_compose_file(compose, directory / "compose.yaml")
     return dockerfile_content
@@ -1093,19 +1099,20 @@ def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
 @app.command()
 def serve(
     handle: str,
-    detach: bool = typer.Option(False, "--detach", "-d", help="Run in the background."),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Skip the pre-serve VRAM sanity check's confirmation prompt - "
-        "the warning (if any) is still printed.",
+        help="Skip this command's confirmation prompts (compose.yaml/Dockerfile "
+        "hand-edit and VRAM sanity checks) - any warning is still printed.",
     ),
 ) -> None:
     """Launch the recipe for HANDLE as a Docker container via `docker
-    compose`, from HANDLE's own self-contained compose folder
+    compose up -d`, from HANDLE's own self-contained compose folder
     (`fllame config` aside, entirely independent of every other
-    recipe's).
+    recipe's). Always detached - there's no foreground mode - since
+    that's what gives this command a single, immediate "did it start OK"
+    signal to act on below.
 
     Never touches the network, full stop: the model must already be
     fully present in the HF cache - `fllame model pull <repo_id>`, or
@@ -1134,6 +1141,15 @@ def serve(
     only by `fllame config set-default-image` since then is just noted,
     never blocked on, since that edit was already validated with its own
     `docker pull` at the time.
+
+    A successful start (`docker compose up -d` itself exits 0 - a
+    compose-level check, not a deeper vLLM health check, which is out of
+    scope) refreshes those recorded hashes and clears the
+    not-yet-re-validated note, so none of the above ever nags about
+    something that's since gone away, and prints the exact `docker logs`
+    command to follow the container's own startup - model loading can
+    take several minutes, so a quiet log right after this returns is
+    expected, not itself a problem.
     """
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
@@ -1143,8 +1159,17 @@ def serve(
     _note_if_image_not_yet_revalidated(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
-    args = ["up", "-d", handle] if detach else ["up", handle]
-    raise typer.Exit(code=_run_compose(handle, *args))
+    code = _run_compose(handle, "up", "-d", handle)
+    if code == 0:
+        directory = config.recipe_dir(handle)
+        build_state.save(directory, build_state.for_current_files(directory))
+        container_name = config.compose_project_name(handle)
+        typer.echo(f"'{handle}' started - follow its logs with: docker logs -f {container_name}")
+        typer.echo(
+            "model loading can take several minutes - an empty or quiet log right "
+            "after this returns is expected, not a problem."
+        )
+    raise typer.Exit(code=code)
 
 
 @app.command()
