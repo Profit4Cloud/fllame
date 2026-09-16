@@ -92,6 +92,22 @@ default) on a discrete GPU, or on unified memory, whichever is lower of
 the OS/everything else on the box. Pin your own value in the recipe's
 `command` (`--gpu-memory-utilization 0.8`) to override it.
 
+`recipe build` similarly computes `--max-model-len` by default, sized
+against the model's cached weight size, its `config.json` architecture,
+and the same effective `--gpu-memory-utilization`, on the assumption of
+8 concurrent full-length requests - left unset, vLLM can default to the
+model's full trained context length, which can need far more KV-cache
+memory than is actually available. The computed value never exceeds
+the model's own architectural context ceiling. If the model's
+architecture isn't recognized, or the fitted context length would fall
+below fllame's usable minimum, `--max-model-len` is left to be set by
+hand in the recipe's `command` - the latter case makes `recipe build`
+fail with the numbers involved, rather than serving an unusably short
+context silently. `recipe build` also warns (without blocking) when a
+recipe's `--tensor-parallel-size` doesn't match the number of GPUs
+actually detected, since `gpus: all` and any tensor-parallel-size stay
+exactly as configured either way.
+
 ## Development
 
 ```
