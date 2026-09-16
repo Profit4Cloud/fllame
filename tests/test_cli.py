@@ -6,8 +6,10 @@ from typer.testing import CliRunner
 
 import fllame.cli as cli
 from fllame import config
+from fllame.backends import vllm as vllm_backend
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
+from fllame.models.architecture import ModelArchitecture
 from fllame.models.discovery import ModelCandidate
 from fllame.models.updater import UpdateStatus
 from fllame.recipes import build_state
@@ -1849,6 +1851,156 @@ def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path
     assert compose_text.count("--gpu-memory-utilization") == 1
     assert "0.6" in compose_text
     assert "0.92" not in compose_text
+
+
+_DENSE_ARCH = ModelArchitecture(
+    num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=131072
+)
+
+
+def test_recipe_build_injects_max_model_len_for_known_cached_model(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
+    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--max-model-len" in compose_text
+
+
+def test_recipe_build_shortfall_exits_nonzero_writes_compose_without_flag_skips_docker(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 15.0)
+    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="tiny", gpu_count=1, vram_gb_per_gpu=20.0, ram_gb=64.0, chip_family="nvidia"
+        ),
+    )
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "org/demo" in result.output
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--max-model-len" not in compose_text
+    assert docker_calls == []
+
+
+def test_recipe_build_explicit_max_model_len_skips_shortfall_check(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --max-model-len 2048\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    called = []
+    monkeypatch.setattr(
+        vllm_backend, "read_architecture", lambda repo_id: called.append(repo_id) or None
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert compose_text.count("--max-model-len") == 1
+    assert "2048" in compose_text
+    assert called == []
+
+
+def test_recipe_build_warns_on_tensor_parallel_size_mismatch(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --tensor-parallel-size 4\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" in result.output
+
+
+def test_recipe_build_no_tensor_parallel_size_warning_when_matching(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --tensor-parallel-size 1\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" not in result.output
+
+
+def test_recipe_build_no_tensor_parallel_size_warning_when_no_gpu_detected(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    # _isolate's own default already scans no hardware at all.
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" not in result.output
 
 
 def test_recipe_build_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):

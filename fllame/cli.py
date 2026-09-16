@@ -16,7 +16,13 @@ from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
 from fllame import config, config_file
-from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path, generate_dockerfile
+from fllame.backends.vllm import (
+    VllmServingBackend,
+    cache_volume_host_path,
+    generate_dockerfile,
+    max_model_len_shortfall,
+    tensor_parallel_size_mismatch_warning,
+)
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe, RecipeError
@@ -160,9 +166,27 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     # way (see `HardwareProfile`'s own docstring).
     hardware = scan_hardware()
     _warn_if_cache_location_changed(recipe, assume_yes=assume_yes, hardware=hardware)
+    tp_warning = tensor_parallel_size_mismatch_warning(recipe, hardware)
+    if tp_warning is not None:
+        typer.echo(tp_warning, err=True)
     dockerfile_content = _write_recipe_compose(recipe, hardware=hardware)
     directory = config.recipe_dir(recipe.handle)
     compose_path = directory / "compose.yaml"
+
+    # Checked after compose.yaml is written (build_service's own
+    # shortfall detection already left it without --max-model-len in
+    # this case) and before the expensive Docker step below - fail fast
+    # on the cheap check first.
+    shortfall = max_model_len_shortfall(recipe, hardware)
+    if shortfall is not None:
+        typer.echo(
+            f"{shortfall} This is advanced territory - hand-edit {compose_path}'s command "
+            "directly (a smaller --max-model-len, or your own --gpu-memory-utilization) at "
+            "your own risk; `serve` will flag that edit the same way it flags any other "
+            "hand edit.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     if dockerfile_content is not None:
         tag = config.local_image_tag(recipe.handle)
@@ -493,6 +517,14 @@ def recipe_build(
     compose pull`. Both catch a broken preinstall command or an
     unresolvable image now, in this setup-phase command, rather than
     later at `serve` time.
+
+    Computes `--max-model-len` the same way, unless the recipe sets its
+    own: if even fllame's minimum usable context doesn't fit this
+    model's cached weights and this hardware's memory budget, this
+    command hard-fails before the Docker step, since serving an
+    unusably short context by default would be worse than an explicit
+    error. Also warns (never blocks) when the recipe's
+    `--tensor-parallel-size` doesn't match the number of GPUs detected.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
