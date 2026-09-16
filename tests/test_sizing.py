@@ -1,5 +1,11 @@
 from fllame.domain.hardware import HardwareProfile
-from fllame.models.sizing import memory_budget_gb, usable_memory_gb
+from fllame.models.architecture import ModelArchitecture
+from fllame.models.sizing import (
+    kv_cache_bytes_per_token,
+    max_context_length_for_budget,
+    memory_budget_gb,
+    usable_memory_gb,
+)
 
 
 def _profile(**overrides) -> HardwareProfile:
@@ -55,3 +61,37 @@ def test_usable_memory_unified_subtracts_os_reserve():
 def test_usable_memory_never_goes_negative_on_tiny_unified_budget():
     usable = usable_memory_gb(budget_gb=2.0, unified_memory=True)
     assert usable == 0.0
+
+
+_LLAMA_8B_ARCH = ModelArchitecture(
+    num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=8192
+)
+
+
+def test_kv_cache_bytes_per_token_hand_computed():
+    # 2 (K and V) * 32 layers * 8 kv heads * 128 head_dim * 2 bytes = 131072.
+    assert kv_cache_bytes_per_token(_LLAMA_8B_ARCH) == 131072
+
+
+def test_max_context_length_for_budget_caps_at_architectural_ceiling():
+    # An enormous budget would otherwise compute a context length far
+    # past what the model was ever trained for.
+    context_length = max_context_length_for_budget(
+        arch=_LLAMA_8B_ARCH, weights_gb=16.0, total_budget_gb=1000.0
+    )
+    assert context_length == _LLAMA_8B_ARCH.max_context_length
+
+
+def test_max_context_length_for_budget_tight_budget_below_ceiling():
+    context_length = max_context_length_for_budget(
+        arch=_LLAMA_8B_ARCH, weights_gb=16.0, total_budget_gb=20.0
+    )
+    assert 0 < context_length < _LLAMA_8B_ARCH.max_context_length
+
+
+def test_max_context_length_for_budget_insufficient_budget_returns_zero():
+    # Weights alone already exceed the budget.
+    context_length = max_context_length_for_budget(
+        arch=_LLAMA_8B_ARCH, weights_gb=16.0, total_budget_gb=10.0
+    )
+    assert context_length == 0
