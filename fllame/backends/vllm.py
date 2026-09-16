@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe
-from fllame.domain.vllm_command import has_flag
+from fllame.domain.vllm_command import extract_flag_value, has_flag
+from fllame.models.architecture import read_architecture
+from fllame.models.cache import local_estimate_vram_gb
+from fllame.models.sizing import (
+    _DEFAULT_SIZING_CONCURRENCY,
+    _MIN_USABLE_MAX_MODEL_LEN,
+    max_context_length_for_budget,
+    memory_budget_gb,
+)
 
 _CONTAINER_HF_HOME = "/root/.cache/huggingface"
 
@@ -39,6 +48,105 @@ def default_gpu_memory_utilization(profile: HardwareProfile) -> float:
         reserved_fraction = (profile.ram_gb - _UNIFIED_MEMORY_SYSTEM_RESERVE_GB) / profile.ram_gb
         return min(_MAX_GPU_MEMORY_UTILIZATION, max(0.0, reserved_fraction))
     return _MAX_GPU_MEMORY_UTILIZATION
+
+
+_MAX_MODEL_LEN_FLAG = "--max-model-len"
+_TENSOR_PARALLEL_SIZE_FLAG = "--tensor-parallel-size"
+
+
+@dataclass(frozen=True)
+class _MaxModelLenResolution:
+    # What to inject into serve_args, or None: the recipe set its own,
+    # the architecture is unsupported, or the hardware budget is
+    # unknown - every "don't touch it" case looks the same to the
+    # caller.
+    value: int | None
+    # A human-readable message only when a supported architecture's
+    # minimum usable context genuinely doesn't fit - None in every
+    # other case, including "unsupported/unknown".
+    shortfall: str | None
+
+
+def _effective_gpu_memory_utilization(recipe: Recipe, hardware: HardwareProfile) -> float:
+    """Whatever value will actually end up on the vllm serve command
+    line for --gpu-memory-utilization - the recipe's own explicit value
+    if it set one, else the same computed default build_service would
+    inject. The max-model-len budget must be sized against this same
+    number, not recomputed independently, since they're not
+    independent decisions."""
+    explicit = extract_flag_value(recipe.serve_args, _GPU_MEMORY_UTILIZATION_FLAG)
+    return float(explicit) if explicit is not None else default_gpu_memory_utilization(hardware)
+
+
+def _resolve_max_model_len(recipe: Recipe, hardware: HardwareProfile) -> _MaxModelLenResolution:
+    if has_flag(recipe.serve_args, _MAX_MODEL_LEN_FLAG):
+        return _MaxModelLenResolution(value=None, shortfall=None)
+
+    weights_gb = local_estimate_vram_gb(recipe.repo_id)
+    arch = read_architecture(recipe.repo_id)
+    if weights_gb is None or arch is None:
+        return _MaxModelLenResolution(value=None, shortfall=None)
+
+    budget_gb = memory_budget_gb(hardware)
+    if budget_gb is None:
+        return _MaxModelLenResolution(value=None, shortfall=None)
+
+    utilization = _effective_gpu_memory_utilization(recipe, hardware)
+    total_budget_gb = utilization * budget_gb
+    context_length = max_context_length_for_budget(
+        arch=arch,
+        weights_gb=weights_gb,
+        total_budget_gb=total_budget_gb,
+        concurrency=_DEFAULT_SIZING_CONCURRENCY,
+    )
+
+    if context_length < _MIN_USABLE_MAX_MODEL_LEN:
+        shortfall = (
+            f"'{recipe.repo_id}' doesn't fit a usable context window on this hardware even "
+            f"at fllame's minimum ({_MIN_USABLE_MAX_MODEL_LEN} tokens) - weights alone need "
+            f"{weights_gb:.1f} GB, leaving too little of the {total_budget_gb:.1f} GB budget "
+            f"(at --gpu-memory-utilization {utilization:.2f}) for KV cache at "
+            f"{_DEFAULT_SIZING_CONCURRENCY}-way concurrency."
+        )
+        return _MaxModelLenResolution(value=None, shortfall=shortfall)
+
+    return _MaxModelLenResolution(value=context_length, shortfall=None)
+
+
+def max_model_len_shortfall(recipe: Recipe, hardware: HardwareProfile) -> str | None:
+    """What `recipe build` hard-fails on - the same shortfall detection
+    `build_service`'s own injection already skips silently, exposed
+    separately so both paths share one source of truth."""
+    return _resolve_max_model_len(recipe, hardware).shortfall
+
+
+def tensor_parallel_size_mismatch_warning(recipe: Recipe, hardware: HardwareProfile) -> str | None:
+    """None when there's nothing worth flagging (no GPU count detected
+    at all, or the recipe's tensor-parallel-size already matches it).
+    vLLM's own default is 1 when the recipe doesn't set one.
+
+    `gpus: all` and no fllame-set `--tensor-parallel-size` are both
+    unconditional - this only warns, it never changes either."""
+    if hardware.gpu_count <= 0:
+        return None
+
+    value = extract_flag_value(recipe.serve_args, _TENSOR_PARALLEL_SIZE_FLAG) or "1"
+    tensor_parallel_size = int(value)
+    if tensor_parallel_size == hardware.gpu_count:
+        return None
+
+    if tensor_parallel_size > hardware.gpu_count:
+        return (
+            f"warning: '{recipe.handle}' sets --tensor-parallel-size {tensor_parallel_size}, "
+            f"but only {hardware.gpu_count} GPU(s) were detected - vLLM will fail to start "
+            "until this recipe's --tensor-parallel-size matches what's actually present."
+        )
+    return (
+        f"warning: '{recipe.handle}' sets --tensor-parallel-size {tensor_parallel_size}, but "
+        f"{hardware.gpu_count} GPU(s) were detected - `gpus: all` still hands the container "
+        f"every one of them, so {hardware.gpu_count - tensor_parallel_size} will sit unused. "
+        "Raise --tensor-parallel-size in the recipe's command to use them."
+    )
 
 
 def _host_volume_source(hf_cache_dir: Path) -> str:
@@ -83,6 +191,9 @@ class VllmServingBackend:
                 _GPU_MEMORY_UTILIZATION_FLAG,
                 f"{default_gpu_memory_utilization(hardware):.2f}",
             ]
+        max_model_len = _resolve_max_model_len(recipe, hardware).value
+        if max_model_len is not None:
+            serve_args += [_MAX_MODEL_LEN_FLAG, str(max_model_len)]
         service: dict = {
             "image": recipe.image,
             "entrypoint": ["vllm", "serve"],
