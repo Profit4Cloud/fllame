@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.architecture import ModelArchitecture
 
@@ -34,6 +36,24 @@ _BYTES_PER_GB = 1e9
 # both K and V.
 _KV_CACHE_DTYPE_BYTES = 2
 _KV_TENSORS_PER_TOKEN = 2
+
+
+@dataclass(frozen=True)
+class SizingConfig:
+    """The two `--max-model-len`-sizing numbers that are guesses rather
+    than physical facts (unlike weights/architecture/hardware) - user-
+    tunable via `fllame config`, defaulting to this module's own
+    picks."""
+
+    min_usable_max_model_len: int = _MIN_USABLE_MAX_MODEL_LEN
+    activation_overhead_gb: float = _ACTIVATION_OVERHEAD_GB
+
+
+# A single shared instance for other modules' default parameter values -
+# `SizingConfig()` itself can't be called inline as a default (ruff B008;
+# also just wasteful to construct afresh on every call when the values
+# never change), and frozen dataclasses are safe to share this way.
+DEFAULT_SIZING_CONFIG = SizingConfig()
 
 
 def memory_budget_gb(profile: HardwareProfile) -> float | None:
@@ -68,6 +88,7 @@ def max_context_length_for_budget(
     weights_gb: float,
     total_budget_gb: float,
     concurrency: int = _DEFAULT_SIZING_CONCURRENCY,
+    activation_overhead_gb: float = _ACTIVATION_OVERHEAD_GB,
 ) -> int:
     """The largest max-model-len that fits `total_budget_gb` (already
     the *effective* gpu-memory-utilization fraction times the box's raw
@@ -77,7 +98,7 @@ def max_context_length_for_budget(
     model's own true architectural ceiling (`arch.max_context_length`),
     never negative.
     """
-    kv_cache_budget_gb = total_budget_gb - weights_gb - _ACTIVATION_OVERHEAD_GB
+    kv_cache_budget_gb = total_budget_gb - weights_gb - activation_overhead_gb
     if kv_cache_budget_gb <= 0:
         return 0
 

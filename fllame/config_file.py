@@ -1,6 +1,4 @@
-"""Persisted CLI settings - today just `default_image` - managed via
-`fllame config`, not hand-edited.
-"""
+"""Persisted CLI settings, managed via `fllame config`, not hand-edited."""
 
 from __future__ import annotations
 
@@ -29,4 +27,24 @@ def get_default_image() -> str | None:
 def set_default_image(image: str) -> None:
     data = _read()
     data["default_image"] = image
+    _write(data)
+
+
+def get_min_usable_max_model_len() -> int | None:
+    return _read().get("min_usable_max_model_len")
+
+
+def set_min_usable_max_model_len(tokens: int) -> None:
+    data = _read()
+    data["min_usable_max_model_len"] = tokens
+    _write(data)
+
+
+def get_activation_overhead_gb() -> float | None:
+    return _read().get("activation_overhead_gb")
+
+
+def set_activation_overhead_gb(gb: float) -> None:
+    data = _read()
+    data["activation_overhead_gb"] = gb
     _write(data)

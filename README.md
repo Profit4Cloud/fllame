@@ -33,8 +33,10 @@ Then you can run the fllame commands below within the activated environment.
 - fllame model list # List models currently present in the local cache (no network).
 - fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub for candidate models, ranked by hardware fit/downloads/recency.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
-- fllame config show # Print the currently configured default Docker image.
+- fllame config show # Print fllame's currently configured settings.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml files still using the old default.
+- fllame config set-min-context-length TOKENS # Set the minimum usable --max-model-len recipe build will compute by default (default: 4096).
+- fllame config set-activation-overhead GB # Set the fixed GB reserved for activation/overhead when recipe build computes --max-model-len (default: 2.0).
 - fllame serve HANDLE [--yes] # Launch HANDLE's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame status # Show every recipe's container state via docker compose ps.
 - fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
@@ -100,10 +102,14 @@ model's full trained context length, which can need far more KV-cache
 memory than is actually available. The computed value never exceeds
 the model's own architectural context ceiling. If the model's
 architecture isn't recognized, or the fitted context length would fall
-below fllame's usable minimum, `--max-model-len` is left to be set by
-hand in the recipe's `command` - the latter case makes `recipe build`
-fail with the numbers involved, rather than serving an unusably short
-context silently. `recipe build` also warns (without blocking) when a
+below fllame's usable minimum (`fllame config set-min-context-length`,
+default 4096 tokens), `--max-model-len` is left to be set by hand in
+the recipe's `command` - the latter case makes `recipe build` fail with
+the numbers involved, rather than serving an unusably short context
+silently. The fixed GB assumed for activation memory/other overhead
+beyond weights and KV cache is also configurable
+(`fllame config set-activation-overhead`, default 2.0). `recipe build`
+also warns (without blocking) when a
 recipe's `--tensor-parallel-size` doesn't match the number of GPUs
 actually detected, since `gpus: all` and any tensor-parallel-size stay
 exactly as configured either way.

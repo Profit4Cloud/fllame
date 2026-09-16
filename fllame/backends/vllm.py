@@ -12,7 +12,8 @@ from fllame.models.architecture import read_architecture
 from fllame.models.cache import local_estimate_vram_gb
 from fllame.models.sizing import (
     _DEFAULT_SIZING_CONCURRENCY,
-    _MIN_USABLE_MAX_MODEL_LEN,
+    DEFAULT_SIZING_CONFIG,
+    SizingConfig,
     max_context_length_for_budget,
     memory_budget_gb,
 )
@@ -78,7 +79,9 @@ def _effective_gpu_memory_utilization(recipe: Recipe, hardware: HardwareProfile)
     return float(explicit) if explicit is not None else default_gpu_memory_utilization(hardware)
 
 
-def _resolve_max_model_len(recipe: Recipe, hardware: HardwareProfile) -> _MaxModelLenResolution:
+def _resolve_max_model_len(
+    recipe: Recipe, hardware: HardwareProfile, sizing_config: SizingConfig
+) -> _MaxModelLenResolution:
     if has_flag(recipe.serve_args, _MAX_MODEL_LEN_FLAG):
         return _MaxModelLenResolution(value=None, shortfall=None)
 
@@ -98,14 +101,15 @@ def _resolve_max_model_len(recipe: Recipe, hardware: HardwareProfile) -> _MaxMod
         weights_gb=weights_gb,
         total_budget_gb=total_budget_gb,
         concurrency=_DEFAULT_SIZING_CONCURRENCY,
+        activation_overhead_gb=sizing_config.activation_overhead_gb,
     )
 
-    if context_length < _MIN_USABLE_MAX_MODEL_LEN:
+    if context_length < sizing_config.min_usable_max_model_len:
         shortfall = (
             f"'{recipe.repo_id}' doesn't fit a usable context window on this hardware even "
-            f"at fllame's minimum ({_MIN_USABLE_MAX_MODEL_LEN} tokens) - weights alone need "
-            f"{weights_gb:.1f} GB, leaving too little of the {total_budget_gb:.1f} GB budget "
-            f"(at --gpu-memory-utilization {utilization:.2f}) for KV cache at "
+            f"at fllame's minimum ({sizing_config.min_usable_max_model_len} tokens) - weights "
+            f"alone need {weights_gb:.1f} GB, leaving too little of the {total_budget_gb:.1f} GB "
+            f"budget (at --gpu-memory-utilization {utilization:.2f}) for KV cache at "
             f"{_DEFAULT_SIZING_CONCURRENCY}-way concurrency."
         )
         return _MaxModelLenResolution(value=None, shortfall=shortfall)
@@ -113,11 +117,13 @@ def _resolve_max_model_len(recipe: Recipe, hardware: HardwareProfile) -> _MaxMod
     return _MaxModelLenResolution(value=context_length, shortfall=None)
 
 
-def max_model_len_shortfall(recipe: Recipe, hardware: HardwareProfile) -> str | None:
+def max_model_len_shortfall(
+    recipe: Recipe, hardware: HardwareProfile, sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG
+) -> str | None:
     """What `recipe build` hard-fails on - the same shortfall detection
     `build_service`'s own injection already skips silently, exposed
     separately so both paths share one source of truth."""
-    return _resolve_max_model_len(recipe, hardware).shortfall
+    return _resolve_max_model_len(recipe, hardware, sizing_config).shortfall
 
 
 def tensor_parallel_size_mismatch_warning(recipe: Recipe, hardware: HardwareProfile) -> str | None:
@@ -174,7 +180,12 @@ class VllmServingBackend:
     name = "vllm"
 
     def build_service(
-        self, recipe: Recipe, *, hf_cache_dir: Path, hardware: HardwareProfile
+        self,
+        recipe: Recipe,
+        *,
+        hf_cache_dir: Path,
+        hardware: HardwareProfile,
+        sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG,
     ) -> dict:
         # HF_HUB_CACHE set explicitly: huggingface_hub otherwise derives
         # it as HF_HOME/hub, one level below where the volume actually
@@ -191,7 +202,7 @@ class VllmServingBackend:
                 _GPU_MEMORY_UTILIZATION_FLAG,
                 f"{default_gpu_memory_utilization(hardware):.2f}",
             ]
-        max_model_len = _resolve_max_model_len(recipe, hardware).value
+        max_model_len = _resolve_max_model_len(recipe, hardware, sizing_config).value
         if max_model_len is not None:
             serve_args += [_MAX_MODEL_LEN_FLAG, str(max_model_len)]
         service: dict = {

@@ -35,7 +35,7 @@ from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import is_model_cached, list_cached_models, local_estimate_vram_gb
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
-from fllame.models.sizing import memory_budget_gb, usable_memory_gb
+from fllame.models.sizing import SizingConfig, memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
 from fllame.recipes import build_state
 from fllame.recipes.naming import derive_handle
@@ -71,6 +71,20 @@ def _resolve_image(recipe: Recipe) -> Recipe:
     return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
 
 
+def _resolve_sizing_config() -> SizingConfig:
+    """`SizingConfig`'s own field defaults are what a fresh install
+    without `fllame config` settings gets - only override the fields
+    that are actually persisted."""
+    overrides = {}
+    min_len = config_file.get_min_usable_max_model_len()
+    if min_len is not None:
+        overrides["min_usable_max_model_len"] = min_len
+    overhead_gb = config_file.get_activation_overhead_gb()
+    if overhead_gb is not None:
+        overrides["activation_overhead_gb"] = overhead_gb
+    return SizingConfig(**overrides)
+
+
 def _load_or_exit(handle: str) -> Recipe:
     try:
         return _recipe_store().load(handle)
@@ -79,7 +93,9 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(recipe: Recipe, *, hardware: HardwareProfile) -> str | None:
+def _write_recipe_compose(
+    recipe: Recipe, *, hardware: HardwareProfile, sizing_config: SizingConfig
+) -> str | None:
     """Writes `compose.yaml` and, for a recipe with `preinstall`, the
     `Dockerfile` it builds from - `compose.yaml`'s `image:` then points
     at the local tag `recipe build` is about to build, not the base
@@ -94,7 +110,11 @@ def _write_recipe_compose(recipe: Recipe, *, hardware: HardwareProfile) -> str |
 
     dockerfile_content = generate_dockerfile(resolved)
     compose = generate_compose(
-        resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir(), hardware=hardware
+        resolved,
+        backend=BACKEND,
+        hf_cache_dir=config.hf_cache_dir(),
+        hardware=hardware,
+        sizing_config=sizing_config,
     )
     service = compose["services"][resolved.handle]
     # A stable, predictable name (matching the compose project name)
@@ -165,11 +185,16 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     # would be a strange thing to chase, and scanning is cheap either
     # way (see `HardwareProfile`'s own docstring).
     hardware = scan_hardware()
-    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes, hardware=hardware)
+    sizing_config = _resolve_sizing_config()
+    _warn_if_cache_location_changed(
+        recipe, assume_yes=assume_yes, hardware=hardware, sizing_config=sizing_config
+    )
     tp_warning = tensor_parallel_size_mismatch_warning(recipe, hardware)
     if tp_warning is not None:
         typer.echo(tp_warning, err=True)
-    dockerfile_content = _write_recipe_compose(recipe, hardware=hardware)
+    dockerfile_content = _write_recipe_compose(
+        recipe, hardware=hardware, sizing_config=sizing_config
+    )
     directory = config.recipe_dir(recipe.handle)
     compose_path = directory / "compose.yaml"
 
@@ -177,7 +202,7 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     # shortfall detection already left it without --max-model-len in
     # this case) and before the expensive Docker step below - fail fast
     # on the cheap check first.
-    shortfall = max_model_len_shortfall(recipe, hardware)
+    shortfall = max_model_len_shortfall(recipe, hardware, sizing_config)
     if shortfall is not None:
         typer.echo(
             f"{shortfall} This is advanced territory - hand-edit {compose_path}'s command "
@@ -625,6 +650,23 @@ def config_show() -> None:
     else:
         typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
 
+    defaults = SizingConfig()
+    min_len = config_file.get_min_usable_max_model_len()
+    if min_len is not None:
+        typer.echo(f"min_usable_max_model_len: {min_len}")
+    else:
+        typer.echo(
+            f"min_usable_max_model_len: (unset - falls back to {defaults.min_usable_max_model_len})"
+        )
+
+    overhead_gb = config_file.get_activation_overhead_gb()
+    if overhead_gb is not None:
+        typer.echo(f"activation_overhead_gb: {overhead_gb}")
+    else:
+        typer.echo(
+            f"activation_overhead_gb: (unset - falls back to {defaults.activation_overhead_gb})"
+        )
+
 
 def _compose_files_using_image(image: str) -> list[Path]:
     """Recipes whose `compose.yaml` service `image` is an exact match -
@@ -720,6 +762,38 @@ def config_set_default_image(image: str) -> None:
             "that this image hasn't been re-validated until it does.",
             err=True,
         )
+
+
+@config_app.command("set-min-context-length")
+def config_set_min_context_length(tokens: int) -> None:
+    """Set the minimum usable `--max-model-len`, in tokens.
+
+    `recipe build` computes a default `--max-model-len` (see `fllame
+    recipe build -h`) sized to fit this hardware; below this many
+    tokens, it's judged not worth serving, and `recipe build` fails
+    instead of injecting a too-short value. Only affects future `recipe
+    build` runs, not compose.yaml files already written.
+    """
+    if tokens <= 0:
+        typer.echo("minimum usable context length must be a positive number of tokens", err=True)
+        raise typer.Exit(code=1)
+    config_file.set_min_usable_max_model_len(tokens)
+    typer.echo(f"minimum usable context length set to {tokens} tokens")
+
+
+@config_app.command("set-activation-overhead")
+def config_set_activation_overhead(gb: float) -> None:
+    """Set the fixed GB reserved for activation memory/other overhead
+    beyond weights and KV cache, when `recipe build` computes a default
+    `--max-model-len`. A coarse allowance, not modeled per-architecture
+    - raise it if models are still running out of memory at their
+    computed default, lower it to allow a longer default context.
+    """
+    if gb < 0:
+        typer.echo("activation overhead must not be negative", err=True)
+        raise typer.Exit(code=1)
+    config_file.set_activation_overhead_gb(gb)
+    typer.echo(f"activation/overhead allowance set to {gb} GB")
 
 
 @hardware_app.command("scan")
@@ -1029,7 +1103,7 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
 
 
 def _warn_if_cache_location_changed(
-    recipe: Recipe, *, assume_yes: bool, hardware: HardwareProfile
+    recipe: Recipe, *, assume_yes: bool, hardware: HardwareProfile, sizing_config: SizingConfig
 ) -> None:
     """Overwriting silently would point the container at a cache that
     may not have this model in it. Skipped on a recipe's first build,
@@ -1044,7 +1118,11 @@ def _warn_if_cache_location_changed(
         return
 
     new_service = generate_compose(
-        recipe, backend=BACKEND, hf_cache_dir=config.hf_cache_dir(), hardware=hardware
+        recipe,
+        backend=BACKEND,
+        hf_cache_dir=config.hf_cache_dir(),
+        hardware=hardware,
+        sizing_config=sizing_config,
     )
     new_host = cache_volume_host_path(new_service["services"][recipe.handle])
     if old_host is None or old_host == new_host:

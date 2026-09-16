@@ -665,6 +665,94 @@ def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
     assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
 
 
+def test_config_show_sizing_defaults_unset(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert "min_usable_max_model_len: (unset - falls back to 4096)" in result.stdout
+    assert "activation_overhead_gb: (unset - falls back to 2.0)" in result.stdout
+
+
+def test_config_set_min_context_length(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-min-context-length", "8192"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert show_result.exit_code == 0
+    assert "min_usable_max_model_len: 8192" in show_result.stdout
+
+
+def test_config_set_min_context_length_rejects_non_positive(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-min-context-length", "0"])
+
+    assert result.exit_code == 1
+
+
+def test_config_set_activation_overhead(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-activation-overhead", "4"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert show_result.exit_code == 0
+    assert "activation_overhead_gb: 4.0" in show_result.stdout
+
+
+def test_config_set_activation_overhead_rejects_negative(tmp_path: Path, monkeypatch):
+    """A leading `-` reads as an option to Click, not a negative number,
+    so this is rejected at parse time - well before the command's own
+    `gb < 0` guard would run - rather than with fllame's own message."""
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-activation-overhead", "--", "-1"])
+
+    assert result.exit_code == 1
+    assert "must not be negative" in result.output
+
+
+def test_recipe_build_respects_configured_min_context_length(tmp_path: Path, monkeypatch):
+    """A recipe whose computed context length would clear the module
+    default floor, but not a higher one configured via `fllame config`,
+    hard-fails - the configured value, not the built-in constant, is
+    what `recipe build` actually checks against."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 1.0)
+    monkeypatch.setattr(
+        vllm_backend,
+        "read_architecture",
+        lambda repo_id: ModelArchitecture(
+            num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=1_000_000
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+    runner.invoke(app, ["config", "set-min-context-length", "1000000"])
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "doesn't fit a usable context window" in result.output
+    assert "1000000 tokens" in result.output
+
+
 def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
