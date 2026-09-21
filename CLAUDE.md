@@ -40,6 +40,7 @@ examples/recipes/   # Sample recipe files, for reference - not loaded at runtime
 - Comments and docstrings should only be written when the code is not self-explanatory.
   Never use them to describe what the code does. Reserve them for the why — a design tradeoff, 
   external gotcha, or convention — that reading the code alone wouldn't reveal.
+- Do NOT add comments or docstrings when the code is self-explanatory.
 
 ## Core principles
 

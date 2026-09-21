@@ -15,43 +15,27 @@ _TENSOR_PARALLEL_SIZE_FLAG = "--tensor-parallel-size"
 
 
 def validate_gpu_memory_utilization(service: dict) -> str | None:
-    """None when `service`'s own `command` already carries a present,
-    parseable, in-range --gpu-memory-utilization - checked directly
-    against compose.yaml as it stands on disk at `serve` time,
-    independent of whether `recipe build` last wrote it correctly,
-    since compose.yaml is explicitly meant to be hand-editable and this
-    one value is safety-critical enough (an unset value can let vLLM
-    claim a unified-memory machine's *entire* memory pool) to never
-    simply trust because it was there before.
-
-    Only rejects what's *obviously* wrong (missing, unparseable, <= 0,
-    or > 1 - utilization can't exceed 100%, a mathematical fact, not a
-    policy opinion) - an explicit, in-range recipe value is otherwise
-    trusted outright, whatever it is.
-    """
     command = [str(token) for token in (service.get("command") or [])]
     value = extract_flag_value(command, _GPU_MEMORY_UTILIZATION_FLAG)
 
     if value is None:
         return (
-            "refusing to serve: compose.yaml has no --gpu-memory-utilization set - an unset "
-            "value can let vLLM claim this machine's entire GPU/unified memory pool. Run "
-            "`fllame recipe build` to regenerate compose.yaml, or set one by hand."
+            "compose.yaml has no --gpu-memory-utilization set, which will cause vLLM to use all VRAM, possibly causing a crash. "
+            "Run `fllame recipe build` to regenerate compose.yaml, or set it by hand."
         )
 
     try:
         parsed = float(value)
     except ValueError:
         return (
-            f"refusing to serve: compose.yaml's --gpu-memory-utilization ('{value}') isn't a "
-            "number. Fix it by hand, or run `fllame recipe build` to regenerate compose.yaml."
+            f"compose.yaml's --gpu-memory-utilization ('{value}') isn't a number. " 
+            "Run `fllame recipe build` to regenerate compose.yaml, or set it by hand."
         )
 
     if parsed <= 0 or parsed > 1.0:
         return (
-            f"refusing to serve: compose.yaml's --gpu-memory-utilization ({parsed}) is an "
-            "obviously invalid value - it must be greater than 0 and no more than 1. Fix it by "
-            "hand, or run `fllame recipe build` to regenerate compose.yaml."
+            f"compose.yaml's --gpu-memory-utilization ({parsed}) is invalid. "
+            "Run `fllame recipe build` to regenerate compose.yaml, or set it by hand."
         )
 
     return None
@@ -151,8 +135,7 @@ def generate_dockerfile(recipe: Recipe) -> str | None:
     """`FROM <image>` plus one `RUN <preinstall line>` per entry, in
     order - never joined with `&&` into a single `RUN`, so an unchanged
     earlier step stays cache-hit on a later rebuild even if a later one
-    changes. `None` when there's nothing to install: a no-op Dockerfile
-    would only obscure that this recipe runs the base image verbatim.
+    changes. `None` when there are no preinstall lines, and no Dockerfile is needed.
     """
     if not recipe.preinstall:
         return None

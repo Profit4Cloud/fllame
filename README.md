@@ -44,23 +44,7 @@ Every command also takes `-h`/`--help`.
 
 ## Storage location
 
-Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override
-with `FLLAME_RECIPES_DIR`). That same folder gets that handle's
-`compose.yaml` too (and a `Dockerfile`, for a recipe with `preinstall`),
-written only by `recipe build`/`recipe add --build`. `serve`/`status`/
-`stop` never touch either, so a hand edit to one is safe to keep
-indefinitely - `serve` will warn if it no longer matches what was last
-built, rather than silently ignoring the edit or overwriting it.
-
-`recipe build` also drops a small `.fllame-build.yaml` in the same
-folder, recording what it last built - purely local-machine bookkeeping
-for that warning, not meant to be portable or backed up.
-
-fllame's scope ends once Docker and vLLM are running correctly on this
-one machine: it's single-machine, single-user by design. Backing up or
-versioning the recipes directory - `.fllame-build.yaml` included - is
-entirely your own responsibility; fllame doesn't manage or assume any
-of that itself.
+Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Also, `.fllame-build.yaml` is added to recongize hand-edits of these files.
 
 ## Recipe format
 
@@ -73,45 +57,11 @@ of that itself.
 
 ## Advanced
 
-Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, and
-`ipc: host` unconditionally - hard defaults, not recipe fields. To
-override one (network access for a linked repo, pinning specific GPU
-device IDs, an explicit `shm_size:`), edit the generated `compose.yaml`
-directly - fllame never verifies that edit, so keeping it correct is on
-you (`serve` will flag that it no longer matches the last build, but
-that's a heads-up, not a check that the edit itself is sound). The same
-goes for a `Dockerfile`, for a recipe with `preinstall` - hand-edit it
-and re-run `recipe build` to pick the change up.
+Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, and `ipc: host` unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame never respects your edits, but doesn't verify them, so you must know what you are doing. The same
+goes for a `Dockerfile`, which is generated for recipes with `preinstall`.
 
-Every generated `compose.yaml` always has `--gpu-memory-utilization`
-set - there is no path that leaves it unset. `recipe build` adds it to
-the `vllm serve` command whenever the recipe's own `command` doesn't
-already set one - left unset, vLLM happily reserves the whole GPU for
-itself, which on a unified-memory machine means starving the OS, not
-just other processes on the GPU. The injected value is a flat,
-configurable default (`0.92` out of the box, matching vLLM's own
-out-of-the-box default - `fllame config
-set-default-gpu-memory-utilization` to change it). An explicit value in
-the recipe's own `command` (`--gpu-memory-utilization 0.8`) always wins
-outright - fllame never second-guesses it.
-
-Because `compose.yaml` is meant to be hand-editable, `serve`
-independently checks the file on disk every time it runs - not just
-whatever `recipe build` last wrote - and refuses outright (no `-y`
-override) if `--gpu-memory-utilization` is missing or an obviously
-invalid value (<= 0 or > 1 - utilization can't exceed 100%), regardless
-of how it got that way. Any other explicit value, whatever it is, is
-trusted.
-
-`recipe build` also warns (without blocking) when a recipe's
-`--tensor-parallel-size` doesn't match the number of GPUs actually
-detected, since `gpus: all` and any tensor-parallel-size stay exactly
-as configured either way.
-
-fllame does not compute or inject `--max-model-len` - left unset, vLLM
-uses the model's own full trained context length, and refuses to start
-if that doesn't fit the memory `--gpu-memory-utilization` allows. Set
-it by hand in the recipe's `command` if you need something smaller.
+Every generated `compose.yaml` always has `--gpu-memory-utilization` set to aconfigurable default. It is `0.92` by default, but this can be changed using `fllame config set-default-gpu-memory-utilization <value>`. This default is only used when there is no explicit value in
+the recipe.
 
 ## Development
 

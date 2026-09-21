@@ -58,12 +58,8 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 BACKEND = VllmServingBackend()
 
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
-# vLLM given the whole budget leaves no room for driver/CUDA context
-# overhead - matches vLLM's own out-of-the-box default. Deliberately
-# just a flat fallback now, not a computed value: an explicit recipe
-# --gpu-memory-utilization is trusted outright (see
-# `backends/vllm.py`'s `validate_gpu_memory_utilization` for the only
-# check that still applies, against obviously-broken values).
+# If --gpu-memory-utilization is not set, the vLLM will use all available GPU memory, possibly crashing unified systems.
+# Therefore, it is always injected to compose.yaml, either explicitly from the recipe, or the default below.
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
 
@@ -91,13 +87,10 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe, *, default_gpu_memory_utilization: float) -> str | None:
-    """Writes `compose.yaml` and, for a recipe with `preinstall`, the
-    `Dockerfile` it builds from - `compose.yaml`'s `image:` then points
-    at the local tag `recipe build` is about to build, not the base
-    image. Returns the Dockerfile content written, or `None` when this
-    recipe has no `preinstall` (nothing to build - `Dockerfile` is left
-    untouched either way, since it's a real, hand-editable artifact now,
-    not cleanup-on-sight cruft from an older fllame version).
+    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines, 
+    also a `Dockerfile` is generated, which is used by `compose.yaml`.
+    Returns the Dockerfile content written, or `None` when this
+    recipe has no `preinstall`.
     """
     resolved = _resolve_image(recipe)
     directory = config.recipe_dir(resolved.handle)
@@ -164,21 +157,12 @@ def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
 
 
 def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
-    """Shared by `recipe build` and `recipe add --build` - the only two
-    commands that ever write `compose.yaml`/`Dockerfile`.
-
-    Always validates the result with a real `docker build` (a recipe
-    with `preinstall`) or `docker compose pull` (one without) - setup
-    phase, so the network access and repeat-run cost are both fine
-    (Docker's layer cache makes an unchanged rebuild cheap), and this is
-    the only way to catch a broken preinstall command or an unresolvable
-    image before `serve` ever tries to use it.
+    """Builds the recipe by creating a `compose.yaml` (and possibly a `Dockerfile`) in its folder.
+    Validates the result with `docker build` (a recipe with `preinstall`) or `docker compose pull` (one without).
+    This ensures that network access is needed during build time only, and not during serve time.
     """
     _require_model_cached(recipe)
-    # Scanned once and reused below, only for the tensor-parallel-size
-    # check now - hardware change mid-command would be a strange thing
-    # to chase, and scanning is cheap either way (see `HardwareProfile`'s
-    # own docstring).
+    # Hardware scanned for validing the tensor-parallel-size later.
     hardware = scan_hardware()
     default_gpu_memory_utilization = _resolve_default_gpu_memory_utilization()
     _warn_if_cache_location_changed(
@@ -506,29 +490,10 @@ def recipe_build(
         "warning (if any) is still printed.",
     ),
 ) -> None:
-    """Write (or overwrite) HANDLE's `compose.yaml` - the only command,
-    besides `recipe add --build`, that ever does.
-
-    Fails with a clear error if the model isn't fully downloaded yet -
-    run `fllame model pull <repo_id>` (or `recipe add --pull`/`--build`)
-    first. `serve`/`status`/`stop` never write or regenerate
-    `compose.yaml` themselves - it's meant to be hand-edited, and only
-    ever touched again by explicitly re-running this command.
-
-    Also validates the result with real Docker: a recipe with
-    `preinstall` gets a `Dockerfile` (same hand-edit contract as
-    `compose.yaml`) built into a local image `compose.yaml` then points
-    at; one without gets its configured image checked with `docker
-    compose pull`. Both catch a broken preinstall command or an
-    unresolvable image now, in this setup-phase command, rather than
-    later at `serve` time.
-
-    Also adds `--gpu-memory-utilization` to the `vllm serve` command
-    whenever the recipe's own command doesn't already set one (see
-    `fllame config set-default-gpu-memory-utilization`) - an explicit
-    recipe value always wins outright. Also warns (never blocks) when
-    the recipe's `--tensor-parallel-size` doesn't match the number of
-    GPUs detected.
+    """Builds the recipe by creating a compose.yaml (and possibly a Dockerfile) in its folder.
+    Fails with a clear error if the model isn't fully downloaded yet..
+    Validates the result with docker build (a recipe with preinstall) or docker compose pull (one without). 
+    This ensures that network access is needed during build time only, and not during serve time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
@@ -1101,13 +1066,6 @@ def _warn_if_cache_location_changed(
 
 
 def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
-    """A hard block, never skippable with `-y`: reads compose.yaml's
-    `command` directly off disk and refuses to serve at all if it has
-    no --gpu-memory-utilization, or an unsafe one - regardless of how
-    it got that way (an old compose.yaml from before this existed, an
-    interrupted build, or a hand edit). `recipe build` getting this
-    right doesn't help if the file `serve` actually runs doesn't have
-    it, so this is checked independently every time, not just once."""
     compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
     try:
         compose = yaml.safe_load(compose_path.read_text())
@@ -1125,10 +1083,6 @@ def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
 
 
 def _warn_if_compose_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
-    """Case (a): `compose.yaml` no longer matches what the last
-    successful `recipe build` wrote - skipped when there's no recorded
-    hash to compare against at all (an old build-state-less compose.yaml,
-    or a compose.yaml written some other way)."""
     directory = config.recipe_dir(recipe.handle)
     state = build_state.load(directory)
     if state.compose_hash is None:
@@ -1149,10 +1103,6 @@ def _warn_if_compose_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
 
 
 def _warn_if_dockerfile_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
-    """Case (b): same idea as above for `Dockerfile`, when this recipe
-    has one - the message names the exact command to run, since a stale
-    image is otherwise invisible (the container keeps running whatever
-    was last actually built)."""
     directory = config.recipe_dir(recipe.handle)
     dockerfile_path = directory / "Dockerfile"
     if not dockerfile_path.is_file():
@@ -1177,13 +1127,7 @@ def _warn_if_dockerfile_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None
 
 
 def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
-    """Case (c): `config set-default-image` already edited this
-    recipe's compose.yaml itself, so it's not a hand-edit and doesn't go
-    through the two checks above at all - it's flagged separately (see
-    `image_synced_via_config`) and only ever informational, never a
-    confirmation prompt, since it was already validated once via a
-    `docker pull` at the time (or the warning from that failed pull
-    already told the operator about it)."""
+    """Gives a warning when `config set-default-image` changed `compose.yaml` or `Dockerfile` by replacing the image. """
     directory = config.recipe_dir(recipe.handle)
     if not build_state.load(directory).image_synced_via_config:
         return
@@ -1209,59 +1153,6 @@ def serve(
         "hand-edit and VRAM sanity checks) - any warning is still printed.",
     ),
 ) -> None:
-    """Launch the recipe for HANDLE as a Docker container via `docker
-    compose up -d`, from HANDLE's own self-contained compose folder
-    (`fllame config` aside, entirely independent of every other
-    recipe's). Always detached - there's no foreground mode - since
-    that's what gives this command a single, immediate "did it start OK"
-    signal to act on below.
-
-    Never touches the network, full stop: the model must already be
-    fully present in the HF cache - `fllame model pull <repo_id>`, or
-    `recipe add HANDLE --pull` when the recipe was created, does that
-    separately - and this only ever verifies that via a filesystem
-    check, failing with a clear error if it isn't there rather than
-    falling back to a download of its own. vLLM's own auto-download
-    inside the container is never relied on either.
-
-    Never writes or regenerates `compose.yaml` either - that's `recipe
-    build`'s job alone, so a hand edit to it survives every `serve`.
-    Fails with a clear error pointing at `fllame recipe build HANDLE`
-    if it doesn't exist yet.
-
-    Always refuses outright (no `-y` override) if compose.yaml's own
-    `command` has no `--gpu-memory-utilization`, or an obviously invalid
-    one (<= 0 or > 1) - checked fresh against the file on disk every
-    time, since an unset value can let vLLM claim this machine's entire
-    GPU/unified memory pool, and compose.yaml is explicitly meant to be
-    hand-editable enough that `recipe build` having gotten it right
-    once isn't something `serve` can just assume still holds. Any other
-    explicit value, whatever it is, is trusted outright.
-
-    Once the model is confirmed cached, compares a coarse, weights-only
-    VRAM estimate (from the cached files themselves, no network) against
-    this machine's hardware scan and warns (asking to confirm, unless
-    `-y`) if it looks like it won't fit. Not a benchmarked guarantee
-    either way, and silently skipped whenever a confident comparison
-    isn't possible - see `fllame hardware scan`/`fllame model scan` for
-    the same underlying estimate.
-
-    Also compares `compose.yaml`/`Dockerfile` against the hashes
-    recorded by the last successful `recipe build`: a hand-edit to
-    either warns and asks to confirm (unless `-y`); an image changed
-    only by `fllame config set-default-image` since then is just noted,
-    never blocked on, since that edit was already validated with its own
-    `docker pull` at the time.
-
-    A successful start (`docker compose up -d` itself exits 0 - a
-    compose-level check, not a deeper vLLM health check, which is out of
-    scope) refreshes those recorded hashes and clears the
-    not-yet-re-validated note, so none of the above ever nags about
-    something that's since gone away, and prints the exact `docker logs`
-    command to follow the container's own startup - model loading can
-    take several minutes, so a quiet log right after this returns is
-    expected, not itself a problem.
-    """
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
