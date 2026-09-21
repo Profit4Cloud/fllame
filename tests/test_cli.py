@@ -2093,6 +2093,80 @@ def test_recipe_build_injects_max_model_len_for_known_cached_model(tmp_path: Pat
     assert "--max-model-len" in compose_text
 
 
+def test_recipe_build_notes_when_weights_size_unknown(tmp_path: Path, monkeypatch):
+    """--max-model-len silently going uncomputed used to be
+    indistinguishable from a bug - this must always be visible, even
+    though it never blocks anything."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: None)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "couldn't determine" in result.output
+    assert "weight size" in result.output
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--max-model-len" not in compose_text
+
+
+def test_recipe_build_notes_when_architecture_unrecognized(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
+    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: None)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "config.json" in result.output
+    assert "isn't in a recognized architecture shape" in result.output
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--max-model-len" not in compose_text
+
+
+def test_recipe_build_notes_when_hardware_budget_unknown(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
+    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name=None, gpu_count=0, vram_gb_per_gpu=None, ram_gb=None, chip_family="none"
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "GPU/RAM budget couldn't be determined" in result.output
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--max-model-len" not in compose_text
+
+
+def test_recipe_build_no_note_when_recipe_sets_its_own_max_model_len(tmp_path: Path, monkeypatch):
+    """The one skip case that's the user's own deliberate choice, not
+    something to explain."""
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo --max-model-len 4096\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: None)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "note:" not in result.output
+
+
 def test_recipe_build_shortfall_exits_nonzero_writes_compose_without_flag_skips_docker(
     tmp_path: Path, monkeypatch
 ):

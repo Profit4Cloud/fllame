@@ -21,6 +21,7 @@ from fllame.backends.vllm import (
     cache_volume_host_path,
     generate_dockerfile,
     gpu_memory_utilization_error,
+    max_model_len_note,
     max_model_len_shortfall,
     tensor_parallel_size_mismatch_warning,
     validate_gpu_memory_utilization,
@@ -228,6 +229,16 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
             err=True,
         )
         raise typer.Exit(code=1)
+
+    # Non-blocking: --max-model-len can legitimately go uncomputed
+    # (model not cached with .safetensors, unrecognized architecture,
+    # unknown hardware budget) without that being a shortfall - but
+    # staying silent about it makes a real skip indistinguishable from
+    # a bug, so this is always visible even though it never stops
+    # anything.
+    note = max_model_len_note(recipe, hardware, sizing_config)
+    if note is not None:
+        typer.echo(note, err=True)
 
     if dockerfile_content is not None:
         tag = config.local_image_tag(recipe.handle)

@@ -57,14 +57,20 @@ _TENSOR_PARALLEL_SIZE_FLAG = "--tensor-parallel-size"
 @dataclass(frozen=True)
 class _MaxModelLenResolution:
     # What to inject into serve_args, or None: the recipe set its own,
-    # the architecture is unsupported, or the hardware budget is
-    # unknown - every "don't touch it" case looks the same to the
-    # caller.
+    # the architecture is unsupported, the hardware budget is unknown,
+    # or there's a shortfall - every "don't inject anything" case looks
+    # the same to `build_service`.
     value: int | None
     # A human-readable message only when a supported architecture's
     # minimum usable context genuinely doesn't fit - None in every
     # other case, including "unsupported/unknown".
     shortfall: str | None
+    # Informational only, never blocks anything: set whenever `value`
+    # ends up None for a reason other than the recipe setting its own
+    # --max-model-len (which is an expected, silent, no-note-needed
+    # case) - otherwise "nothing got injected" and "why" are both
+    # invisible, which is exactly what makes this hard to debug.
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -175,13 +181,38 @@ def _resolve_max_model_len(
         return _MaxModelLenResolution(value=None, shortfall=None)
 
     weights_gb = local_estimate_vram_gb(recipe.repo_id)
+    if weights_gb is None:
+        return _MaxModelLenResolution(
+            value=None,
+            shortfall=None,
+            note=(
+                f"note: couldn't determine '{recipe.repo_id}''s cached weight size (not fully "
+                "cached, or no .safetensors files) - --max-model-len left unset, vLLM will use "
+                "its own default."
+            ),
+        )
+
     arch = read_architecture(recipe.repo_id)
-    if weights_gb is None or arch is None:
-        return _MaxModelLenResolution(value=None, shortfall=None)
+    if arch is None:
+        return _MaxModelLenResolution(
+            value=None,
+            shortfall=None,
+            note=(
+                f"note: '{recipe.repo_id}''s config.json isn't in a recognized architecture "
+                "shape - --max-model-len left unset, vLLM will use its own default."
+            ),
+        )
 
     budget_gb = memory_budget_gb(hardware)
     if budget_gb is None:
-        return _MaxModelLenResolution(value=None, shortfall=None)
+        return _MaxModelLenResolution(
+            value=None,
+            shortfall=None,
+            note=(
+                "note: this machine's GPU/RAM budget couldn't be determined - --max-model-len "
+                "left unset, vLLM will use its own default."
+            ),
+        )
 
     utilization = _resolve_gpu_memory_utilization(recipe, hardware, sizing_config).value
     total_budget_gb = utilization * budget_gb
@@ -213,6 +244,16 @@ def max_model_len_shortfall(
     `build_service`'s own injection already skips silently, exposed
     separately so both paths share one source of truth."""
     return _resolve_max_model_len(recipe, hardware, sizing_config).shortfall
+
+
+def max_model_len_note(
+    recipe: Recipe, hardware: HardwareProfile, sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG
+) -> str | None:
+    """What `recipe build` prints (never blocks on) when --max-model-len
+    couldn't be computed for a reason other than the recipe setting its
+    own - without this, "nothing got injected" and "why" are both
+    invisible, which makes a real skip indistinguishable from a bug."""
+    return _resolve_max_model_len(recipe, hardware, sizing_config).note
 
 
 def tensor_parallel_size_mismatch_warning(recipe: Recipe, hardware: HardwareProfile) -> str | None:
