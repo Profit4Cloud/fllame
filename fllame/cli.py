@@ -20,14 +20,10 @@ from fllame.backends.vllm import (
     VllmServingBackend,
     cache_volume_host_path,
     generate_dockerfile,
-    gpu_memory_utilization_error,
-    max_model_len_note,
-    max_model_len_shortfall,
     tensor_parallel_size_mismatch_warning,
     validate_gpu_memory_utilization,
 )
 from fllame.compose.generator import generate_compose, write_compose_file
-from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
     VllmCommandError,
@@ -38,7 +34,7 @@ from fllame.hardware.scanner import scan_hardware
 from fllame.models.cache import is_model_cached, list_cached_models, local_estimate_vram_gb
 from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
-from fllame.models.sizing import SizingConfig, memory_budget_gb, usable_memory_gb
+from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
 from fllame.recipes import build_state
 from fllame.recipes.naming import derive_handle
@@ -62,6 +58,13 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 BACKEND = VllmServingBackend()
 
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
+# vLLM given the whole budget leaves no room for driver/CUDA context
+# overhead - matches vLLM's own out-of-the-box default. Deliberately
+# just a flat fallback now, not a computed value: an explicit recipe
+# --gpu-memory-utilization is trusted outright (see
+# `backends/vllm.py`'s `validate_gpu_memory_utilization` for the only
+# check that still applies, against obviously-broken values).
+_DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
 
 def _recipe_store() -> RecipeStore:
@@ -74,21 +77,9 @@ def _resolve_image(recipe: Recipe) -> Recipe:
     return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
 
 
-def _resolve_sizing_config() -> SizingConfig:
-    """`SizingConfig`'s own field defaults are what a fresh install
-    without `fllame config` settings gets - only override the fields
-    that are actually persisted."""
-    overrides = {}
-    min_len = config_file.get_min_usable_max_model_len()
-    if min_len is not None:
-        overrides["min_usable_max_model_len"] = min_len
-    overhead_gb = config_file.get_activation_overhead_gb()
-    if overhead_gb is not None:
-        overrides["activation_overhead_gb"] = overhead_gb
-    max_utilization = config_file.get_max_gpu_memory_utilization()
-    if max_utilization is not None:
-        overrides["max_gpu_memory_utilization"] = max_utilization
-    return SizingConfig(**overrides)
+def _resolve_default_gpu_memory_utilization() -> float:
+    value = config_file.get_default_gpu_memory_utilization()
+    return value if value is not None else _DEFAULT_GPU_MEMORY_UTILIZATION
 
 
 def _load_or_exit(handle: str) -> Recipe:
@@ -99,9 +90,7 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(
-    recipe: Recipe, *, hardware: HardwareProfile, sizing_config: SizingConfig
-) -> str | None:
+def _write_recipe_compose(recipe: Recipe, *, default_gpu_memory_utilization: float) -> str | None:
     """Writes `compose.yaml` and, for a recipe with `preinstall`, the
     `Dockerfile` it builds from - `compose.yaml`'s `image:` then points
     at the local tag `recipe build` is about to build, not the base
@@ -119,8 +108,7 @@ def _write_recipe_compose(
         resolved,
         backend=BACKEND,
         hf_cache_dir=config.hf_cache_dir(),
-        hardware=hardware,
-        sizing_config=sizing_config,
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
     )
     service = compose["services"][resolved.handle]
     # A stable, predictable name (matching the compose project name)
@@ -187,58 +175,23 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     image before `serve` ever tries to use it.
     """
     _require_model_cached(recipe)
-    # Scanned once and reused below - a hardware change mid-command
-    # would be a strange thing to chase, and scanning is cheap either
-    # way (see `HardwareProfile`'s own docstring).
+    # Scanned once and reused below, only for the tensor-parallel-size
+    # check now - hardware change mid-command would be a strange thing
+    # to chase, and scanning is cheap either way (see `HardwareProfile`'s
+    # own docstring).
     hardware = scan_hardware()
-    sizing_config = _resolve_sizing_config()
+    default_gpu_memory_utilization = _resolve_default_gpu_memory_utilization()
     _warn_if_cache_location_changed(
-        recipe, assume_yes=assume_yes, hardware=hardware, sizing_config=sizing_config
+        recipe, assume_yes=assume_yes, default_gpu_memory_utilization=default_gpu_memory_utilization
     )
     tp_warning = tensor_parallel_size_mismatch_warning(recipe, hardware)
     if tp_warning is not None:
         typer.echo(tp_warning, err=True)
     dockerfile_content = _write_recipe_compose(
-        recipe, hardware=hardware, sizing_config=sizing_config
+        recipe, default_gpu_memory_utilization=default_gpu_memory_utilization
     )
     directory = config.recipe_dir(recipe.handle)
     compose_path = directory / "compose.yaml"
-
-    # Checked first, and before the expensive Docker step below: an
-    # explicit --gpu-memory-utilization outside the safe range makes
-    # everything computed from it (including the --max-model-len check
-    # right after) meaningless. compose.yaml already carries whatever
-    # the recipe's own command says verbatim either way - build_service
-    # never silently overrides an explicit value.
-    util_error = gpu_memory_utilization_error(recipe, hardware, sizing_config)
-    if util_error is not None:
-        typer.echo(util_error, err=True)
-        raise typer.Exit(code=1)
-
-    # Checked after compose.yaml is written (build_service's own
-    # shortfall detection already left it without --max-model-len in
-    # this case) and before the expensive Docker step below - fail fast
-    # on the cheap check first.
-    shortfall = max_model_len_shortfall(recipe, hardware, sizing_config)
-    if shortfall is not None:
-        typer.echo(
-            f"{shortfall} This is advanced territory - hand-edit {compose_path}'s command "
-            "directly (a smaller --max-model-len, or your own --gpu-memory-utilization) at "
-            "your own risk; `serve` will flag that edit the same way it flags any other "
-            "hand edit.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Non-blocking: --max-model-len can legitimately go uncomputed
-    # (model not cached with .safetensors, unrecognized architecture,
-    # unknown hardware budget) without that being a shortfall - but
-    # staying silent about it makes a real skip indistinguishable from
-    # a bug, so this is always visible even though it never stops
-    # anything.
-    note = max_model_len_note(recipe, hardware, sizing_config)
-    if note is not None:
-        typer.echo(note, err=True)
 
     if dockerfile_content is not None:
         tag = config.local_image_tag(recipe.handle)
@@ -570,13 +523,12 @@ def recipe_build(
     unresolvable image now, in this setup-phase command, rather than
     later at `serve` time.
 
-    Computes `--max-model-len` the same way, unless the recipe sets its
-    own: if even fllame's minimum usable context doesn't fit this
-    model's cached weights and this hardware's memory budget, this
-    command hard-fails before the Docker step, since serving an
-    unusably short context by default would be worse than an explicit
-    error. Also warns (never blocks) when the recipe's
-    `--tensor-parallel-size` doesn't match the number of GPUs detected.
+    Also adds `--gpu-memory-utilization` to the `vllm serve` command
+    whenever the recipe's own command doesn't already set one (see
+    `fllame config set-default-gpu-memory-utilization`) - an explicit
+    recipe value always wins outright. Also warns (never blocks) when
+    the recipe's `--tensor-parallel-size` doesn't match the number of
+    GPUs detected.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
@@ -677,30 +629,13 @@ def config_show() -> None:
     else:
         typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
 
-    defaults = SizingConfig()
-    min_len = config_file.get_min_usable_max_model_len()
-    if min_len is not None:
-        typer.echo(f"min_usable_max_model_len: {min_len}")
+    default_utilization = config_file.get_default_gpu_memory_utilization()
+    if default_utilization is not None:
+        typer.echo(f"default_gpu_memory_utilization: {default_utilization}")
     else:
         typer.echo(
-            f"min_usable_max_model_len: (unset - falls back to {defaults.min_usable_max_model_len})"
-        )
-
-    overhead_gb = config_file.get_activation_overhead_gb()
-    if overhead_gb is not None:
-        typer.echo(f"activation_overhead_gb: {overhead_gb}")
-    else:
-        typer.echo(
-            f"activation_overhead_gb: (unset - falls back to {defaults.activation_overhead_gb})"
-        )
-
-    max_utilization = config_file.get_max_gpu_memory_utilization()
-    if max_utilization is not None:
-        typer.echo(f"max_gpu_memory_utilization: {max_utilization}")
-    else:
-        typer.echo(
-            "max_gpu_memory_utilization: (unset - falls back to "
-            f"{defaults.max_gpu_memory_utilization})"
+            "default_gpu_memory_utilization: (unset - falls back to "
+            f"{_DEFAULT_GPU_MEMORY_UTILIZATION})"
         )
 
 
@@ -800,55 +735,25 @@ def config_set_default_image(image: str) -> None:
         )
 
 
-@config_app.command("set-min-context-length")
-def config_set_min_context_length(tokens: int) -> None:
-    """Set the minimum usable `--max-model-len`, in tokens.
+@config_app.command("set-default-gpu-memory-utilization")
+def config_set_default_gpu_memory_utilization(value: float) -> None:
+    """Set the `--gpu-memory-utilization` value `recipe build` injects
+    when a recipe's own command doesn't already set one.
 
-    `recipe build` computes a default `--max-model-len` (see `fllame
-    recipe build -h`) sized to fit this hardware; below this many
-    tokens, it's judged not worth serving, and `recipe build` fails
-    instead of injecting a too-short value. Only affects future `recipe
-    build` runs, not compose.yaml files already written.
+    An explicit `--gpu-memory-utilization` in a recipe's own command
+    always wins over this default - fllame never overrides it. `serve`
+    separately refuses to run any compose.yaml (regardless of where its
+    value came from) whose --gpu-memory-utilization is missing or
+    obviously invalid (<= 0 or > 1), since leaving vLLM unbounded can
+    let it claim a unified-memory machine's entire memory pool.
     """
-    if tokens <= 0:
-        typer.echo("minimum usable context length must be a positive number of tokens", err=True)
+    if value <= 0 or value > 1.0:
+        typer.echo(
+            "default GPU memory utilization must be greater than 0 and no more than 1", err=True
+        )
         raise typer.Exit(code=1)
-    config_file.set_min_usable_max_model_len(tokens)
-    typer.echo(f"minimum usable context length set to {tokens} tokens")
-
-
-@config_app.command("set-activation-overhead")
-def config_set_activation_overhead(gb: float) -> None:
-    """Set the fixed GB reserved for activation memory/other overhead
-    beyond weights and KV cache, when `recipe build` computes a default
-    `--max-model-len`. A coarse allowance, not modeled per-architecture
-    - raise it if models are still running out of memory at their
-    computed default, lower it to allow a longer default context.
-    """
-    if gb < 0:
-        typer.echo("activation overhead must not be negative", err=True)
-        raise typer.Exit(code=1)
-    config_file.set_activation_overhead_gb(gb)
-    typer.echo(f"activation/overhead allowance set to {gb} GB")
-
-
-@config_app.command("set-max-gpu-memory-utilization")
-def config_set_max_gpu_memory_utilization(value: float) -> None:
-    """Set the ceiling `--gpu-memory-utilization` may never exceed.
-
-    Enforced two ways: `recipe build` computes its own default no
-    higher than this, and refuses to build a recipe whose own explicit
-    `--gpu-memory-utilization` exceeds it; `serve` refuses to run a
-    compose.yaml whose value exceeds it too, regardless of how it got
-    there. Raise this only if you're sure a higher value is safe on
-    this specific hardware - it exists because leaving vLLM unbounded
-    can let it claim a unified-memory machine's entire memory pool.
-    """
-    if value <= 0 or value >= 1.0:
-        typer.echo("max GPU memory utilization must be between 0 and 1 (exclusive)", err=True)
-        raise typer.Exit(code=1)
-    config_file.set_max_gpu_memory_utilization(value)
-    typer.echo(f"max GPU memory utilization set to {value}")
+    config_file.set_default_gpu_memory_utilization(value)
+    typer.echo(f"default GPU memory utilization set to {value}")
 
 
 @hardware_app.command("scan")
@@ -1158,7 +1063,7 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
 
 
 def _warn_if_cache_location_changed(
-    recipe: Recipe, *, assume_yes: bool, hardware: HardwareProfile, sizing_config: SizingConfig
+    recipe: Recipe, *, assume_yes: bool, default_gpu_memory_utilization: float
 ) -> None:
     """Overwriting silently would point the container at a cache that
     may not have this model in it. Skipped on a recipe's first build,
@@ -1176,8 +1081,7 @@ def _warn_if_cache_location_changed(
         recipe,
         backend=BACKEND,
         hf_cache_dir=config.hf_cache_dir(),
-        hardware=hardware,
-        sizing_config=sizing_config,
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
     )
     new_host = cache_volume_host_path(new_service["services"][recipe.handle])
     if old_host is None or old_host == new_host:
@@ -1214,7 +1118,7 @@ def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
         # `docker compose up` call surface whatever is wrong with it.
         return
 
-    error = validate_gpu_memory_utilization(service, _resolve_sizing_config())
+    error = validate_gpu_memory_utilization(service)
     if error is not None:
         typer.echo(error, err=True)
         raise typer.Exit(code=1)
@@ -1326,13 +1230,13 @@ def serve(
     if it doesn't exist yet.
 
     Always refuses outright (no `-y` override) if compose.yaml's own
-    `command` has no `--gpu-memory-utilization`, or one outside the
-    configured safe range (`fllame config set-max-gpu-memory-utilization`)
-    - checked fresh against the file on disk every time, since an
-    unset or too-high value can let vLLM claim this machine's entire
+    `command` has no `--gpu-memory-utilization`, or an obviously invalid
+    one (<= 0 or > 1) - checked fresh against the file on disk every
+    time, since an unset value can let vLLM claim this machine's entire
     GPU/unified memory pool, and compose.yaml is explicitly meant to be
     hand-editable enough that `recipe build` having gotten it right
-    once isn't something `serve` can just assume still holds.
+    once isn't something `serve` can just assume still holds. Any other
+    explicit value, whatever it is, is trusted outright.
 
     Once the model is confirmed cached, compares a coarse, weights-only
     VRAM estimate (from the cached files themselves, no network) against

@@ -35,9 +35,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - fllame config show # Print fllame's currently configured settings.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml files still using the old default.
-- fllame config set-min-context-length TOKENS # Set the minimum usable --max-model-len recipe build will compute by default (default: 4096).
-- fllame config set-activation-overhead GB # Set the fixed GB reserved for activation/overhead when recipe build computes --max-model-len (default: 2.0).
-- fllame config set-max-gpu-memory-utilization VALUE # Set the ceiling --gpu-memory-utilization may never exceed, enforced by both recipe build and serve (default: 0.92).
+- fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92).
 - fllame serve HANDLE [--yes] # Launch HANDLE's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame status # Show every recipe's container state via docker compose ps.
 - fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
@@ -86,46 +84,34 @@ goes for a `Dockerfile`, for a recipe with `preinstall` - hand-edit it
 and re-run `recipe build` to pick the change up.
 
 Every generated `compose.yaml` always has `--gpu-memory-utilization`
-set to a safe value - there is no path that leaves it unset. `recipe
-build` adds it to the `vllm serve` command whenever the recipe's own
-`command` doesn't already set one - left unset, vLLM happily reserves
-the whole GPU for itself, which on a unified-memory machine means
-starving the OS, not just other processes on the GPU. The value is
-`0.92` (matching vLLM's own out-of-the-box default, and configurable -
-see below) on a discrete GPU, or on unified memory, whichever is lower
-of that ceiling and the fraction of total memory left after reserving
-5 GB for the OS/everything else on the box. Pin your own value in the
-recipe's `command` (`--gpu-memory-utilization 0.8`) to override it -
-`recipe build` still enforces the same ceiling on an explicit value,
-refusing to build (with the numbers involved) rather than trusting a
-recipe that asks for more than fllame considers safe. The ceiling
-itself is configurable: `fllame config set-max-gpu-memory-utilization`.
+set - there is no path that leaves it unset. `recipe build` adds it to
+the `vllm serve` command whenever the recipe's own `command` doesn't
+already set one - left unset, vLLM happily reserves the whole GPU for
+itself, which on a unified-memory machine means starving the OS, not
+just other processes on the GPU. The injected value is a flat,
+configurable default (`0.92` out of the box, matching vLLM's own
+out-of-the-box default - `fllame config
+set-default-gpu-memory-utilization` to change it). An explicit value in
+the recipe's own `command` (`--gpu-memory-utilization 0.8`) always wins
+outright - fllame never second-guesses it.
 
-Because `compose.yaml` is meant to be hand-editable, `serve` also
+Because `compose.yaml` is meant to be hand-editable, `serve`
 independently checks the file on disk every time it runs - not just
 whatever `recipe build` last wrote - and refuses outright (no `-y`
-override) if `--gpu-memory-utilization` is missing or exceeds the
-configured ceiling, regardless of how it got that way.
+override) if `--gpu-memory-utilization` is missing or an obviously
+invalid value (<= 0 or > 1 - utilization can't exceed 100%), regardless
+of how it got that way. Any other explicit value, whatever it is, is
+trusted.
 
-`recipe build` similarly computes `--max-model-len` by default, sized
-against the model's cached weight size, its `config.json` architecture,
-and the same effective `--gpu-memory-utilization`, on the assumption of
-8 concurrent full-length requests - left unset, vLLM can default to the
-model's full trained context length, which can need far more KV-cache
-memory than is actually available. The computed value never exceeds
-the model's own architectural context ceiling. If the model's
-architecture isn't recognized, or the fitted context length would fall
-below fllame's usable minimum (`fllame config set-min-context-length`,
-default 4096 tokens), `--max-model-len` is left to be set by hand in
-the recipe's `command` - the latter case makes `recipe build` fail with
-the numbers involved, rather than serving an unusably short context
-silently. The fixed GB assumed for activation memory/other overhead
-beyond weights and KV cache is also configurable
-(`fllame config set-activation-overhead`, default 2.0). `recipe build`
-also warns (without blocking) when a
-recipe's `--tensor-parallel-size` doesn't match the number of GPUs
-actually detected, since `gpus: all` and any tensor-parallel-size stay
-exactly as configured either way.
+`recipe build` also warns (without blocking) when a recipe's
+`--tensor-parallel-size` doesn't match the number of GPUs actually
+detected, since `gpus: all` and any tensor-parallel-size stay exactly
+as configured either way.
+
+fllame does not compute or inject `--max-model-len` - left unset, vLLM
+uses the model's own full trained context length, and refuses to start
+if that doesn't fit the memory `--gpu-memory-utilization` allows. Set
+it by hand in the recipe's `command` if you need something smaller.
 
 ## Development
 

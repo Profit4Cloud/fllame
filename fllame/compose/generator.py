@@ -9,9 +9,7 @@ from pathlib import Path
 import yaml
 
 from fllame.backends.base import ServingBackend
-from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe
-from fllame.models.sizing import DEFAULT_SIZING_CONFIG, SizingConfig
 
 
 def generate_compose(
@@ -19,11 +17,12 @@ def generate_compose(
     *,
     backend: ServingBackend,
     hf_cache_dir: Path,
-    hardware: HardwareProfile,
-    sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG,
+    default_gpu_memory_utilization: float,
 ) -> dict:
     service = backend.build_service(
-        recipe, hf_cache_dir=hf_cache_dir, hardware=hardware, sizing_config=sizing_config
+        recipe,
+        hf_cache_dir=hf_cache_dir,
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
     )
     return {"services": {recipe.handle: service}}
 

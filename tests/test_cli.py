@@ -6,10 +6,8 @@ from typer.testing import CliRunner
 
 import fllame.cli as cli
 from fllame import config
-from fllame.backends import vllm as vllm_backend
 from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
-from fllame.models.architecture import ModelArchitecture
 from fllame.models.discovery import ModelCandidate
 from fllame.models.updater import UpdateStatus
 from fllame.recipes import build_state
@@ -665,92 +663,13 @@ def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
     assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
 
 
-def test_config_show_sizing_defaults_unset(tmp_path: Path, monkeypatch):
+def test_config_show_default_gpu_memory_utilization_unset(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    assert "min_usable_max_model_len: (unset - falls back to 4096)" in result.stdout
-    assert "activation_overhead_gb: (unset - falls back to 2.0)" in result.stdout
-
-
-def test_config_set_min_context_length(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    set_result = runner.invoke(app, ["config", "set-min-context-length", "8192"])
-    show_result = runner.invoke(app, ["config", "show"])
-
-    assert set_result.exit_code == 0
-    assert show_result.exit_code == 0
-    assert "min_usable_max_model_len: 8192" in show_result.stdout
-
-
-def test_config_set_min_context_length_rejects_non_positive(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    result = runner.invoke(app, ["config", "set-min-context-length", "0"])
-
-    assert result.exit_code == 1
-
-
-def test_config_set_activation_overhead(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    set_result = runner.invoke(app, ["config", "set-activation-overhead", "4"])
-    show_result = runner.invoke(app, ["config", "show"])
-
-    assert set_result.exit_code == 0
-    assert show_result.exit_code == 0
-    assert "activation_overhead_gb: 4.0" in show_result.stdout
-
-
-def test_config_set_activation_overhead_rejects_negative(tmp_path: Path, monkeypatch):
-    """A leading `-` reads as an option to Click, not a negative number,
-    so this is rejected at parse time - well before the command's own
-    `gb < 0` guard would run - rather than with fllame's own message."""
-    _isolate(tmp_path, monkeypatch)
-
-    result = runner.invoke(app, ["config", "set-activation-overhead", "--", "-1"])
-
-    assert result.exit_code == 1
-    assert "must not be negative" in result.output
-
-
-def test_recipe_build_respects_configured_min_context_length(tmp_path: Path, monkeypatch):
-    """A recipe whose computed context length would clear the module
-    default floor, but not a higher one configured via `fllame config`,
-    hard-fails - the configured value, not the built-in constant, is
-    what `recipe build` actually checks against."""
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 1.0)
-    monkeypatch.setattr(
-        vllm_backend,
-        "read_architecture",
-        lambda repo_id: ModelArchitecture(
-            num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=1_000_000
-        ),
-    )
-    monkeypatch.setattr(
-        cli,
-        "scan_hardware",
-        lambda: HardwareProfile(
-            gpu_name="NVIDIA A100 80GB PCIe",
-            gpu_count=1,
-            vram_gb_per_gpu=80.0,
-            ram_gb=256.0,
-            chip_family="nvidia",
-        ),
-    )
-    runner.invoke(app, ["config", "set-min-context-length", "1000000"])
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 1
-    assert "doesn't fit a usable context window" in result.output
-    assert "1000000 tokens" in result.output
+    assert "default_gpu_memory_utilization: (unset - falls back to 0.92)" in result.stdout
 
 
 def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
@@ -1895,9 +1814,12 @@ def test_recipe_build_sets_gpu_memory_utilization_by_default(tmp_path: Path, mon
     assert "0.92" in compose_text
 
 
-def test_recipe_build_gpu_memory_utilization_reserves_headroom_on_unified_memory(
+def test_recipe_build_default_gpu_memory_utilization_same_regardless_of_chip_family(
     tmp_path: Path, monkeypatch
 ):
+    """The default is a flat, configured value now - not computed from
+    hardware at all, so unified memory and a discrete GPU get the exact
+    same number."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1917,9 +1839,22 @@ def test_recipe_build_gpu_memory_utilization_reserves_headroom_on_unified_memory
 
     assert result.exit_code == 0
     compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    # (32 - 5) / 32 = 0.84375 -> "0.84", well under the 0.92 flat cap.
     assert "--gpu-memory-utilization" in compose_text
-    assert "0.84" in compose_text
+    assert "0.92" in compose_text
+
+
+def test_recipe_build_uses_configured_default_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0.6"])
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "0.60" in compose_text
+    assert "0.92" not in compose_text
 
 
 def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path, monkeypatch):
@@ -1941,13 +1876,13 @@ def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path
     assert "0.92" not in compose_text
 
 
-def test_recipe_build_refuses_an_unsafe_explicit_gpu_memory_utilization(
+def test_recipe_build_never_validates_an_explicit_gpu_memory_utilization(
     tmp_path: Path, monkeypatch
 ):
-    """Unlike --max-model-len, this check runs before the Docker step
-    and doesn't depend on the model being cached with a recognized
-    architecture - an unsafe --gpu-memory-utilization is wrong on its
-    own terms."""
+    """The recipe wins outright - `recipe build` writes whatever value
+    it's given verbatim and never second-guesses it, however
+    implausible; `serve`'s own check is the only thing that still
+    catches an obviously-wrong value."""
     _isolate(tmp_path, monkeypatch)
     directory = tmp_path / "demo"
     directory.mkdir(parents=True)
@@ -1956,53 +1891,43 @@ def test_recipe_build_refuses_an_unsafe_explicit_gpu_memory_utilization(
         "command: vllm serve org/demo --gpu-memory-utilization 0.99\n"
     )
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    docker_calls = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 1
-    assert "0.99" in result.output
-    assert "set-max-gpu-memory-utilization" in result.output
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "0.99" in compose_text  # written verbatim, never silently replaced
-    assert docker_calls == []
-
-
-def test_recipe_build_allows_an_explicit_value_within_a_raised_ceiling(
-    tmp_path: Path, monkeypatch
-):
-    _isolate(tmp_path, monkeypatch)
-    directory = tmp_path / "demo"
-    directory.mkdir(parents=True)
-    (directory / "recipe.yaml").write_text(
-        "image: vllm/vllm-openai:v0.27.1\n"
-        "command: vllm serve org/demo --gpu-memory-utilization 0.97\n"
-    )
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0.97"])
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "0.99" in compose_text
 
 
-def test_config_set_max_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+def test_config_set_default_gpu_memory_utilization(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
-    set_result = runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0.85"])
+    set_result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0.85"])
     show_result = runner.invoke(app, ["config", "show"])
 
     assert set_result.exit_code == 0
     assert show_result.exit_code == 0
-    assert "max_gpu_memory_utilization: 0.85" in show_result.stdout
+    assert "default_gpu_memory_utilization: 0.85" in show_result.stdout
 
 
-def test_config_set_max_gpu_memory_utilization_rejects_out_of_range(tmp_path: Path, monkeypatch):
+def test_config_set_default_gpu_memory_utilization_rejects_out_of_range(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
 
-    assert runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0"]).exit_code == 1
-    assert runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "1"]).exit_code == 1
+    assert runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0"]).exit_code == 1
+    result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "--", "1.5"])
+    assert result.exit_code == 1
+
+
+def test_config_set_default_gpu_memory_utilization_allows_one(tmp_path: Path, monkeypatch):
+    """1.0 is the mathematical ceiling, not a policy opinion - allowed,
+    unlike the old configurable-ceiling design."""
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "1"])
+
+    assert result.exit_code == 0
 
 
 def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(
@@ -2036,14 +1961,14 @@ def test_serve_refuses_when_compose_yaml_gpu_memory_utilization_too_high(
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     _write_compose(tmp_path)
     compose_path = config.recipe_dir("demo") / "compose.yaml"
-    compose_path.write_text(compose_path.read_text().replace("0.92", "1.0"))
+    compose_path.write_text(compose_path.read_text().replace("0.92", "1.5"))
     docker_calls = []
     monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
 
     result = runner.invoke(app, ["serve", "demo", "--yes"])
 
     assert result.exit_code == 1
-    assert "1.0" in result.output
+    assert "1.5" in result.output
     assert docker_calls == []
 
 
@@ -2061,160 +1986,6 @@ def test_serve_proceeds_when_compose_yaml_gpu_memory_utilization_is_safe(
 
     assert result.exit_code == 0
     assert captured["command"][-3:] == ["up", "-d", "demo"]
-
-
-_DENSE_ARCH = ModelArchitecture(
-    num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=131072
-)
-
-
-def test_recipe_build_injects_max_model_len_for_known_cached_model(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
-    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
-    monkeypatch.setattr(
-        cli,
-        "scan_hardware",
-        lambda: HardwareProfile(
-            gpu_name="NVIDIA A100 80GB PCIe",
-            gpu_count=1,
-            vram_gb_per_gpu=80.0,
-            ram_gb=256.0,
-            chip_family="nvidia",
-        ),
-    )
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "--max-model-len" in compose_text
-
-
-def test_recipe_build_notes_when_weights_size_unknown(tmp_path: Path, monkeypatch):
-    """--max-model-len silently going uncomputed used to be
-    indistinguishable from a bug - this must always be visible, even
-    though it never blocks anything."""
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: None)
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    assert "couldn't determine" in result.output
-    assert "weight size" in result.output
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "--max-model-len" not in compose_text
-
-
-def test_recipe_build_notes_when_architecture_unrecognized(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
-    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: None)
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    assert "config.json" in result.output
-    assert "isn't in a recognized architecture shape" in result.output
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "--max-model-len" not in compose_text
-
-
-def test_recipe_build_notes_when_hardware_budget_unknown(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 16.0)
-    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
-    monkeypatch.setattr(
-        cli,
-        "scan_hardware",
-        lambda: HardwareProfile(
-            gpu_name=None, gpu_count=0, vram_gb_per_gpu=None, ram_gb=None, chip_family="none"
-        ),
-    )
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    assert "GPU/RAM budget couldn't be determined" in result.output
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "--max-model-len" not in compose_text
-
-
-def test_recipe_build_no_note_when_recipe_sets_its_own_max_model_len(tmp_path: Path, monkeypatch):
-    """The one skip case that's the user's own deliberate choice, not
-    something to explain."""
-    _isolate(tmp_path, monkeypatch)
-    directory = tmp_path / "demo"
-    directory.mkdir(parents=True)
-    (directory / "recipe.yaml").write_text(
-        "image: vllm/vllm-openai:v0.27.1\ncommand: vllm serve org/demo --max-model-len 4096\n"
-    )
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: None)
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    assert "note:" not in result.output
-
-
-def test_recipe_build_shortfall_exits_nonzero_writes_compose_without_flag_skips_docker(
-    tmp_path: Path, monkeypatch
-):
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    monkeypatch.setattr(vllm_backend, "local_estimate_vram_gb", lambda repo_id: 15.0)
-    monkeypatch.setattr(vllm_backend, "read_architecture", lambda repo_id: _DENSE_ARCH)
-    monkeypatch.setattr(
-        cli,
-        "scan_hardware",
-        lambda: HardwareProfile(
-            gpu_name="tiny", gpu_count=1, vram_gb_per_gpu=20.0, ram_gb=64.0, chip_family="nvidia"
-        ),
-    )
-    docker_calls = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 1
-    assert "org/demo" in result.output
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert "--max-model-len" not in compose_text
-    assert docker_calls == []
-
-
-def test_recipe_build_explicit_max_model_len_skips_shortfall_check(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    directory = tmp_path / "demo"
-    directory.mkdir(parents=True)
-    (directory / "recipe.yaml").write_text(
-        "image: vllm/vllm-openai:v0.27.1\n"
-        "command: vllm serve org/demo --max-model-len 2048\n"
-    )
-    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    called = []
-    monkeypatch.setattr(
-        vllm_backend, "read_architecture", lambda repo_id: called.append(repo_id) or None
-    )
-
-    result = runner.invoke(app, ["recipe", "build", "demo"])
-
-    assert result.exit_code == 0
-    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
-    assert compose_text.count("--max-model-len") == 1
-    assert "2048" in compose_text
-    assert called == []
 
 
 def test_recipe_build_warns_on_tensor_parallel_size_mismatch(tmp_path: Path, monkeypatch):

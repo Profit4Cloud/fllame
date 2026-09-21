@@ -30,31 +30,11 @@ def set_default_image(image: str) -> None:
     _write(data)
 
 
-def get_min_usable_max_model_len() -> int | None:
-    return _read().get("min_usable_max_model_len")
+def get_default_gpu_memory_utilization() -> float | None:
+    return _read().get("default_gpu_memory_utilization")
 
 
-def set_min_usable_max_model_len(tokens: int) -> None:
+def set_default_gpu_memory_utilization(value: float) -> None:
     data = _read()
-    data["min_usable_max_model_len"] = tokens
-    _write(data)
-
-
-def get_activation_overhead_gb() -> float | None:
-    return _read().get("activation_overhead_gb")
-
-
-def set_activation_overhead_gb(gb: float) -> None:
-    data = _read()
-    data["activation_overhead_gb"] = gb
-    _write(data)
-
-
-def get_max_gpu_memory_utilization() -> float | None:
-    return _read().get("max_gpu_memory_utilization")
-
-
-def set_max_gpu_memory_utilization(value: float) -> None:
-    data = _read()
-    data["max_gpu_memory_utilization"] = value
+    data["default_gpu_memory_utilization"] = value
     _write(data)
