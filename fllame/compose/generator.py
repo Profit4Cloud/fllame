@@ -12,8 +12,19 @@ from fllame.backends.base import ServingBackend
 from fllame.domain.recipe import Recipe
 
 
-def generate_compose(recipe: Recipe, *, backend: ServingBackend, hf_cache_dir: Path) -> dict:
-    return {"services": {recipe.handle: backend.build_service(recipe, hf_cache_dir=hf_cache_dir)}}
+def generate_compose(
+    recipe: Recipe,
+    *,
+    backend: ServingBackend,
+    hf_cache_dir: Path,
+    default_gpu_memory_utilization: float,
+) -> dict:
+    service = backend.build_service(
+        recipe,
+        hf_cache_dir=hf_cache_dir,
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
+    )
+    return {"services": {recipe.handle: service}}
 
 
 def write_compose_file(compose: dict, path: Path) -> None:

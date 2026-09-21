@@ -84,10 +84,25 @@ def render_multiline_command(repo_id: str, serve_args: list[str]) -> str:
     return " \\\n".join(lines)
 
 
-def extract_port(serve_args: list[str], *, default: int = 8000) -> int:
+def extract_flag_value(serve_args: list[str], name: str) -> str | None:
+    """The value already given to `name` in `--flag value` or
+    `--flag=value` form, or `None` if it isn't set at all."""
     for i, token in enumerate(serve_args):
-        if token == "--port" and i + 1 < len(serve_args):
-            return int(serve_args[i + 1])
-        if token.startswith("--port="):
-            return int(token.split("=", 1)[1])
-    return default
+        if token == name and i + 1 < len(serve_args):
+            return serve_args[i + 1]
+        if token.startswith(f"{name}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def extract_port(serve_args: list[str], *, default: int = 8000) -> int:
+    value = extract_flag_value(serve_args, "--port")
+    return int(value) if value is not None else default
+
+
+def has_flag(serve_args: list[str], name: str) -> bool:
+    """Whether `name` (e.g. `--gpu-memory-utilization`) already appears
+    in `serve_args`, in either `--flag value` or `--flag=value` form -
+    used to avoid overriding a value the recipe's own command already
+    sets explicitly."""
+    return any(token == name or token.startswith(f"{name}=") for token in serve_args)

@@ -8,7 +8,12 @@ from fllame.domain.recipe import Recipe
 def test_generate_compose_single_service_keyed_by_handle():
     recipe = Recipe(handle="a", command="vllm serve org/a --port 8001", image="img-a")
 
-    compose = generate_compose(recipe, backend=VllmServingBackend(), hf_cache_dir=Path("/cache"))
+    compose = generate_compose(
+        recipe,
+        backend=VllmServingBackend(),
+        hf_cache_dir=Path("/cache"),
+        default_gpu_memory_utilization=0.92,
+    )
 
     assert set(compose["services"].keys()) == {"a"}
     assert compose["services"]["a"]["image"] == "img-a"

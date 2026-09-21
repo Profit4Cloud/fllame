@@ -11,6 +11,8 @@ from fllame.domain.recipe import Recipe
 class ServingBackend(Protocol):
     name: str
 
-    def build_service(self, recipe: Recipe, *, hf_cache_dir: Path) -> dict:
+    def build_service(
+        self, recipe: Recipe, *, hf_cache_dir: Path, default_gpu_memory_utilization: float
+    ) -> dict:
         """The `services.<handle>` value for this recipe's compose.yaml."""
         ...

@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -9,6 +10,7 @@ from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.discovery import ModelCandidate
 from fllame.models.updater import UpdateStatus
+from fllame.recipes import build_state
 
 runner = CliRunner()
 
@@ -49,6 +51,12 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     # HF cache) unless a test explicitly opts into exercising it (see
     # the test_serve_vram_* tests below).
     monkeypatch.setattr(cli, "scan_hardware", lambda: _NO_HARDWARE_SIGNAL)
+    # `recipe build`'s Docker validation step (a real `docker build` or
+    # `docker compose pull`) defaults to a fake success so ordinary
+    # tests never need a real docker daemon - tests exercising the
+    # invoked command or a failure override `cli.subprocess.run`
+    # themselves afterward.
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FakeCompletedProcess())
 
 
 def _dialogue_input(*parts: str) -> str:
@@ -524,6 +532,35 @@ def test_recipe_remove_missing_handle(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
 
 
+def test_recipe_remove_warns_docker_image_is_not_cleaned_up(tmp_path: Path, monkeypatch):
+    """The warning is the same whether or not the recipe had a
+    Dockerfile - either way, Docker holds state fllame doesn't track."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert "docker image prune" in result.output or "docker rmi" in result.output
+
+
+def test_recipe_remove_warns_docker_image_for_preinstall_recipe_too(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    (directory / "Dockerfile").write_text("FROM img\nRUN pip install foo\n")
+
+    result = runner.invoke(app, ["recipe", "remove", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert "docker image prune" in result.output or "docker rmi" in result.output
+
+
 def test_recipe_add_dialogue_prompts_for_image_when_no_default_configured(
     tmp_path: Path, monkeypatch
 ):
@@ -624,6 +661,15 @@ def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
     assert "unpinned" not in set_result.output
     assert show_result.exit_code == 0
     assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
+
+
+def test_config_show_default_gpu_memory_utilization_unset(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert "default_gpu_memory_utilization: (unset - falls back to 0.92)" in result.stdout
 
 
 def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
@@ -1208,7 +1254,7 @@ def test_serve_verifies_cache_then_invokes_docker_compose_up(tmp_path: Path, mon
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
 
-    result = runner.invoke(app, ["serve", "demo", "--detach"])
+    result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
     assert captured["command"][:3] == ["docker", "compose", "-f"]
@@ -1233,8 +1279,8 @@ def test_serve_uses_recipes_own_compose_folder_and_project(tmp_path: Path, monke
 
 def test_serve_never_uses_build_flag(tmp_path: Path, monkeypatch):
     """`docker compose up` never gets Docker's own image-build flag -
-    fllame has no custom image/Dockerfile to build, on top of never
-    invoking `docker compose` with `--build` at all."""
+    `recipe build` already built/validated the image, `serve` only ever
+    runs what's already there."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1265,7 +1311,91 @@ def test_serve_requires_compose_already_built(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "demo" / "compose.yaml").exists()
 
 
-def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monkeypatch):
+def test_recipe_build_with_preinstall_writes_dockerfile_and_builds_local_image(
+    tmp_path: Path, monkeypatch
+):
+    """A recipe with `preinstall` gets a `Dockerfile` next to
+    compose.yaml, and compose.yaml's `image:` points at the local tag
+    that Dockerfile is built into - not the base image."""
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "preinstall:\n"
+        "- pip install -U transformers\n"
+        "command: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    dockerfile_text = (tmp_path / "demo" / "Dockerfile").read_text()
+    assert dockerfile_text == "FROM vllm/vllm-openai:v0.27.1\nRUN pip install -U transformers\n"
+    # `preinstall` is now a Dockerfile-build-time concern - it never
+    # appears embedded in compose.yaml's command/entrypoint.
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert "pip install -U transformers" not in compose_text
+    assert "image: fllame-demo:latest" in compose_text
+    assert captured["command"] == [
+        "docker",
+        "build",
+        "-t",
+        "fllame-demo:latest",
+        str(tmp_path / "demo"),
+    ]
+
+
+def test_recipe_build_without_preinstall_never_writes_a_dockerfile(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert not (tmp_path / "demo" / "Dockerfile").exists()
+
+
+def test_recipe_build_without_preinstall_validates_image_via_compose_pull(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert captured["command"][:3] == ["docker", "compose", "-f"]
+    assert captured["command"][-1] == "pull"
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert "image: vllm/vllm-openai:v0.27.1" in compose_text
+
+
+def test_recipe_build_dockerfile_left_untouched_when_recipe_has_no_preinstall(
+    tmp_path: Path, monkeypatch
+):
+    """`Dockerfile` is a real, permanent, hand-editable artifact once a
+    recipe has one - a later build of a recipe with no `preinstall`
+    doesn't delete it out from under the user."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    handle_folder = tmp_path / "demo"
+    (handle_folder / "Dockerfile").write_text("FROM img\nRUN echo hand-edited\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert (handle_folder / "Dockerfile").read_text() == "FROM img\nRUN echo hand-edited\n"
+
+
+def test_recipe_build_docker_build_failure_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo").mkdir(parents=True)
     (tmp_path / "demo" / "recipe.yaml").write_text(
@@ -1276,30 +1406,248 @@ def test_recipe_build_with_preinstall_writes_no_dockerfile(tmp_path: Path, monke
     )
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
 
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
-    assert result.exit_code == 0
-    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
-    assert "pip install -U transformers" in compose_text
-    assert not (tmp_path / "demo" / "Dockerfile").exists()
+    assert result.exit_code == 1
+    assert "docker build" in result.output
+    assert "fllame recipe build demo" in result.output
 
 
-def test_recipe_build_removes_stale_dockerfile_from_before(tmp_path: Path, monkeypatch):
-    """A Dockerfile left over from an older fllame version's
-    build-a-custom-image approach is cleaned up on the next build."""
+def test_recipe_build_docker_compose_pull_failure_gives_friendly_error(
+    tmp_path: Path, monkeypatch
+):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
-    handle_folder = tmp_path / "demo"
-    (handle_folder / "Dockerfile").write_text("FROM img\n")
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
+    assert result.exit_code == 1
+    assert "docker compose pull" in result.output
+    assert "fllame recipe build demo" in result.output
+
+
+def test_serve_warns_when_compose_hand_edited_since_last_build(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text() + "# hand-edited\n")
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+    called = []
+
+    result = runner.invoke(app, ["serve", "demo"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "compose.yaml no longer matches the last build" in result.output
+    assert called == []
+
+
+def test_serve_compose_hand_edit_warning_continues_when_confirmed(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text() + "# hand-edited\n")
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+
     assert result.exit_code == 0
-    assert not (handle_folder / "Dockerfile").exists()
+    assert "compose.yaml no longer matches the last build" in result.output
 
 
-def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
+def test_serve_compose_hand_edit_warning_yes_flag_skips_prompt(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text() + "# hand-edited\n")
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])
+
+    assert result.exit_code == 0
+    assert "compose.yaml no longer matches the last build" in result.output
+
+
+def test_serve_no_compose_warning_when_unchanged_since_build(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "no longer matches" not in result.output
+
+
+def test_serve_warns_when_dockerfile_hand_edited_since_last_build(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    (directory / "Dockerfile").write_text((directory / "Dockerfile").read_text() + "RUN echo hi\n")
+    called = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+
+    result = runner.invoke(app, ["serve", "demo"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Dockerfile no longer matches the last build" in result.output
+    assert "fllame recipe build demo" in result.output
+    assert called == []
+
+
+def test_serve_dockerfile_hand_edit_warning_continues_when_confirmed(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    (directory / "Dockerfile").write_text((directory / "Dockerfile").read_text() + "RUN echo hi\n")
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Dockerfile no longer matches the last build" in result.output
+
+
+def test_serve_notes_image_not_yet_revalidated_after_config_change(tmp_path: Path, monkeypatch):
+    """Case (c) is informational only - no prompt, `serve` just
+    proceeds - since a `config set-default-image` edit already went
+    through its own `docker pull` at the time."""
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text().replace("v0.26.0", "v0.27.1"))
+    directory = tmp_path / "demo"
+    state = build_state.load(directory)
+    build_state.save(
+        directory,
+        dataclasses.replace(
+            state,
+            compose_hash=build_state.hash_text(compose_path.read_text()),
+            image_synced_via_config=True,
+        ),
+    )
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])  # no stdin needed - never prompts
+
+    assert result.exit_code == 0
+    assert "vllm/vllm-openai:v0.27.1" in result.output
+    assert "not re-validated" in result.output
+
+
+def test_serve_no_note_when_image_already_revalidated(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "not re-validated" not in result.output
+
+
+def test_config_set_default_image_pulls_once_and_clears_marker_on_success(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+    pulls = []
+
+    def fake_run(command):
+        pulls.append(command)
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
+    )
+
+    assert result.exit_code == 0
+    assert pulls == [["docker", "pull", "vllm/vllm-openai:v0.27.1"]]
+    state = build_state.load(compose_path.parent)
+    assert state.compose_hash == build_state.hash_text(compose_path.read_text())
+    assert state.image_synced_via_config is False
+
+
+def test_config_set_default_image_pull_failure_leaves_marker_set_and_warns(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    compose_path = _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
+    )
+
+    assert result.exit_code == 0
+    assert "couldn't pull" in result.output
+    # The config change and the text-replace both still applied.
+    assert "image: vllm/vllm-openai:v0.27.1" in compose_path.read_text()
+    state = build_state.load(compose_path.parent)
+    assert state.image_synced_via_config is True
+
+
+def test_config_set_default_image_pull_not_attempted_when_no_files_affected(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    pulls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: pulls.append(command))
+
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
+
+    assert result.exit_code == 0
+    assert pulls == []
+
+
+def test_serve_always_runs_detached(tmp_path: Path, monkeypatch):
+    """There's no foreground mode any more - `serve` always runs `up
+    -d`, since a well-defined "did it start OK" exit code is what lets
+    it clear the drift markers below right after a successful start."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1310,7 +1658,114 @@ def test_serve_foreground_omits_detach_flag(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["serve", "demo"])
 
     assert result.exit_code == 0
-    assert captured["command"][-2:] == ["up", "demo"]
+    assert captured["command"][-3:] == ["up", "-d", "demo"]
+
+
+def test_serve_has_no_detach_option_any_more():
+    result = runner.invoke(app, ["serve", "--help"])
+
+    assert "--detach" not in result.output
+
+
+def test_serve_sets_container_name_on_the_compose_service(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+
+    assert "container_name: fllame-demo" in compose_text
+
+
+def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert "docker logs -f fllame-demo" in result.output
+    assert "can take several minutes" in result.output
+
+
+def test_serve_omits_docker_logs_hint_on_failure(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert "docker logs" not in result.output
+
+
+def test_serve_success_clears_compose_hand_edit_marker(tmp_path: Path, monkeypatch):
+    """A successful start refreshes the recorded hashes to match
+    whatever's on disk right now - so a hand-edit that turned out fine
+    doesn't keep re-prompting on every later `serve`."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = tmp_path / "demo" / "compose.yaml"
+    compose_path.write_text(compose_path.read_text() + "# hand-edited\n")
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"], input="y\n")
+    assert result.exit_code == 0
+
+    second = runner.invoke(app, ["serve", "demo"])
+
+    assert second.exit_code == 0
+    assert "no longer matches" not in second.output
+
+
+def test_serve_success_clears_image_synced_via_config_marker(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    directory = tmp_path / "demo"
+    state = build_state.load(directory)
+    build_state.save(directory, dataclasses.replace(state, image_synced_via_config=True))
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run({}))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert not build_state.load(directory).image_synced_via_config
+
+
+def test_serve_failure_does_not_clear_any_drift_marker(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    directory = tmp_path / "demo"
+    state = build_state.load(directory)
+    build_state.save(directory, dataclasses.replace(state, image_synced_via_config=True))
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 1
+    assert build_state.load(directory).image_synced_via_config
 
 
 def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):
@@ -1339,6 +1794,268 @@ def test_recipe_build_container_always_sets_hf_hub_offline(tmp_path: Path, monke
     assert result.exit_code == 0
     compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
     assert "HF_HUB_OFFLINE" in compose_text
+
+
+def test_recipe_build_sets_gpu_memory_utilization_by_default(tmp_path: Path, monkeypatch):
+    """Left to vLLM's own default, a recipe with no explicit
+    `--gpu-memory-utilization` can reserve the whole GPU - starving the
+    rest of the box on a unified-memory machine. `recipe build` always
+    bakes in a safe value unless the recipe's own command already sets
+    one (see `fllame/backends/vllm.py`)."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--gpu-memory-utilization" in compose_text
+    assert "0.92" in compose_text
+
+
+def test_recipe_build_default_gpu_memory_utilization_same_regardless_of_chip_family(
+    tmp_path: Path, monkeypatch
+):
+    """The default is a flat, configured value now - not computed from
+    hardware at all, so unified memory and a discrete GPU get the exact
+    same number."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA GB10",
+            gpu_count=1,
+            vram_gb_per_gpu=None,
+            ram_gb=32.0,
+            chip_family="grace_blackwell",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "--gpu-memory-utilization" in compose_text
+    assert "0.92" in compose_text
+
+
+def test_recipe_build_uses_configured_default_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0.6"])
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "0.60" in compose_text
+    assert "0.92" not in compose_text
+
+
+def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --gpu-memory-utilization 0.6\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert compose_text.count("--gpu-memory-utilization") == 1
+    assert "0.6" in compose_text
+    assert "0.92" not in compose_text
+
+
+def test_recipe_build_never_validates_an_explicit_gpu_memory_utilization(
+    tmp_path: Path, monkeypatch
+):
+    """The recipe wins outright - `recipe build` writes whatever value
+    it's given verbatim and never second-guesses it, however
+    implausible; `serve`'s own check is the only thing that still
+    catches an obviously-wrong value."""
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --gpu-memory-utilization 0.99\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "0.99" in compose_text
+
+
+def test_config_set_default_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0.85"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert show_result.exit_code == 0
+    assert "default_gpu_memory_utilization: 0.85" in show_result.stdout
+
+
+def test_config_set_default_gpu_memory_utilization_rejects_out_of_range(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+
+    assert runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "0"]).exit_code == 1
+    result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "--", "1.5"])
+    assert result.exit_code == 1
+
+
+def test_config_set_default_gpu_memory_utilization_allows_one(tmp_path: Path, monkeypatch):
+    """1.0 is the mathematical ceiling, not a policy opinion - allowed,
+    unlike the old configurable-ceiling design."""
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["config", "set-default-gpu-memory-utilization", "1"])
+
+    assert result.exit_code == 0
+
+
+def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(
+    tmp_path: Path, monkeypatch
+):
+    """The exact scenario this check exists for: a compose.yaml that
+    somehow ended up without --gpu-memory-utilization (hand-edited, or
+    left over from before fllame always injected one) must never be
+    served - regardless of -y."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = config.recipe_dir("demo") / "compose.yaml"
+    compose_path.write_text(compose_path.read_text().replace("--gpu-memory-utilization", "--foo"))
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])
+
+    assert result.exit_code == 1
+    assert "no --gpu-memory-utilization" in result.output
+    assert docker_calls == []
+
+
+def test_serve_refuses_when_compose_yaml_gpu_memory_utilization_too_high(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = config.recipe_dir("demo") / "compose.yaml"
+    compose_path.write_text(compose_path.read_text().replace("0.92", "1.5"))
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])
+
+    assert result.exit_code == 1
+    assert "1.5" in result.output
+    assert docker_calls == []
+
+
+def test_serve_proceeds_when_compose_yaml_gpu_memory_utilization_is_safe(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert captured["command"][-3:] == ["up", "-d", "demo"]
+
+
+def test_recipe_build_warns_on_tensor_parallel_size_mismatch(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --tensor-parallel-size 4\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" in result.output
+
+
+def test_recipe_build_no_tensor_parallel_size_warning_when_matching(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --tensor-parallel-size 1\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "scan_hardware",
+        lambda: HardwareProfile(
+            gpu_name="NVIDIA A100 80GB PCIe",
+            gpu_count=1,
+            vram_gb_per_gpu=80.0,
+            ram_gb=256.0,
+            chip_family="nvidia",
+        ),
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" not in result.output
+
+
+def test_recipe_build_no_tensor_parallel_size_warning_when_no_gpu_detected(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    # _isolate's own default already scans no hardware at all.
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "--tensor-parallel-size" not in result.output
 
 
 def test_recipe_build_cache_location_unchanged_never_warns(tmp_path: Path, monkeypatch):
@@ -1537,6 +2254,56 @@ def test_recipe_build_writes_compose_when_model_cached(tmp_path: Path, monkeypat
 
     assert result.exit_code == 0
     assert (tmp_path / "demo" / "compose.yaml").is_file()
+
+
+def test_recipe_build_writes_build_state_matching_compose_hash(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    state = build_state.load(tmp_path / "demo")
+    compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert state.compose_hash == build_state.hash_text(compose_text)
+    assert state.dockerfile_hash is None
+    assert state.image_synced_via_config is False
+
+
+def test_recipe_build_with_preinstall_writes_build_state_with_dockerfile_hash(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: img\npreinstall:\n- pip install foo\ncommand: vllm serve org/demo\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    state = build_state.load(directory)
+    dockerfile_text = (directory / "Dockerfile").read_text()
+    assert state.dockerfile_hash == build_state.hash_text(dockerfile_text)
+
+
+def test_recipe_build_does_not_write_build_state_on_docker_failure(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    class _FailedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert not build_state.path_for(tmp_path / "demo").exists()
 
 
 def test_recipe_build_unknown_handle(tmp_path: Path, monkeypatch):

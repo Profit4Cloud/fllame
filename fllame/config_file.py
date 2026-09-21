@@ -1,6 +1,4 @@
-"""Persisted CLI settings - today just `default_image` - managed via
-`fllame config`, not hand-edited.
-"""
+"""Persisted CLI settings, managed via `fllame config`, not hand-edited."""
 
 from __future__ import annotations
 
@@ -29,4 +27,14 @@ def get_default_image() -> str | None:
 def set_default_image(image: str) -> None:
     data = _read()
     data["default_image"] = image
+    _write(data)
+
+
+def get_default_gpu_memory_utilization() -> float | None:
+    return _read().get("default_gpu_memory_utilization")
+
+
+def set_default_gpu_memory_utilization(value: float) -> None:
+    data = _read()
+    data["default_gpu_memory_utilization"] = value
     _write(data)

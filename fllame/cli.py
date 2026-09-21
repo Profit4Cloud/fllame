@@ -16,7 +16,13 @@ from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
 from fllame import config, config_file
-from fllame.backends.vllm import VllmServingBackend, cache_volume_host_path
+from fllame.backends.vllm import (
+    VllmServingBackend,
+    cache_volume_host_path,
+    generate_dockerfile,
+    tensor_parallel_size_mismatch_warning,
+    validate_gpu_memory_utilization,
+)
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
@@ -30,6 +36,7 @@ from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
+from fllame.recipes import build_state
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
@@ -51,6 +58,9 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 BACKEND = VllmServingBackend()
 
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
+# If --gpu-memory-utilization is not set, the vLLM will use all available GPU memory, possibly crashing unified systems.
+# Therefore, it is always injected to compose.yaml, either explicitly from the recipe, or the default below.
+_DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
 
 def _recipe_store() -> RecipeStore:
@@ -63,6 +73,11 @@ def _resolve_image(recipe: Recipe) -> Recipe:
     return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
 
 
+def _resolve_default_gpu_memory_utilization() -> float:
+    value = config_file.get_default_gpu_memory_utilization()
+    return value if value is not None else _DEFAULT_GPU_MEMORY_UTILIZATION
+
+
 def _load_or_exit(handle: str) -> Recipe:
     try:
         return _recipe_store().load(handle)
@@ -71,18 +86,35 @@ def _load_or_exit(handle: str) -> Recipe:
         raise typer.Exit(code=1) from e
 
 
-def _write_recipe_compose(recipe: Recipe) -> None:
+def _write_recipe_compose(recipe: Recipe, *, default_gpu_memory_utilization: float) -> str | None:
+    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines, 
+    also a `Dockerfile` is generated, which is used by `compose.yaml`.
+    Returns the Dockerfile content written, or `None` when this
+    recipe has no `preinstall`.
+    """
     resolved = _resolve_image(recipe)
     directory = config.recipe_dir(resolved.handle)
-    compose = generate_compose(resolved, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
-
     directory.mkdir(parents=True, exist_ok=True)
-    # Leftover from an older fllame version's preinstall handling.
-    stale_dockerfile = directory / "Dockerfile"
-    if stale_dockerfile.is_file():
-        stale_dockerfile.unlink()
+
+    dockerfile_content = generate_dockerfile(resolved)
+    compose = generate_compose(
+        resolved,
+        backend=BACKEND,
+        hf_cache_dir=config.hf_cache_dir(),
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
+    )
+    service = compose["services"][resolved.handle]
+    # A stable, predictable name (matching the compose project name)
+    # instead of docker compose's own auto-generated
+    # `<project>-<service>-1` - lets `serve` print the right `docker
+    # logs` command without an extra `docker compose ps` round-trip.
+    service["container_name"] = config.compose_project_name(resolved.handle)
+    if dockerfile_content is not None:
+        (directory / "Dockerfile").write_text(dockerfile_content)
+        service["image"] = config.local_image_tag(resolved.handle)
 
     write_compose_file(compose, directory / "compose.yaml")
+    return dockerfile_content
 
 
 def _require_model_cached(recipe: Recipe) -> None:
@@ -107,13 +139,60 @@ def _require_compose_built(recipe: Recipe) -> None:
     raise typer.Exit(code=1)
 
 
+def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
+    rebuild = f"fllame recipe build {handle}"
+    if dockerfile:
+        return (
+            f"`recipe build` couldn't build the Docker image for '{handle}' - see the "
+            "`docker build` output above for the underlying error (a failing "
+            "`preinstall` command is the usual cause). Fix the recipe's `preinstall` "
+            f"list (or the generated Dockerfile directly), then re-run `{rebuild}`."
+        )
+    return (
+        f"`recipe build` couldn't pull the image configured for '{handle}' - see the "
+        "`docker compose pull` output above for the underlying error (a bad image tag, "
+        "an unreachable registry, or missing credentials are the usual causes). Fix the "
+        f"recipe's (or the configured default) image, then re-run `{rebuild}`."
+    )
+
+
 def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
-    """Shared by `recipe build` and `recipe add --build` - the only
-    two commands that ever write `compose.yaml`."""
+    """Builds the recipe by creating a `compose.yaml` (and possibly a `Dockerfile`) in its folder.
+    Validates the result with `docker build` (a recipe with `preinstall`) or `docker compose pull` (one without).
+    This ensures that network access is needed during build time only, and not during serve time.
+    """
     _require_model_cached(recipe)
-    _warn_if_cache_location_changed(recipe, assume_yes=assume_yes)
-    _write_recipe_compose(recipe)
-    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    # Hardware scanned for validing the tensor-parallel-size later.
+    hardware = scan_hardware()
+    default_gpu_memory_utilization = _resolve_default_gpu_memory_utilization()
+    _warn_if_cache_location_changed(
+        recipe, assume_yes=assume_yes, default_gpu_memory_utilization=default_gpu_memory_utilization
+    )
+    tp_warning = tensor_parallel_size_mismatch_warning(recipe, hardware)
+    if tp_warning is not None:
+        typer.echo(tp_warning, err=True)
+    dockerfile_content = _write_recipe_compose(
+        recipe, default_gpu_memory_utilization=default_gpu_memory_utilization
+    )
+    directory = config.recipe_dir(recipe.handle)
+    compose_path = directory / "compose.yaml"
+
+    if dockerfile_content is not None:
+        tag = config.local_image_tag(recipe.handle)
+        typer.echo(f"building '{tag}' from {directory / 'Dockerfile'} ...")
+        code = _run_docker("build", "-t", tag, str(directory))
+    else:
+        typer.echo("validating the configured image with `docker compose pull` ...")
+        code = _run_compose(recipe.handle, "pull")
+
+    if code != 0:
+        typer.echo(
+            _friendly_docker_build_error(recipe.handle, dockerfile=dockerfile_content is not None),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    build_state.save(directory, build_state.for_current_files(directory))
     typer.echo(f"wrote {compose_path}")
 
 
@@ -164,18 +243,9 @@ def _format_relative_time(dt: datetime | None) -> str:
     return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
-def _run_compose(handle: str, *args: str) -> int:
-    command = [
-        "docker",
-        "compose",
-        "-f",
-        str(config.recipe_dir(handle) / "compose.yaml"),
-        "-p",
-        config.compose_project_name(handle),
-        *args,
-    ]
+def _run_docker(*args: str) -> int:
     try:
-        return subprocess.run(command).returncode
+        return subprocess.run(["docker", *args]).returncode
     except FileNotFoundError as e:
         typer.echo(
             "docker (or the compose plugin) was not found on PATH - fllame runs "
@@ -183,6 +253,17 @@ def _run_compose(handle: str, *args: str) -> int:
             err=True,
         )
         raise typer.Exit(code=1) from e
+
+
+def _run_compose(handle: str, *args: str) -> int:
+    return _run_docker(
+        "compose",
+        "-f",
+        str(config.recipe_dir(handle) / "compose.yaml"),
+        "-p",
+        config.compose_project_name(handle),
+        *args,
+    )
 
 
 @recipe_app.command("list")
@@ -409,14 +490,10 @@ def recipe_build(
         "warning (if any) is still printed.",
     ),
 ) -> None:
-    """Write (or overwrite) HANDLE's `compose.yaml` - the only command,
-    besides `recipe add --build`, that ever does.
-
-    Fails with a clear error if the model isn't fully downloaded yet -
-    run `fllame model pull <repo_id>` (or `recipe add --pull`/`--build`)
-    first. `serve`/`status`/`stop` never write or regenerate
-    `compose.yaml` themselves - it's meant to be hand-edited, and only
-    ever touched again by explicitly re-running this command.
+    """Builds the recipe by creating a compose.yaml (and possibly a Dockerfile) in its folder.
+    Fails with a clear error if the model isn't fully downloaded yet..
+    Validates the result with docker build (a recipe with preinstall) or docker compose pull (one without). 
+    This ensures that network access is needed during build time only, and not during serve time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
@@ -449,9 +526,7 @@ def recipe_edit(handle: str) -> None:
     rendering once it validates, regardless of which of those kicked in.
     Anything else invalid offers a choice: reopen $EDITOR to fix it, or
     revert to the version from before this edit (kept in memory for the
-    length of this command, not written to a backup file - the recipes
-    directory is meant to be git-tracked already, which is the real
-    backup).
+    length of this command, not written to a backup file).
     """
     path = config.recipe_dir(handle) / "recipe.yaml"
     if not path.is_file():
@@ -487,10 +562,14 @@ def recipe_remove(
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
     """Delete HANDLE's whole folder - its recipe file and its generated
-    `compose.yaml` together (see `fllame/config.py`'s `recipe_dir`).
+    `compose.yaml`/`Dockerfile` together (see `fllame/config.py`'s
+    `recipe_dir`).
 
     Doesn't stop a container that's still running under it; if `fllame
-    stop HANDLE` matters, run it first.
+    stop HANDLE` matters, run it first. Also doesn't remove any Docker
+    image built or pulled for it - Docker holds that state, not fllame,
+    regardless of whether this recipe had a `Dockerfile`; `docker image
+    prune`/`docker rmi` is the way to reclaim that space.
     """
     if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
         raise typer.Exit(code=0)
@@ -500,6 +579,10 @@ def recipe_remove(
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"removed '{handle}'")
+    typer.echo(
+        "note: this did not remove any Docker image built or pulled for it - "
+        "run `docker image prune`/`docker rmi` yourself if you want that space back."
+    )
 
 
 @config_app.command("show")
@@ -510,6 +593,15 @@ def config_show() -> None:
         typer.echo(f"default_image: {default_image}")
     else:
         typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
+
+    default_utilization = config_file.get_default_gpu_memory_utilization()
+    if default_utilization is not None:
+        typer.echo(f"default_gpu_memory_utilization: {default_utilization}")
+    else:
+        typer.echo(
+            "default_gpu_memory_utilization: (unset - falls back to "
+            f"{_DEFAULT_GPU_MEMORY_UTILIZATION})"
+        )
 
 
 def _compose_files_using_image(image: str) -> list[Path]:
@@ -576,6 +668,57 @@ def config_set_default_image(image: str) -> None:
     for path in affected:
         _replace_image_in_compose_file(path, old_default, image)
     typer.echo(f"updated {len(affected)} file(s)")
+
+    # fllame's own edit, not a hand-edit - recalculate compose_hash right
+    # away so `serve`'s hand-edit check (point 5a) never mistakes this
+    # for one, and mark the image as not yet re-validated (point 5c)
+    # until the shared pull below confirms - or fails to confirm - it.
+    for path in affected:
+        directory = path.parent
+        state = build_state.load(directory)
+        build_state.save(
+            directory,
+            dataclasses.replace(
+                state,
+                compose_hash=build_state.hash_text(path.read_text()),
+                image_synced_via_config=True,
+            ),
+        )
+
+    typer.echo(f"pulling '{image}' to confirm it resolves ...")
+    if _run_docker("pull", image) == 0:
+        for path in affected:
+            directory = path.parent
+            state = build_state.load(directory)
+            build_state.save(directory, dataclasses.replace(state, image_synced_via_config=False))
+    else:
+        typer.echo(
+            f"warning: couldn't pull '{image}' - the config change and the file "
+            "update above are kept either way, but `fllame serve` will keep noting "
+            "that this image hasn't been re-validated until it does.",
+            err=True,
+        )
+
+
+@config_app.command("set-default-gpu-memory-utilization")
+def config_set_default_gpu_memory_utilization(value: float) -> None:
+    """Set the `--gpu-memory-utilization` value `recipe build` injects
+    when a recipe's own command doesn't already set one.
+
+    An explicit `--gpu-memory-utilization` in a recipe's own command
+    always wins over this default - fllame never overrides it. `serve`
+    separately refuses to run any compose.yaml (regardless of where its
+    value came from) whose --gpu-memory-utilization is missing or
+    obviously invalid (<= 0 or > 1), since leaving vLLM unbounded can
+    let it claim a unified-memory machine's entire memory pool.
+    """
+    if value <= 0 or value > 1.0:
+        typer.echo(
+            "default GPU memory utilization must be greater than 0 and no more than 1", err=True
+        )
+        raise typer.Exit(code=1)
+    config_file.set_default_gpu_memory_utilization(value)
+    typer.echo(f"default GPU memory utilization set to {value}")
 
 
 @hardware_app.command("scan")
@@ -884,7 +1027,9 @@ def _warn_if_vram_likely_insufficient(recipe: Recipe, *, assume_yes: bool) -> No
         raise typer.Exit(code=1)
 
 
-def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None:
+def _warn_if_cache_location_changed(
+    recipe: Recipe, *, assume_yes: bool, default_gpu_memory_utilization: float
+) -> None:
     """Overwriting silently would point the container at a cache that
     may not have this model in it. Skipped on a recipe's first build,
     or an unparseable existing file."""
@@ -897,7 +1042,12 @@ def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None
     except (yaml.YAMLError, KeyError, TypeError, AttributeError):
         return
 
-    new_service = generate_compose(recipe, backend=BACKEND, hf_cache_dir=config.hf_cache_dir())
+    new_service = generate_compose(
+        recipe,
+        backend=BACKEND,
+        hf_cache_dir=config.hf_cache_dir(),
+        default_gpu_memory_utilization=default_gpu_memory_utilization,
+    )
     new_host = cache_volume_host_path(new_service["services"][recipe.handle])
     if old_host is None or old_host == new_host:
         return
@@ -915,51 +1065,114 @@ def _warn_if_cache_location_changed(recipe: Recipe, *, assume_yes: bool) -> None
         raise typer.Exit(code=1)
 
 
+def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
+    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    try:
+        compose = yaml.safe_load(compose_path.read_text())
+        service = compose["services"][recipe.handle]
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError, OSError):
+        # compose.yaml exists (_require_compose_built already checked)
+        # but isn't in a shape this can even inspect - let the actual
+        # `docker compose up` call surface whatever is wrong with it.
+        return
+
+    error = validate_gpu_memory_utilization(service)
+    if error is not None:
+        typer.echo(error, err=True)
+        raise typer.Exit(code=1)
+
+
+def _warn_if_compose_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
+    directory = config.recipe_dir(recipe.handle)
+    state = build_state.load(directory)
+    if state.compose_hash is None:
+        return
+    current_hash = build_state.hash_text((directory / "compose.yaml").read_text())
+    if current_hash == state.compose_hash:
+        return
+
+    typer.echo(
+        f"warning: compose.yaml no longer matches the last build for '{recipe.handle}' - "
+        "it looks hand-edited since `fllame recipe build` last wrote it.",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm(
+        "Continue serving the current compose.yaml?", default=False
+    ):
+        raise typer.Exit(code=1)
+
+
+def _warn_if_dockerfile_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
+    directory = config.recipe_dir(recipe.handle)
+    dockerfile_path = directory / "Dockerfile"
+    if not dockerfile_path.is_file():
+        return
+    state = build_state.load(directory)
+    if state.dockerfile_hash is None:
+        return
+    if build_state.hash_text(dockerfile_path.read_text()) == state.dockerfile_hash:
+        return
+
+    typer.echo(
+        f"warning: Dockerfile no longer matches the last build for '{recipe.handle}' - "
+        "it looks hand-edited since. The running image won't reflect that change until "
+        f"it's rebuilt - run `fllame recipe build {recipe.handle}` (or `docker build -t "
+        f"{config.local_image_tag(recipe.handle)} {directory}`).",
+        err=True,
+    )
+    if not assume_yes and not typer.confirm(
+        "Continue serving the current image anyway?", default=False
+    ):
+        raise typer.Exit(code=1)
+
+
+def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
+    """Gives a warning when `config set-default-image` changed `compose.yaml` or `Dockerfile` by replacing the image. """
+    directory = config.recipe_dir(recipe.handle)
+    if not build_state.load(directory).image_synced_via_config:
+        return
+    try:
+        compose = yaml.safe_load((directory / "compose.yaml").read_text())
+        image = compose["services"][recipe.handle]["image"]
+    except (yaml.YAMLError, KeyError, TypeError):
+        image = "the configured default image"
+    typer.echo(
+        f"note: default image changed to '{image}' since this was last built - not "
+        "re-validated with a full `fllame recipe build`."
+    )
+
+
 @app.command()
 def serve(
     handle: str,
-    detach: bool = typer.Option(False, "--detach", "-d", help="Run in the background."),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Skip the pre-serve VRAM sanity check's confirmation prompt - "
-        "the warning (if any) is still printed.",
+        help="Skip this command's confirmation prompts (compose.yaml/Dockerfile "
+        "hand-edit and VRAM sanity checks) - any warning is still printed.",
     ),
 ) -> None:
-    """Launch the recipe for HANDLE as a Docker container via `docker
-    compose`, from HANDLE's own self-contained compose folder
-    (`fllame config` aside, entirely independent of every other
-    recipe's).
-
-    Never touches the network, full stop: the model must already be
-    fully present in the HF cache - `fllame model pull <repo_id>`, or
-    `recipe add HANDLE --pull` when the recipe was created, does that
-    separately - and this only ever verifies that via a filesystem
-    check, failing with a clear error if it isn't there rather than
-    falling back to a download of its own. vLLM's own auto-download
-    inside the container is never relied on either.
-
-    Never writes or regenerates `compose.yaml` either - that's `recipe
-    build`'s job alone, so a hand edit to it survives every `serve`.
-    Fails with a clear error pointing at `fllame recipe build HANDLE`
-    if it doesn't exist yet.
-
-    Once the model is confirmed cached, compares a coarse, weights-only
-    VRAM estimate (from the cached files themselves, no network) against
-    this machine's hardware scan and warns (asking to confirm, unless
-    `-y`) if it looks like it won't fit. Not a benchmarked guarantee
-    either way, and silently skipped whenever a confident comparison
-    isn't possible - see `fllame hardware scan`/`fllame model scan` for
-    the same underlying estimate.
-    """
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
+    _require_safe_gpu_memory_utilization(recipe)
+    _warn_if_compose_hand_edited(recipe, assume_yes=yes)
+    _warn_if_dockerfile_hand_edited(recipe, assume_yes=yes)
+    _note_if_image_not_yet_revalidated(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
-    args = ["up", "-d", handle] if detach else ["up", handle]
-    raise typer.Exit(code=_run_compose(handle, *args))
+    code = _run_compose(handle, "up", "-d", handle)
+    if code == 0:
+        directory = config.recipe_dir(handle)
+        build_state.save(directory, build_state.for_current_files(directory))
+        container_name = config.compose_project_name(handle)
+        typer.echo(f"'{handle}' started - follow its logs with: docker logs -f {container_name}")
+        typer.echo(
+            "model loading can take several minutes - an empty or quiet log right "
+            "after this returns is expected, not a problem."
+        )
+    raise typer.Exit(code=code)
 
 
 @app.command()

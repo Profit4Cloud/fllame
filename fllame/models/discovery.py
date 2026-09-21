@@ -9,7 +9,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from huggingface_hub import ModelInfo, list_models
+from huggingface_hub import ModelInfo, list_models, model_info
+from huggingface_hub.errors import HfHubHTTPError
+from requests.exceptions import RequestException
 
 _MULTIPLIER_BILLION_PARAMS = {"T": 1000.0, "B": 1.0, "M": 0.001}
 _SIZE_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)([TBM])", re.IGNORECASE)
@@ -147,13 +149,45 @@ def search_models(
     return ranked[:max_results]
 
 
+def _looks_like_repo_id(query: str) -> bool:
+    """A pasted `org/repo` id doesn't tokenize the way `list_models`'s
+    own free-text search expects - it's one unbroken string full of
+    `/`, `-`, `.`, so a query shaped exactly like a real repo id often
+    matches nothing there even when the repo plainly exists. Narrow on
+    purpose (exactly one `/`, no spaces) so an ordinary multi-word query
+    is never mistaken for one."""
+    return query.count("/") == 1 and " " not in query
+
+
+def _fetch_exact_repo_id(repo_id: str) -> ModelInfo | None:
+    """A direct, authoritative lookup - bypasses the fuzzy search
+    entirely, so it isn't at the mercy of how the Hub's search index
+    happens to tokenize `repo_id`. `None` on anything from "doesn't
+    exist" to a network hiccup: this is a supplementary fallback, not
+    the primary path, so it degrades to whatever the fuzzy search
+    already found rather than failing the whole command."""
+    try:
+        return model_info(repo_id, expand=_EXPAND)
+    except (HfHubHTTPError, RequestException):
+        return None
+
+
 def _fetch_quantization(q: str, *, query: str | None, search_limit: int) -> list[ModelInfo]:
     """Consumed eagerly, not returned as `list_models`'s own lazy
     generator - a lazy result fires its HTTP requests on whichever
     thread iterates it, defeating the point of calling this inside a
     worker thread."""
     search_term = q if query is None else f"{q} {query}"
-    return list(list_models(search=search_term, expand=_EXPAND, limit=search_limit))
+    results = list(list_models(search=search_term, expand=_EXPAND, limit=search_limit))
+    if (
+        query is not None
+        and _looks_like_repo_id(query)
+        and not any(info.id.lower() == query.lower() for info in results)
+    ):
+        direct = _fetch_exact_repo_id(query)
+        if direct is not None:
+            results.append(direct)
+    return results
 
 
 def _matches_quantization(repo_id: str, tags: list[str] | None, quantization: str) -> bool:

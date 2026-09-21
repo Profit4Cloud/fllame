@@ -355,3 +355,68 @@ def test_quantization_searches_run_concurrently(monkeypatch):
     elapsed = time.monotonic() - start
 
     assert elapsed < per_call_delay * 3
+
+
+def test_query_shaped_like_a_repo_id_falls_back_to_a_direct_lookup(monkeypatch):
+    """The fuzzy search finding nothing for an exact `org/repo` query
+    (a real, observed case - the Hub's own search doesn't tokenize a
+    pasted repo id the way it tokenizes ordinary free text) shouldn't
+    be the end of the story - a direct lookup is authoritative."""
+    monkeypatch.setattr(discovery, "list_models", lambda **kwargs: [])
+    exact = _model_with_vram("org/exact-repo-nvfp4", ["nvfp4"], vram_gb=23.4)
+
+    def fake_model_info(repo_id, expand):
+        return exact if repo_id == "org/exact-repo-nvfp4" else None
+
+    monkeypatch.setattr(discovery, "model_info", fake_model_info)
+
+    results = search_models(
+        quantizations=["nvfp4"], max_size_gb=100.0, query="org/exact-repo-nvfp4"
+    )
+
+    assert [c.repo_id for c in results] == ["org/exact-repo-nvfp4"]
+
+
+def test_query_shaped_like_a_repo_id_skips_direct_lookup_when_search_already_found_it(
+    monkeypatch,
+):
+    found = _model_with_vram("org/exact-repo-nvfp4", ["nvfp4"], vram_gb=23.4)
+    monkeypatch.setattr(discovery, "list_models", lambda **kwargs: [found])
+
+    def fail_if_called(repo_id, expand):
+        raise AssertionError("direct lookup should not run when the search already found it")
+
+    monkeypatch.setattr(discovery, "model_info", fail_if_called)
+
+    results = search_models(
+        quantizations=["nvfp4"], max_size_gb=100.0, query="org/exact-repo-nvfp4"
+    )
+
+    assert [c.repo_id for c in results] == ["org/exact-repo-nvfp4"]
+
+
+def test_ordinary_multi_word_query_never_triggers_a_direct_lookup(monkeypatch):
+    monkeypatch.setattr(discovery, "list_models", lambda **kwargs: [])
+
+    def fail_if_called(repo_id, expand):
+        raise AssertionError("a plain free-text query should never look like a repo id")
+
+    monkeypatch.setattr(discovery, "model_info", fail_if_called)
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=100.0, query="qwen 3.8")
+
+    assert results == []
+
+
+def test_direct_lookup_failure_falls_back_to_empty_results(monkeypatch):
+    from huggingface_hub.errors import HfHubHTTPError
+
+    def raise_not_found(repo_id, expand):
+        raise HfHubHTTPError("404 Client Error")
+
+    monkeypatch.setattr(discovery, "list_models", lambda **kwargs: [])
+    monkeypatch.setattr(discovery, "model_info", raise_not_found)
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=100.0, query="org/does-not-exist")
+
+    assert results == []
