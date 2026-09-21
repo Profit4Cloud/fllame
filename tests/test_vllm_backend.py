@@ -6,12 +6,15 @@ from fllame.backends.vllm import (
     cache_volume_host_path,
     default_gpu_memory_utilization,
     generate_dockerfile,
+    gpu_memory_utilization_error,
     max_model_len_shortfall,
     tensor_parallel_size_mismatch_warning,
+    validate_gpu_memory_utilization,
 )
 from fllame.domain.hardware import HardwareProfile
 from fllame.domain.recipe import Recipe
 from fllame.models.architecture import ModelArchitecture
+from fllame.models.sizing import SizingConfig
 
 _NO_GPU = HardwareProfile(
     gpu_name=None, gpu_count=0, vram_gb_per_gpu=None, ram_gb=None, chip_family="none"
@@ -300,6 +303,126 @@ def test_build_service_respects_gpu_memory_utilization_equals_form():
 
     assert service["command"].count("--gpu-memory-utilization=0.75") == 1
     assert "--gpu-memory-utilization" not in service["command"]
+
+
+def test_gpu_memory_utilization_error_none_when_recipe_sets_nothing():
+    recipe = Recipe(handle="demo", command="vllm serve org/demo", image="img")
+
+    assert gpu_memory_utilization_error(recipe, _NO_GPU) is None
+
+
+def test_gpu_memory_utilization_error_none_for_a_safe_explicit_value():
+    recipe = Recipe(
+        handle="demo", command="vllm serve org/demo --gpu-memory-utilization 0.5", image="img"
+    )
+
+    assert gpu_memory_utilization_error(recipe, _NO_GPU) is None
+
+
+def test_gpu_memory_utilization_error_flags_a_value_above_the_configured_ceiling():
+    recipe = Recipe(
+        handle="demo", command="vllm serve org/demo --gpu-memory-utilization 0.99", image="img"
+    )
+
+    error = gpu_memory_utilization_error(recipe, _NO_GPU)
+
+    assert error is not None
+    assert "0.99" in error
+    assert "set-max-gpu-memory-utilization" in error
+
+
+def test_gpu_memory_utilization_error_respects_a_raised_configured_ceiling():
+    recipe = Recipe(
+        handle="demo", command="vllm serve org/demo --gpu-memory-utilization 0.99", image="img"
+    )
+
+    error = gpu_memory_utilization_error(
+        recipe, _NO_GPU, SizingConfig(max_gpu_memory_utilization=0.99)
+    )
+
+    assert error is None
+
+
+def test_gpu_memory_utilization_error_flags_a_non_positive_value():
+    recipe = Recipe(
+        handle="demo", command="vllm serve org/demo --gpu-memory-utilization 0", image="img"
+    )
+
+    assert gpu_memory_utilization_error(recipe, _NO_GPU) is not None
+
+
+def test_gpu_memory_utilization_error_flags_an_unparseable_value():
+    recipe = Recipe(
+        handle="demo",
+        command="vllm serve org/demo --gpu-memory-utilization notanumber",
+        image="img",
+    )
+
+    error = gpu_memory_utilization_error(recipe, _NO_GPU)
+
+    assert error is not None
+    assert "isn't a number" in error
+
+
+def test_build_service_leaves_an_invalid_explicit_value_untouched():
+    """`build_service` never silently overrides an explicit choice -
+    even an unsafe one - `gpu_memory_utilization_error` is what
+    actually stops such a recipe from being built."""
+    backend = VllmServingBackend()
+    recipe = Recipe(
+        handle="demo", command="vllm serve org/demo --gpu-memory-utilization 0.99", image="img"
+    )
+
+    service = backend.build_service(recipe, hf_cache_dir=Path("/cache"), hardware=_NO_GPU)
+
+    assert service["command"].count("--gpu-memory-utilization") == 1
+    assert "0.99" in service["command"]
+
+
+def test_validate_gpu_memory_utilization_none_for_a_safe_value():
+    service = {"command": ["org/demo", "--gpu-memory-utilization", "0.8"]}
+
+    assert validate_gpu_memory_utilization(service) is None
+
+
+def test_validate_gpu_memory_utilization_refuses_when_missing():
+    service = {"command": ["org/demo"]}
+
+    error = validate_gpu_memory_utilization(service)
+
+    assert error is not None
+    assert "no --gpu-memory-utilization" in error
+
+
+def test_validate_gpu_memory_utilization_refuses_when_too_high():
+    service = {"command": ["org/demo", "--gpu-memory-utilization", "1.0"]}
+
+    error = validate_gpu_memory_utilization(service)
+
+    assert error is not None
+    assert "1.0" in error
+
+
+def test_validate_gpu_memory_utilization_refuses_when_unparseable():
+    service = {"command": ["org/demo", "--gpu-memory-utilization", "garbage"]}
+
+    error = validate_gpu_memory_utilization(service)
+
+    assert error is not None
+    assert "isn't a number" in error
+
+
+def test_validate_gpu_memory_utilization_respects_configured_ceiling():
+    service = {"command": ["org/demo", "--gpu-memory-utilization", "0.95"]}
+
+    assert (
+        validate_gpu_memory_utilization(service, SizingConfig(max_gpu_memory_utilization=0.95))
+        is None
+    )
+
+
+def test_validate_gpu_memory_utilization_no_command_at_all_refuses():
+    assert validate_gpu_memory_utilization({}) is not None
 
 
 _DISCRETE_GPU = HardwareProfile(

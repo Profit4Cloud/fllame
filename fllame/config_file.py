@@ -48,3 +48,13 @@ def set_activation_overhead_gb(gb: float) -> None:
     data = _read()
     data["activation_overhead_gb"] = gb
     _write(data)
+
+
+def get_max_gpu_memory_utilization() -> float | None:
+    return _read().get("max_gpu_memory_utilization")
+
+
+def set_max_gpu_memory_utilization(value: float) -> None:
+    data = _read()
+    data["max_gpu_memory_utilization"] = value
+    _write(data)

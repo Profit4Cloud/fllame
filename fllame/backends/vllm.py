@@ -21,11 +21,6 @@ from fllame.models.sizing import (
 _CONTAINER_HF_HOME = "/root/.cache/huggingface"
 
 _GPU_MEMORY_UTILIZATION_FLAG = "--gpu-memory-utilization"
-# Never 1.0 - vLLM given the whole budget leaves no room for driver/CUDA
-# context overhead. Matches vLLM's own out-of-the-box default rather
-# than pushing closer to 1.0, since that default is already the
-# commonly-run-safe figure across discrete GPUs, not just a placeholder.
-_MAX_GPU_MEMORY_UTILIZATION = 0.92
 # Unlike discrete VRAM, unified memory is shared with the OS and every
 # other process on the box - a flat percentage isn't enough headroom on
 # a small system and is needlessly conservative on a large one, so this
@@ -33,22 +28,26 @@ _MAX_GPU_MEMORY_UTILIZATION = 0.92
 _UNIFIED_MEMORY_SYSTEM_RESERVE_GB = 5.0
 
 
-def default_gpu_memory_utilization(profile: HardwareProfile) -> float:
+def default_gpu_memory_utilization(
+    profile: HardwareProfile, sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG
+) -> float:
     """How much of the GPU's memory to hand vLLM when the recipe's own
     command doesn't already set `--gpu-memory-utilization` - left
     unset, vLLM defaults to reserving the memory itself, which on a
     unified-memory chip means the OS as a whole, not just the model,
     starves.
 
-    A discrete GPU gets the flat cap outright. Unified memory instead
-    reserves a fixed amount for the OS/everything else running on the
-    box, still never above the same flat cap (a very large
-    unified-memory system's reserved fraction can otherwise exceed it).
+    A discrete GPU gets `sizing_config.max_gpu_memory_utilization`
+    outright. Unified memory instead reserves a fixed amount for the
+    OS/everything else running on the box, still never above that same
+    ceiling (a very large unified-memory system's reserved fraction can
+    otherwise exceed it).
     """
+    max_utilization = sizing_config.max_gpu_memory_utilization
     if profile.chip_family == "grace_blackwell" and profile.ram_gb:
         reserved_fraction = (profile.ram_gb - _UNIFIED_MEMORY_SYSTEM_RESERVE_GB) / profile.ram_gb
-        return min(_MAX_GPU_MEMORY_UTILIZATION, max(0.0, reserved_fraction))
-    return _MAX_GPU_MEMORY_UTILIZATION
+        return min(max_utilization, max(0.0, reserved_fraction))
+    return max_utilization
 
 
 _MAX_MODEL_LEN_FLAG = "--max-model-len"
@@ -68,15 +67,105 @@ class _MaxModelLenResolution:
     shortfall: str | None
 
 
-def _effective_gpu_memory_utilization(recipe: Recipe, hardware: HardwareProfile) -> float:
-    """Whatever value will actually end up on the vllm serve command
-    line for --gpu-memory-utilization - the recipe's own explicit value
-    if it set one, else the same computed default build_service would
-    inject. The max-model-len budget must be sized against this same
-    number, not recomputed independently, since they're not
-    independent decisions."""
+@dataclass(frozen=True)
+class _GpuMemoryUtilizationResolution:
+    # Always set: the recipe's own valid explicit value, or a computed
+    # default - `--max-model-len` sizing needs *some* number to size
+    # against even when the recipe's own value turns out to be invalid
+    # (0.0 in that case - the error below is what actually stops
+    # anything from running with it).
+    value: float
+    # Non-None only when the recipe's own explicit value is unsafe/
+    # unparseable - what `recipe build` hard-fails on.
+    error: str | None
+
+
+def _resolve_gpu_memory_utilization(
+    recipe: Recipe, hardware: HardwareProfile, sizing_config: SizingConfig
+) -> _GpuMemoryUtilizationResolution:
     explicit = extract_flag_value(recipe.serve_args, _GPU_MEMORY_UTILIZATION_FLAG)
-    return float(explicit) if explicit is not None else default_gpu_memory_utilization(hardware)
+    if explicit is None:
+        return _GpuMemoryUtilizationResolution(
+            value=default_gpu_memory_utilization(hardware, sizing_config), error=None
+        )
+
+    try:
+        parsed = float(explicit)
+    except ValueError:
+        return _GpuMemoryUtilizationResolution(
+            value=0.0,
+            error=(
+                f"'{recipe.handle}' sets --gpu-memory-utilization to '{explicit}', which isn't "
+                "a number - fix it in the recipe's command."
+            ),
+        )
+
+    if parsed <= 0 or parsed > sizing_config.max_gpu_memory_utilization:
+        return _GpuMemoryUtilizationResolution(
+            value=0.0,
+            error=(
+                f"'{recipe.handle}' sets --gpu-memory-utilization to {parsed}, outside the safe "
+                f"range (0, {sizing_config.max_gpu_memory_utilization}] - a value this high can "
+                "let vLLM claim this machine's entire GPU/unified memory pool. Lower it in the "
+                "recipe's command, or raise fllame's own ceiling with `fllame config "
+                "set-max-gpu-memory-utilization` if you're sure it's safe on this hardware."
+            ),
+        )
+
+    return _GpuMemoryUtilizationResolution(value=parsed, error=None)
+
+
+def gpu_memory_utilization_error(
+    recipe: Recipe, hardware: HardwareProfile, sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG
+) -> str | None:
+    """What `recipe build` hard-fails on when the recipe's own explicit
+    --gpu-memory-utilization is unsafe or unparseable - `build_service`
+    itself leaves that value untouched either way (it never silently
+    overrides an explicit choice), so this is the only thing that
+    actually stops such a recipe from being built."""
+    return _resolve_gpu_memory_utilization(recipe, hardware, sizing_config).error
+
+
+def validate_gpu_memory_utilization(
+    service: dict, sizing_config: SizingConfig = DEFAULT_SIZING_CONFIG
+) -> str | None:
+    """None when `service`'s own `command` already carries a safe
+    --gpu-memory-utilization - checked directly against compose.yaml as
+    it stands on disk at `serve` time, independent of whether `recipe
+    build` last wrote it correctly, since compose.yaml is explicitly
+    meant to be hand-editable and this one value is safety-critical
+    enough (an unset or too-high value can let vLLM claim a
+    unified-memory machine's *entire* memory pool, not just crash its
+    own container) to never simply trust because it was there before.
+    """
+    command = [str(token) for token in (service.get("command") or [])]
+    value = extract_flag_value(command, _GPU_MEMORY_UTILIZATION_FLAG)
+
+    if value is None:
+        return (
+            "refusing to serve: compose.yaml has no --gpu-memory-utilization set - an unset "
+            "value can let vLLM claim this machine's entire GPU/unified memory pool. Run "
+            "`fllame recipe build` to regenerate compose.yaml, or set one by hand."
+        )
+
+    try:
+        parsed = float(value)
+    except ValueError:
+        return (
+            f"refusing to serve: compose.yaml's --gpu-memory-utilization ('{value}') isn't a "
+            "number. Fix it by hand, or run `fllame recipe build` to regenerate compose.yaml."
+        )
+
+    if parsed <= 0 or parsed > sizing_config.max_gpu_memory_utilization:
+        return (
+            f"refusing to serve: compose.yaml's --gpu-memory-utilization ({parsed}) is outside "
+            f"the safe range (0, {sizing_config.max_gpu_memory_utilization}] - fix it by hand, "
+            "run `fllame recipe build` to regenerate compose.yaml, or raise fllame's own "
+            "ceiling with `fllame config set-max-gpu-memory-utilization` if you're sure it's "
+            "safe on this hardware."
+        )
+
+    return None
 
 
 def _resolve_max_model_len(
@@ -94,7 +183,7 @@ def _resolve_max_model_len(
     if budget_gb is None:
         return _MaxModelLenResolution(value=None, shortfall=None)
 
-    utilization = _effective_gpu_memory_utilization(recipe, hardware)
+    utilization = _resolve_gpu_memory_utilization(recipe, hardware, sizing_config).value
     total_budget_gb = utilization * budget_gb
     context_length = max_context_length_for_budget(
         arch=arch,
@@ -200,7 +289,7 @@ class VllmServingBackend:
         if not has_flag(serve_args, _GPU_MEMORY_UTILIZATION_FLAG):
             serve_args += [
                 _GPU_MEMORY_UTILIZATION_FLAG,
-                f"{default_gpu_memory_utilization(hardware):.2f}",
+                f"{default_gpu_memory_utilization(hardware, sizing_config):.2f}",
             ]
         max_model_len = _resolve_max_model_len(recipe, hardware, sizing_config).value
         if max_model_len is not None:

@@ -20,8 +20,10 @@ from fllame.backends.vllm import (
     VllmServingBackend,
     cache_volume_host_path,
     generate_dockerfile,
+    gpu_memory_utilization_error,
     max_model_len_shortfall,
     tensor_parallel_size_mismatch_warning,
+    validate_gpu_memory_utilization,
 )
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.hardware import HardwareProfile
@@ -82,6 +84,9 @@ def _resolve_sizing_config() -> SizingConfig:
     overhead_gb = config_file.get_activation_overhead_gb()
     if overhead_gb is not None:
         overrides["activation_overhead_gb"] = overhead_gb
+    max_utilization = config_file.get_max_gpu_memory_utilization()
+    if max_utilization is not None:
+        overrides["max_gpu_memory_utilization"] = max_utilization
     return SizingConfig(**overrides)
 
 
@@ -197,6 +202,17 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     )
     directory = config.recipe_dir(recipe.handle)
     compose_path = directory / "compose.yaml"
+
+    # Checked first, and before the expensive Docker step below: an
+    # explicit --gpu-memory-utilization outside the safe range makes
+    # everything computed from it (including the --max-model-len check
+    # right after) meaningless. compose.yaml already carries whatever
+    # the recipe's own command says verbatim either way - build_service
+    # never silently overrides an explicit value.
+    util_error = gpu_memory_utilization_error(recipe, hardware, sizing_config)
+    if util_error is not None:
+        typer.echo(util_error, err=True)
+        raise typer.Exit(code=1)
 
     # Checked after compose.yaml is written (build_service's own
     # shortfall detection already left it without --max-model-len in
@@ -667,6 +683,15 @@ def config_show() -> None:
             f"activation_overhead_gb: (unset - falls back to {defaults.activation_overhead_gb})"
         )
 
+    max_utilization = config_file.get_max_gpu_memory_utilization()
+    if max_utilization is not None:
+        typer.echo(f"max_gpu_memory_utilization: {max_utilization}")
+    else:
+        typer.echo(
+            "max_gpu_memory_utilization: (unset - falls back to "
+            f"{defaults.max_gpu_memory_utilization})"
+        )
+
 
 def _compose_files_using_image(image: str) -> list[Path]:
     """Recipes whose `compose.yaml` service `image` is an exact match -
@@ -794,6 +819,25 @@ def config_set_activation_overhead(gb: float) -> None:
         raise typer.Exit(code=1)
     config_file.set_activation_overhead_gb(gb)
     typer.echo(f"activation/overhead allowance set to {gb} GB")
+
+
+@config_app.command("set-max-gpu-memory-utilization")
+def config_set_max_gpu_memory_utilization(value: float) -> None:
+    """Set the ceiling `--gpu-memory-utilization` may never exceed.
+
+    Enforced two ways: `recipe build` computes its own default no
+    higher than this, and refuses to build a recipe whose own explicit
+    `--gpu-memory-utilization` exceeds it; `serve` refuses to run a
+    compose.yaml whose value exceeds it too, regardless of how it got
+    there. Raise this only if you're sure a higher value is safe on
+    this specific hardware - it exists because leaving vLLM unbounded
+    can let it claim a unified-memory machine's entire memory pool.
+    """
+    if value <= 0 or value >= 1.0:
+        typer.echo("max GPU memory utilization must be between 0 and 1 (exclusive)", err=True)
+        raise typer.Exit(code=1)
+    config_file.set_max_gpu_memory_utilization(value)
+    typer.echo(f"max GPU memory utilization set to {value}")
 
 
 @hardware_app.command("scan")
@@ -1141,6 +1185,30 @@ def _warn_if_cache_location_changed(
         raise typer.Exit(code=1)
 
 
+def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
+    """A hard block, never skippable with `-y`: reads compose.yaml's
+    `command` directly off disk and refuses to serve at all if it has
+    no --gpu-memory-utilization, or an unsafe one - regardless of how
+    it got that way (an old compose.yaml from before this existed, an
+    interrupted build, or a hand edit). `recipe build` getting this
+    right doesn't help if the file `serve` actually runs doesn't have
+    it, so this is checked independently every time, not just once."""
+    compose_path = config.recipe_dir(recipe.handle) / "compose.yaml"
+    try:
+        compose = yaml.safe_load(compose_path.read_text())
+        service = compose["services"][recipe.handle]
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError, OSError):
+        # compose.yaml exists (_require_compose_built already checked)
+        # but isn't in a shape this can even inspect - let the actual
+        # `docker compose up` call surface whatever is wrong with it.
+        return
+
+    error = validate_gpu_memory_utilization(service, _resolve_sizing_config())
+    if error is not None:
+        typer.echo(error, err=True)
+        raise typer.Exit(code=1)
+
+
 def _warn_if_compose_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None:
     """Case (a): `compose.yaml` no longer matches what the last
     successful `recipe build` wrote - skipped when there's no recorded
@@ -1246,6 +1314,15 @@ def serve(
     Fails with a clear error pointing at `fllame recipe build HANDLE`
     if it doesn't exist yet.
 
+    Always refuses outright (no `-y` override) if compose.yaml's own
+    `command` has no `--gpu-memory-utilization`, or one outside the
+    configured safe range (`fllame config set-max-gpu-memory-utilization`)
+    - checked fresh against the file on disk every time, since an
+    unset or too-high value can let vLLM claim this machine's entire
+    GPU/unified memory pool, and compose.yaml is explicitly meant to be
+    hand-editable enough that `recipe build` having gotten it right
+    once isn't something `serve` can just assume still holds.
+
     Once the model is confirmed cached, compares a coarse, weights-only
     VRAM estimate (from the cached files themselves, no network) against
     this machine's hardware scan and warns (asking to confirm, unless
@@ -1273,6 +1350,7 @@ def serve(
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
+    _require_safe_gpu_memory_utilization(recipe)
     _warn_if_compose_hand_edited(recipe, assume_yes=yes)
     _warn_if_dockerfile_hand_edited(recipe, assume_yes=yes)
     _note_if_image_not_yet_revalidated(recipe)

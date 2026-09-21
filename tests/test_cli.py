@@ -1941,6 +1941,128 @@ def test_recipe_build_respects_recipes_own_gpu_memory_utilization(tmp_path: Path
     assert "0.92" not in compose_text
 
 
+def test_recipe_build_refuses_an_unsafe_explicit_gpu_memory_utilization(
+    tmp_path: Path, monkeypatch
+):
+    """Unlike --max-model-len, this check runs before the Docker step
+    and doesn't depend on the model being cached with a recognized
+    architecture - an unsafe --gpu-memory-utilization is wrong on its
+    own terms."""
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --gpu-memory-utilization 0.99\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "0.99" in result.output
+    assert "set-max-gpu-memory-utilization" in result.output
+    compose_text = (config.recipe_dir("demo") / "compose.yaml").read_text()
+    assert "0.99" in compose_text  # written verbatim, never silently replaced
+    assert docker_calls == []
+
+
+def test_recipe_build_allows_an_explicit_value_within_a_raised_ceiling(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    directory = tmp_path / "demo"
+    directory.mkdir(parents=True)
+    (directory / "recipe.yaml").write_text(
+        "image: vllm/vllm-openai:v0.27.1\n"
+        "command: vllm serve org/demo --gpu-memory-utilization 0.97\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0.97"])
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+
+
+def test_config_set_max_gpu_memory_utilization(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    set_result = runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0.85"])
+    show_result = runner.invoke(app, ["config", "show"])
+
+    assert set_result.exit_code == 0
+    assert show_result.exit_code == 0
+    assert "max_gpu_memory_utilization: 0.85" in show_result.stdout
+
+
+def test_config_set_max_gpu_memory_utilization_rejects_out_of_range(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    assert runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "0"]).exit_code == 1
+    assert runner.invoke(app, ["config", "set-max-gpu-memory-utilization", "1"]).exit_code == 1
+
+
+def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(
+    tmp_path: Path, monkeypatch
+):
+    """The exact scenario this check exists for: a compose.yaml that
+    somehow ended up without --gpu-memory-utilization (hand-edited, or
+    left over from before fllame always injected one) must never be
+    served - regardless of -y."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = config.recipe_dir("demo") / "compose.yaml"
+    compose_path.write_text(compose_path.read_text().replace("--gpu-memory-utilization", "--foo"))
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])
+
+    assert result.exit_code == 1
+    assert "no --gpu-memory-utilization" in result.output
+    assert docker_calls == []
+
+
+def test_serve_refuses_when_compose_yaml_gpu_memory_utilization_too_high(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    compose_path = config.recipe_dir("demo") / "compose.yaml"
+    compose_path.write_text(compose_path.read_text().replace("0.92", "1.0"))
+    docker_calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command: docker_calls.append(command))
+
+    result = runner.invoke(app, ["serve", "demo", "--yes"])
+
+    assert result.exit_code == 1
+    assert "1.0" in result.output
+    assert docker_calls == []
+
+
+def test_serve_proceeds_when_compose_yaml_gpu_memory_utilization_is_safe(
+    tmp_path: Path, monkeypatch
+):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+
+    result = runner.invoke(app, ["serve", "demo"])
+
+    assert result.exit_code == 0
+    assert captured["command"][-3:] == ["up", "-d", "demo"]
+
+
 _DENSE_ARCH = ModelArchitecture(
     num_layers=32, num_kv_heads=8, head_dim=128, max_context_length=131072
 )

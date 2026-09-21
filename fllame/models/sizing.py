@@ -30,6 +30,14 @@ _MIN_USABLE_MAX_MODEL_LEN = 4096
 # Coarse fixed allowance for activation memory and other overhead
 # beyond weights + KV cache, deliberately not modeled per-architecture.
 _ACTIVATION_OVERHEAD_GB = 2.0
+# Never 1.0 - vLLM given the whole budget leaves no room for driver/CUDA
+# context overhead. Matches vLLM's own out-of-the-box default rather
+# than pushing closer to 1.0, since that default is already the
+# commonly-run-safe figure across discrete GPUs, not just a placeholder.
+# Also the hard ceiling an explicit recipe --gpu-memory-utilization must
+# not exceed - recipe build refuses rather than trusting a higher value
+# blindly.
+_MAX_GPU_MEMORY_UTILIZATION = 0.92
 
 _BYTES_PER_GB = 1e9
 # fp16/bf16 KV cache dtype assumed: 2 bytes per element, times 2 for
@@ -40,13 +48,13 @@ _KV_TENSORS_PER_TOKEN = 2
 
 @dataclass(frozen=True)
 class SizingConfig:
-    """The two `--max-model-len`-sizing numbers that are guesses rather
-    than physical facts (unlike weights/architecture/hardware) - user-
-    tunable via `fllame config`, defaulting to this module's own
-    picks."""
+    """Numbers that are guesses/policy rather than physical facts
+    (unlike weights/architecture/hardware) - user-tunable via `fllame
+    config`, defaulting to this module's own picks."""
 
     min_usable_max_model_len: int = _MIN_USABLE_MAX_MODEL_LEN
     activation_overhead_gb: float = _ACTIVATION_OVERHEAD_GB
+    max_gpu_memory_utilization: float = _MAX_GPU_MEMORY_UTILIZATION
 
 
 # A single shared instance for other modules' default parameter values -
