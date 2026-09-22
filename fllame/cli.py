@@ -313,12 +313,13 @@ def _format_ports(publishers: list[dict]) -> str:
 
 
 def _compose_ps_json(handle: str) -> tuple[list[dict], int]:
-    """HANDLE's containers via `docker compose ps --format json` - an
-    empty list and the failing exit code if the command itself failed
-    (its stderr is echoed either way)."""
+    """HANDLE's containers via `docker compose ps --all --format json`
+    (`--all` so a stopped-but-not-removed container still shows up, not
+    just a running one) - an empty list and the failing exit code if
+    the command itself failed (its stderr is echoed either way)."""
     try:
         result = subprocess.run(
-            ["docker", *_compose_args(handle, "ps", "--format", "json")],
+            ["docker", *_compose_args(handle, "ps", "--all", "--format", "json")],
             capture_output=True,
             text=True,
         )
@@ -1254,12 +1255,46 @@ def serve(
     raise typer.Exit(code=code)
 
 
+def _status_row_from_recipe(handle: str, recipe: Recipe) -> list[str]:
+    """A recipe with no `compose.yaml` yet - there's nothing built to
+    read, so every column but STATUS comes straight from recipe.yaml."""
+    return [
+        handle,
+        config.compose_project_name(handle),
+        _resolve_image(recipe).image,
+        "not built",
+        f"{recipe.port}:{recipe.port}",
+    ]
+
+
+def _status_row_from_compose(
+    handle: str, recipe: Recipe, compose_path: Path, *, status: str = "not running"
+) -> list[str]:
+    """A built recipe with no confirmed container (never `serve`d, or
+    `docker compose ps` itself failed) - compose.yaml's own `image`
+    (the local build tag for a preinstall recipe, same as `serve`
+    would actually run) stands in for docker's."""
+    try:
+        existing = yaml.safe_load(compose_path.read_text())
+        image = existing["services"][handle]["image"]
+    except (yaml.YAMLError, KeyError, TypeError):
+        image = _resolve_image(recipe).image
+    return [
+        handle,
+        config.compose_project_name(handle),
+        image,
+        status,
+        f"{recipe.port}:{recipe.port}",
+    ]
+
+
 @app.command()
 def status() -> None:
-    """Show every recipe's container in one table, via `docker compose
-    ps --format json` (each recipe is still its own compose project).
-    Reads whatever `compose.yaml` is already on disk - never
-    regenerates it."""
+    """Show every recipe in one table - built or not, running or not.
+    A container's own row comes from `docker compose ps --all --format
+    json` (each recipe is still its own compose project); everything
+    else is read straight from recipe.yaml/compose.yaml. Never
+    regenerates compose.yaml."""
     store = _recipe_store()
     handles = store.list_handles()
     if not handles:
@@ -1268,20 +1303,25 @@ def status() -> None:
 
     rows = []
     exit_code = 0
-    queried_any = False
     for handle in handles:
         try:
-            store.load(handle)
+            recipe = store.load(handle)
         except RecipeError as e:
             typer.echo(f"warning: {e}", err=True)
             continue
-        if not (config.recipe_dir(handle) / "compose.yaml").is_file():
-            typer.echo(f"'{handle}': not built - run `fllame recipe build {handle}`")
+
+        compose_path = config.recipe_dir(handle) / "compose.yaml"
+        if not compose_path.is_file():
+            rows.append(_status_row_from_recipe(handle, recipe))
             continue
+
         containers, code = _compose_ps_json(handle)
-        queried_any = True
         if code != 0:
             exit_code = code
+            rows.append(_status_row_from_compose(handle, recipe, compose_path, status="unknown"))
+            continue
+        if not containers:
+            rows.append(_status_row_from_compose(handle, recipe, compose_path))
             continue
         for container in containers:
             rows.append(
@@ -1289,14 +1329,13 @@ def status() -> None:
                     handle,
                     container.get("Name", ""),
                     container.get("Image", ""),
-                    container.get("Service", ""),
                     container.get("Status", ""),
                     _format_ports(container.get("Publishers") or []),
                 ]
             )
 
-    if queried_any:
-        _print_table(["RECIPE", "NAME", "IMAGE", "SERVICE", "STATUS", "PORTS"], rows)
+    if rows:
+        _print_table(["RECIPE", "NAME", "IMAGE", "STATUS", "PORTS"], rows)
     raise typer.Exit(code=exit_code)
 
 

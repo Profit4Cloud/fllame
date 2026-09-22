@@ -2479,13 +2479,14 @@ def test_status_invokes_docker_compose_ps_with_json_format(tmp_path: Path, monke
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert captured["command"][-3:] == ["ps", "--format", "json"]
+    assert captured["command"][-4:] == ["ps", "--all", "--format", "json"]
 
 
 def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch):
     """One shared table, RECIPE first - not a separate `docker compose
-    ps` table per recipe. COMMAND and CREATED are dropped since the
-    former is always truncated and the latter rarely matters here."""
+    ps` table per recipe. COMMAND, CREATED, and SERVICE (always the
+    same as RECIPE) are dropped. A recipe with no container at all
+    still gets a row, filled in from compose.yaml instead of docker."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path, handle="demo-a")
     _write_recipe(tmp_path, handle="demo-b")
@@ -2532,14 +2533,20 @@ def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch
     lines = result.output.splitlines()
     header_lines = [line for line in lines if line.startswith("RECIPE")]
     assert len(header_lines) == 1
-    assert header_lines[0].split() == ["RECIPE", "NAME", "IMAGE", "SERVICE", "STATUS", "PORTS"]
+    assert header_lines[0].split() == ["RECIPE", "NAME", "IMAGE", "STATUS", "PORTS"]
     assert "COMMAND" not in result.output
     assert "CREATED" not in result.output
+    # demo-a: a live container, straight from docker.
     assert "demo-a" in result.output
     assert "fllame-demo-a" in result.output
-    assert "vllm/vllm-openai:v0.27.1" in result.output
     assert "Up 5 minutes" in result.output
     assert "0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp" in result.output
+    # demo-b: built, but no container yet - filled in from compose.yaml instead.
+    assert "demo-b" in result.output
+    assert "fllame-demo-b" in result.output
+    assert "not running" in result.output
+    assert "vllm/vllm-openai:v0.27.1" in result.output
+    assert "8000:8000" in result.output
 
 
 def test_status_no_recipes(tmp_path: Path, monkeypatch):
@@ -2576,7 +2583,8 @@ def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
 
 def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, monkeypatch):
     """`status` never regenerates `compose.yaml` - a recipe that hasn't
-    been built yet is reported, not silently built or skipped."""
+    been built yet still gets a row, filled in from recipe.yaml alone,
+    without ever invoking docker."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     called = []
@@ -2586,9 +2594,38 @@ def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, mo
 
     assert result.exit_code == 0
     assert "demo" in result.output
-    assert "fllame recipe build" in result.output
+    assert "not built" in result.output
+    assert "vllm/vllm-openai:v0.27.1" in result.output
+    assert "8000:8000" in result.output
     assert called == []
-    assert called == []
+
+
+def test_status_still_shows_a_built_recipe_when_docker_compose_ps_fails(
+    tmp_path: Path, monkeypatch
+):
+    """A recipe stays in the table even when `docker compose ps` itself
+    errors (e.g. the daemon is unreachable) - dropping it would make a
+    built recipe disappear while an unbuilt one still shows, which is
+    backwards. STATUS says plainly that it couldn't be confirmed."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+    class _FailedProcess:
+        returncode = 1
+        stdout = ""
+        stderr = "Cannot connect to the Docker daemon\n"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: _FailedProcess())
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "Cannot connect to the Docker daemon" in result.output
+    assert "demo" in result.output
+    assert "unknown" in result.output
+    assert "vllm/vllm-openai:v0.27.1" in result.output
 
 
 def test_stop_invokes_docker_compose_stop(tmp_path: Path, monkeypatch):
