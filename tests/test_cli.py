@@ -1579,9 +1579,10 @@ def test_config_set_default_image_pulls_once_on_success(tmp_path: Path, monkeypa
     assert pulls == [["docker", "pull", "vllm/vllm-openai:v0.27.1"]]
 
 
-def test_config_set_default_image_pull_failure_still_keeps_the_file_update(
-    tmp_path: Path, monkeypatch
-):
+def test_config_set_default_image_pull_failure_changes_nothing(tmp_path: Path, monkeypatch):
+    """The pull is a precondition, not an afterthought - a failure
+    leaves both the persisted default and every file untouched, and
+    never even reaches the affected-file search or its prompt."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
@@ -1592,27 +1593,29 @@ def test_config_set_default_image_pull_failure_still_keeps_the_file_update(
 
     monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
 
-    result = runner.invoke(
-        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
-    )
+    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "couldn't pull" in result.output
-    # The config change and the text-replace both still applied.
-    assert "image: vllm/vllm-openai:v0.27.1" in compose_path.read_text()
+    assert "file(s) still use" not in result.output
+    show_result = runner.invoke(app, ["config", "show"])
+    assert "default_image: vllm/vllm-openai:v0.26.0" in show_result.stdout
+    assert "image: vllm/vllm-openai:v0.26.0" in compose_path.read_text()
 
 
-def test_config_set_default_image_pull_not_attempted_when_no_files_affected(
-    tmp_path: Path, monkeypatch
-):
+def test_config_set_default_image_pulls_even_with_no_recipes(tmp_path: Path, monkeypatch):
+    """The pull validates the image itself, independent of whether any
+    recipe would even be affected by the change."""
     _isolate(tmp_path, monkeypatch)
     pulls = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: pulls.append(command))
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda command: pulls.append(command) or _FakeCompletedProcess()
+    )
 
     result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
     assert result.exit_code == 0
-    assert pulls == []
+    assert pulls == [["docker", "pull", "vllm/vllm-openai:v0.27.1"]]
 
 
 def test_serve_always_runs_detached(tmp_path: Path, monkeypatch):
