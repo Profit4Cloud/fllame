@@ -58,8 +58,9 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 BACKEND = VllmServingBackend()
 
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
-# If --gpu-memory-utilization is not set, the vLLM will use all available GPU memory, possibly crashing unified systems.
-# Therefore, it is always injected to compose.yaml, either explicitly from the recipe, or the default below.
+# If --gpu-memory-utilization is not set, vLLM will use all available GPU memory, possibly
+# crashing unified systems. Therefore, it is always injected into compose.yaml, either
+# explicitly from the recipe, or the default below.
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
 
@@ -158,8 +159,9 @@ def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
 
 def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     """Builds the recipe by creating a `compose.yaml` (and possibly a `Dockerfile`) in its folder.
-    Validates the result with `docker build` (a recipe with `preinstall`) or `docker compose pull` (one without).
-    This ensures that network access is needed during build time only, and not during serve time.
+    Validates the result with `docker build` (a recipe with `preinstall`) or `docker compose
+    pull` (one without). This ensures that network access is needed during build time only,
+    and not during serve time.
     """
     _require_model_cached(recipe)
     # Hardware scanned for validing the tensor-parallel-size later.
@@ -278,7 +280,7 @@ def recipe_list() -> None:
 
 
 @recipe_app.command("show")
-def recipe_show(handle: str) -> None:
+def recipe_show(handle: str = typer.Argument(..., show_default=False)) -> None:
     """Print HANDLE's resolved recipe - the same shape as the recipe
     file, with `image` filled in from fllame's configured default when
     the recipe doesn't pin its own. `command` is the last line, ready to
@@ -349,6 +351,7 @@ def _replace_uv_pip_install(preinstall: list[str]) -> tuple[list[str], bool]:
 def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
         None,
+        show_default=False,
         help="Optionally, the whole `vllm serve <repo_id> ...` line as trailing "
         "arguments instead of the guided dialogue - e.g. `fllame recipe add vllm "
         "serve org/repo --max-model-len 8192`. A quick one-liner only - env vars/"
@@ -481,7 +484,7 @@ def recipe_add(
 
 @recipe_app.command("build")
 def recipe_build(
-    handle: str,
+    handle: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -491,9 +494,10 @@ def recipe_build(
     ),
 ) -> None:
     """Builds the recipe by creating a compose.yaml (and possibly a Dockerfile) in its folder.
-    Fails with a clear error if the model isn't fully downloaded yet..
-    Validates the result with docker build (a recipe with preinstall) or docker compose pull (one without). 
-    This ensures that network access is needed during build time only, and not during serve time.
+    Fails with a clear error if the model isn't fully downloaded yet.
+    Validates the result with docker build (a recipe with preinstall) or docker compose pull
+    (one without). This ensures that network access is needed during build time only, and not
+    during serve time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
 
@@ -516,7 +520,7 @@ def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
 
 
 @recipe_app.command("edit")
-def recipe_edit(handle: str) -> None:
+def recipe_edit(handle: str = typer.Argument(..., show_default=False)) -> None:
     """Open HANDLE's recipe file in $EDITOR, then re-validate it.
 
     Lenient about how the `command` block ends up formatted (missing
@@ -544,10 +548,15 @@ def recipe_edit(handle: str) -> None:
             return
 
         typer.echo(f"'{handle}' is no longer a valid recipe: {result}", err=True)
-        if typer.confirm(
-            "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
-            default=True,
-        ):
+        try:
+            reopen = typer.confirm(
+                "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
+                default=True,
+            )
+        except click.exceptions.Abort:
+            reopen = False
+
+        if reopen:
             click.edit(filename=str(path))
             continue
 
@@ -558,7 +567,7 @@ def recipe_edit(handle: str) -> None:
 
 @recipe_app.command("remove")
 def recipe_remove(
-    handle: str,
+    handle: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
     """Delete HANDLE's whole folder - its recipe file and its generated
@@ -631,7 +640,7 @@ def _replace_image_in_compose_file(path: Path, old_image: str, new_image: str) -
 
 
 @config_app.command("set-default-image")
-def config_set_default_image(image: str) -> None:
+def config_set_default_image(image: str = typer.Argument(..., show_default=False)) -> None:
     """Set the Docker image recipes fall back to when they don't pin
     their own.
 
@@ -701,7 +710,9 @@ def config_set_default_image(image: str) -> None:
 
 
 @config_app.command("set-default-gpu-memory-utilization")
-def config_set_default_gpu_memory_utilization(value: float) -> None:
+def config_set_default_gpu_memory_utilization(
+    value: float = typer.Argument(..., show_default=False),
+) -> None:
     """Set the `--gpu-memory-utilization` value `recipe build` injects
     when a recipe's own command doesn't already set one.
 
@@ -760,7 +771,7 @@ def _friendly_permission_error(e: PermissionError) -> str:
 
 
 @model_app.command("pull")
-def model_pull(repo_id: str) -> None:
+def model_pull(repo_id: str = typer.Argument(..., show_default=False)) -> None:
     """Download REPO_ID into the Hugging Face cache.
 
     Takes a Hugging Face repo_id directly (e.g. `org/repo`), not a
@@ -787,6 +798,7 @@ def model_pull(repo_id: str) -> None:
 def model_update(
     repo_id: str | None = typer.Argument(
         None,
+        show_default=False,
         help="Check only REPO_ID; omit to check every model currently in "
         "the local cache.",
     ),
@@ -1127,7 +1139,8 @@ def _warn_if_dockerfile_hand_edited(recipe: Recipe, *, assume_yes: bool) -> None
 
 
 def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
-    """Gives a warning when `config set-default-image` changed `compose.yaml` or `Dockerfile` by replacing the image. """
+    """Gives a warning when `config set-default-image` changed `compose.yaml` or `Dockerfile`
+    by replacing the image."""
     directory = config.recipe_dir(recipe.handle)
     if not build_state.load(directory).image_synced_via_config:
         return
@@ -1144,7 +1157,7 @@ def _note_if_image_not_yet_revalidated(recipe: Recipe) -> None:
 
 @app.command()
 def serve(
-    handle: str,
+    handle: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -1153,6 +1166,9 @@ def serve(
         "hand-edit and VRAM sanity checks) - any warning is still printed.",
     ),
 ) -> None:
+    """Launch HANDLE's recipe via `docker compose up -d`. Reads whatever
+    `compose.yaml` is already on disk - never regenerates it - and never
+    touches the network."""
     recipe = _load_or_exit(handle)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
@@ -1204,7 +1220,7 @@ def status() -> None:
 
 
 @app.command()
-def stop(handle: str) -> None:
+def stop(handle: str = typer.Argument(..., show_default=False)) -> None:
     """Stop HANDLE's container via `docker compose stop`. Reads
     whatever `compose.yaml` is already on disk - never regenerates it."""
     recipe = _load_or_exit(handle)

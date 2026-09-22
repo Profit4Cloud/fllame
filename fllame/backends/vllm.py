@@ -20,7 +20,8 @@ def validate_gpu_memory_utilization(service: dict) -> str | None:
 
     if value is None:
         return (
-            "compose.yaml has no --gpu-memory-utilization set, which will cause vLLM to use all VRAM, possibly causing a crash. "
+            "compose.yaml has no --gpu-memory-utilization set, which will cause vLLM to use "
+            "all VRAM, possibly causing a crash. "
             "Run `fllame recipe build` to regenerate compose.yaml, or set it by hand."
         )
 

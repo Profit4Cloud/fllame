@@ -453,6 +453,31 @@ def test_recipe_edit_reports_now_invalid_recipe_and_reverts_when_declined(
     assert (tmp_path / "demo" / "recipe.yaml").read_text() == original
 
 
+def test_recipe_edit_reverts_when_confirm_is_aborted(tmp_path: Path, monkeypatch):
+    """A closed stdin (Ctrl-D) or Ctrl-C on the reopen-or-revert prompt
+    raises click.exceptions.Abort - this must still revert the file, not
+    leave the now-invalid recipe.yaml on disk with nothing to undo it."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    original = (tmp_path / "demo" / "recipe.yaml").read_text()
+
+    def fake_edit(filename):
+        Path(filename).write_text("image: vllm/vllm-openai:v0.27.1\n")  # command now missing
+        return None
+
+    def fake_confirm(*args, **kwargs):
+        raise cli.click.exceptions.Abort()
+
+    monkeypatch.setattr(cli.click, "edit", fake_edit)
+    monkeypatch.setattr(cli.typer, "confirm", fake_confirm)
+
+    result = runner.invoke(app, ["recipe", "edit", "demo"])
+
+    assert result.exit_code == 1
+    assert "reverted" in result.output
+    assert (tmp_path / "demo" / "recipe.yaml").read_text() == original
+
+
 def test_recipe_edit_reopens_editor_and_succeeds_when_accepted(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
