@@ -2600,6 +2600,40 @@ def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, mo
     assert called == []
 
 
+def test_status_falls_back_to_the_configured_port_for_a_stopped_container(
+    tmp_path: Path, monkeypatch
+):
+    """A stopped container reports no live port bindings at all (empty
+    `Publishers`), unlike a running one - PORTS should still show the
+    configured port instead of going blank."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        _fake_compose_ps_json(
+            {
+                "demo": [
+                    {
+                        "Name": "fllame-demo",
+                        "Image": "vllm/vllm-openai:v0.27.1",
+                        "Status": "Exited (0) 12 days ago",
+                        "Publishers": [],
+                    }
+                ]
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Exited (0) 12 days ago" in result.output
+    assert "8000:8000" in result.output
+
+
 def test_status_still_shows_a_built_recipe_when_docker_compose_ps_fails(
     tmp_path: Path, monkeypatch
 ):

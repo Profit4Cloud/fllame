@@ -1324,13 +1324,17 @@ def status() -> None:
             rows.append(_status_row_from_compose(handle, recipe, compose_path))
             continue
         for container in containers:
+            # A stopped container reports no live port bindings at all
+            # - fall back to the configured port rather than leaving
+            # this blank.
+            ports = _format_ports(container.get("Publishers") or [])
             rows.append(
                 [
                     handle,
                     container.get("Name", ""),
                     container.get("Image", ""),
                     container.get("Status", ""),
-                    _format_ports(container.get("Publishers") or []),
+                    ports or f"{recipe.port}:{recipe.port}",
                 ]
             )
 
