@@ -675,12 +675,7 @@ def config_set_default_image(image: str = typer.Argument(..., show_default=False
 
     typer.echo(f"pulling '{image}' to confirm it resolves ...")
     if _run_docker("pull", image) != 0:
-        typer.echo(
-            f"couldn't pull '{image}' - see the `docker pull` output above for the "
-            "underlying error (a bad image tag, an unreachable registry, or missing "
-            "credentials are the usual causes). The default image was not changed.",
-            err=True,
-        )
+        typer.echo("Failed to pull image.", err=True)
         raise typer.Exit(code=1)
 
     old_default = config_file.get_default_image()

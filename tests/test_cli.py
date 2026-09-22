@@ -1596,7 +1596,7 @@ def test_config_set_default_image_pull_failure_changes_nothing(tmp_path: Path, m
     result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
 
     assert result.exit_code == 1
-    assert "couldn't pull" in result.output
+    assert "Failed to pull image" in result.output
     assert "file(s) still use" not in result.output
     show_result = runner.invoke(app, ["config", "show"])
     assert "default_image: vllm/vllm-openai:v0.26.0" in show_result.stdout
