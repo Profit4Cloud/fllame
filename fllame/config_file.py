@@ -6,6 +6,11 @@ import yaml
 
 from fllame import config
 
+# If --gpu-memory-utilization is not set, vLLM will use all available GPU memory, possibly
+# crashing unified systems. Therefore, it is always injected into compose.yaml, either
+# explicitly from the recipe, or the default below - so this setting is never left unset.
+_DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
+
 
 def _read() -> dict:
     path = config.config_file_path()
@@ -30,8 +35,8 @@ def set_default_image(image: str) -> None:
     _write(data)
 
 
-def get_default_gpu_memory_utilization() -> float | None:
-    return _read().get("default_gpu_memory_utilization")
+def get_default_gpu_memory_utilization() -> float:
+    return _read().get("default_gpu_memory_utilization", _DEFAULT_GPU_MEMORY_UTILIZATION)
 
 
 def set_default_gpu_memory_utilization(value: float) -> None:

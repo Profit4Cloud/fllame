@@ -688,13 +688,17 @@ def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
     assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
 
 
-def test_config_show_default_gpu_memory_utilization_unset(tmp_path: Path, monkeypatch):
+def test_config_show_default_gpu_memory_utilization_defaults_to_0_92(
+    tmp_path: Path, monkeypatch
+):
+    """Unlike default_image, this setting is never shown as unset -
+    it always has a concrete value, 0.92 until explicitly changed."""
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    assert "default_gpu_memory_utilization: (unset - falls back to 0.92)" in result.stdout
+    assert "default_gpu_memory_utilization: 0.92" in result.stdout
 
 
 def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):

@@ -75,10 +75,6 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 BACKEND = VllmServingBackend()
 
 _FALLBACK_IMAGE = "vllm/vllm-openai:latest"
-# If --gpu-memory-utilization is not set, vLLM will use all available GPU memory, possibly
-# crashing unified systems. Therefore, it is always injected into compose.yaml, either
-# explicitly from the recipe, or the default below.
-_DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
 
 def _recipe_store() -> RecipeStore:
@@ -89,11 +85,6 @@ def _resolve_image(recipe: Recipe) -> Recipe:
     if recipe.image is not None:
         return recipe
     return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
-
-
-def _resolve_default_gpu_memory_utilization() -> float:
-    value = config_file.get_default_gpu_memory_utilization()
-    return value if value is not None else _DEFAULT_GPU_MEMORY_UTILIZATION
 
 
 def _load_or_exit(handle: str) -> Recipe:
@@ -183,7 +174,7 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     _require_model_cached(recipe)
     # Hardware scanned for validing the tensor-parallel-size later.
     hardware = scan_hardware()
-    default_gpu_memory_utilization = _resolve_default_gpu_memory_utilization()
+    default_gpu_memory_utilization = config_file.get_default_gpu_memory_utilization()
     _warn_if_cache_location_changed(
         recipe, assume_yes=assume_yes, default_gpu_memory_utilization=default_gpu_memory_utilization
     )
@@ -620,14 +611,9 @@ def config_show() -> None:
     else:
         typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
 
-    default_utilization = config_file.get_default_gpu_memory_utilization()
-    if default_utilization is not None:
-        typer.echo(f"default_gpu_memory_utilization: {default_utilization}")
-    else:
-        typer.echo(
-            "default_gpu_memory_utilization: (unset - falls back to "
-            f"{_DEFAULT_GPU_MEMORY_UTILIZATION})"
-        )
+    typer.echo(
+        f"default_gpu_memory_utilization: {config_file.get_default_gpu_memory_utilization()}"
+    )
 
 
 def _compose_files_using_image(image: str) -> list[Path]:
