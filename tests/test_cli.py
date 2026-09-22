@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -54,7 +55,7 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     # tests never need a real docker daemon - tests exercising the
     # invoked command or a failure override `cli.subprocess.run`
     # themselves afterward.
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FakeCompletedProcess())
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: _FakeCompletedProcess())
 
 
 def _dialogue_input(*parts: str) -> str:
@@ -68,10 +69,12 @@ def _dialogue_input(*parts: str) -> str:
 
 class _FakeCompletedProcess:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
 def _capturing_run(captured: dict):
-    def fake_run(command):
+    def fake_run(command, **kwargs):
         captured["command"] = command
         return _FakeCompletedProcess()
 
@@ -79,8 +82,31 @@ def _capturing_run(captured: dict):
 
 
 def _capturing_run_all(commands: list):
-    def fake_run(command):
+    def fake_run(command, **kwargs):
         commands.append(command)
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
+class _FakeSubprocessResult:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _fake_compose_ps_json(containers_by_handle: dict[str, list[dict]]):
+    """A `cli.subprocess.run` replacement that answers `docker compose
+    ps --format json` for HANDLE from `containers_by_handle`, and
+    succeeds trivially for everything else (`recipe build`'s own
+    `docker build`/`docker compose pull` during test setup)."""
+
+    def fake_run(command, **kwargs):
+        if command[-2:] == ["--format", "json"]:
+            handle = Path(command[command.index("-f") + 1]).parent.name
+            containers = containers_by_handle.get(handle, [])
+            return _FakeSubprocessResult(stdout=json.dumps(containers))
         return _FakeCompletedProcess()
 
     return fake_run
@@ -2442,7 +2468,7 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
     assert (tmp_path / "demo" / "compose.yaml").is_file()
 
 
-def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
+def test_status_invokes_docker_compose_ps_with_json_format(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -2453,27 +2479,67 @@ def test_status_invokes_docker_compose_ps(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert captured["command"][-1] == "ps"
+    assert captured["command"][-3:] == ["ps", "--format", "json"]
 
 
-def test_status_shows_a_header_and_ps_per_recipe(tmp_path: Path, monkeypatch):
+def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch):
+    """One shared table, RECIPE first - not a separate `docker compose
+    ps` table per recipe. COMMAND and CREATED are dropped since the
+    former is always truncated and the latter rarely matters here."""
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path, handle="demo-a")
     _write_recipe(tmp_path, handle="demo-b")
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     _write_compose(tmp_path, handle="demo-a")
     _write_compose(tmp_path, handle="demo-b")
-    commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        _fake_compose_ps_json(
+            {
+                "demo-a": [
+                    {
+                        "Name": "fllame-demo-a",
+                        "Image": "vllm/vllm-openai:v0.27.1",
+                        "Command": "vllm serve org/demo-a",
+                        "Service": "demo-a",
+                        "Created": "2024-01-01T00:00:00Z",
+                        "Status": "Up 5 minutes",
+                        "Publishers": [
+                            {
+                                "URL": "0.0.0.0",
+                                "TargetPort": 8000,
+                                "PublishedPort": 8000,
+                                "Protocol": "tcp",
+                            },
+                            {
+                                "URL": "::",
+                                "TargetPort": 8000,
+                                "PublishedPort": 8000,
+                                "Protocol": "tcp",
+                            },
+                        ],
+                    }
+                ],
+                "demo-b": [],
+            }
+        ),
+    )
 
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert "== demo-a ==" in result.output
-    assert "== demo-b ==" in result.output
-    assert len(commands) == 2
-    projects = {command[command.index("-p") + 1] for command in commands}
-    assert projects == {"fllame-demo-a", "fllame-demo-b"}
+    lines = result.output.splitlines()
+    header_lines = [line for line in lines if line.startswith("RECIPE")]
+    assert len(header_lines) == 1
+    assert header_lines[0].split() == ["RECIPE", "NAME", "IMAGE", "SERVICE", "STATUS", "PORTS"]
+    assert "COMMAND" not in result.output
+    assert "CREATED" not in result.output
+    assert "demo-a" in result.output
+    assert "fllame-demo-a" in result.output
+    assert "vllm/vllm-openai:v0.27.1" in result.output
+    assert "Up 5 minutes" in result.output
+    assert "0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp" in result.output
 
 
 def test_status_no_recipes(tmp_path: Path, monkeypatch):
@@ -2492,16 +2558,20 @@ def test_status_skips_invalid_recipe_with_warning(tmp_path: Path, monkeypatch):
     _write_compose(tmp_path, handle="good")
     (tmp_path / "bad").mkdir(parents=True)
     (tmp_path / "bad" / "recipe.yaml").write_text("image: img\n")  # missing command
-    commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        _fake_compose_ps_json({"good": [{"Name": "fllame-good", "Service": "good"}]}),
+    )
 
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
     assert "warning" in result.output
-    assert "== good ==" in result.output
-    assert "== bad ==" not in result.output
-    assert len(commands) == 1
+    assert "fllame-good" in result.output
+    # The invalid recipe is only ever named in the warning, never in the table.
+    table_lines = [line for line in result.output.splitlines() if not line.startswith("warning")]
+    assert "bad" not in "\n".join(table_lines)
 
 
 def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, monkeypatch):
@@ -2510,13 +2580,14 @@ def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, mo
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     called = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: called.append("docker"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: called.append("docker"))
 
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert "== demo ==" in result.output
+    assert "demo" in result.output
     assert "fllame recipe build" in result.output
+    assert called == []
     assert called == []
 
 
@@ -2553,7 +2624,7 @@ def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
     _write_compose(tmp_path)
 
-    def raise_not_found(command):
+    def raise_not_found(command, **kwargs):
         raise FileNotFoundError
 
     monkeypatch.setattr(cli.subprocess, "run", raise_not_found)

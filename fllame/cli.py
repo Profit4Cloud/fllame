@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import shlex
 import subprocess
 import sys
@@ -252,27 +253,83 @@ def _format_relative_time(dt: datetime | None) -> str:
     return f"{value} {label}{'s' if value != 1 else ''} ago"
 
 
+_DOCKER_NOT_FOUND_MESSAGE = (
+    "docker (or the compose plugin) was not found on PATH - fllame runs "
+    "vLLM as a Docker container, install Docker to use this command."
+)
+
+
 def _run_docker(*args: str) -> int:
     try:
         return subprocess.run(["docker", *args]).returncode
     except FileNotFoundError as e:
-        typer.echo(
-            "docker (or the compose plugin) was not found on PATH - fllame runs "
-            "vLLM as a Docker container, install Docker to use this command.",
-            err=True,
-        )
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
         raise typer.Exit(code=1) from e
 
 
-def _run_compose(handle: str, *args: str) -> int:
-    return _run_docker(
+def _compose_args(handle: str, *args: str) -> list[str]:
+    return [
         "compose",
         "-f",
         str(config.recipe_dir(handle) / "compose.yaml"),
         "-p",
         config.compose_project_name(handle),
         *args,
-    )
+    ]
+
+
+def _run_compose(handle: str, *args: str) -> int:
+    return _run_docker(*_compose_args(handle, *args))
+
+
+def _parse_compose_ps_json(output: str) -> list[dict]:
+    """`docker compose ps --format json` - a single JSON array on some
+    docker versions, one JSON object per line on others."""
+    output = output.strip()
+    if not output:
+        return []
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return [json.loads(line) for line in output.splitlines() if line.strip()]
+    return data if isinstance(data, list) else [data]
+
+
+def _format_ports(publishers: list[dict]) -> str:
+    """Reconstructs `docker compose ps`'s own PORTS column (e.g.
+    `0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp`) from its JSON
+    `Publishers` field - an IPv6 bind address gets bracketed, same as
+    docker's own display."""
+    parts = []
+    for publisher in publishers:
+        published = publisher.get("PublishedPort")
+        if not published:
+            continue
+        url = publisher.get("URL") or ""
+        host = f"[{url}]" if ":" in url else url
+        protocol = publisher.get("Protocol") or "tcp"
+        parts.append(f"{host}:{published}->{publisher.get('TargetPort')}/{protocol}")
+    return ", ".join(parts)
+
+
+def _compose_ps_json(handle: str) -> tuple[list[dict], int]:
+    """HANDLE's containers via `docker compose ps --format json` - an
+    empty list and the failing exit code if the command itself failed
+    (its stderr is echoed either way)."""
+    try:
+        result = subprocess.run(
+            ["docker", *_compose_args(handle, "ps", "--format", "json")],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as e:
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1) from e
+    if result.returncode != 0:
+        if result.stderr:
+            typer.echo(result.stderr.rstrip(), err=True)
+        return [], result.returncode
+    return _parse_compose_ps_json(result.stdout), 0
 
 
 @recipe_app.command("list")
@@ -1199,29 +1256,47 @@ def serve(
 
 @app.command()
 def status() -> None:
-    """Show the state of every recipe's container via `docker compose
-    ps`, one recipe at a time (each is its own compose project). Reads
-    whatever `compose.yaml` is already on disk - never regenerates it."""
+    """Show every recipe's container in one table, via `docker compose
+    ps --format json` (each recipe is still its own compose project).
+    Reads whatever `compose.yaml` is already on disk - never
+    regenerates it."""
     store = _recipe_store()
     handles = store.list_handles()
     if not handles:
         typer.echo(f"No recipes found in {config.recipes_dir()}")
         raise typer.Exit(code=0)
 
+    rows = []
     exit_code = 0
+    queried_any = False
     for handle in handles:
         try:
             store.load(handle)
         except RecipeError as e:
             typer.echo(f"warning: {e}", err=True)
             continue
-        typer.echo(f"== {handle} ==")
         if not (config.recipe_dir(handle) / "compose.yaml").is_file():
-            typer.echo(f"not built - run `fllame recipe build {handle}`")
+            typer.echo(f"'{handle}': not built - run `fllame recipe build {handle}`")
             continue
-        code = _run_compose(handle, "ps")
+        containers, code = _compose_ps_json(handle)
+        queried_any = True
         if code != 0:
             exit_code = code
+            continue
+        for container in containers:
+            rows.append(
+                [
+                    handle,
+                    container.get("Name", ""),
+                    container.get("Image", ""),
+                    container.get("Service", ""),
+                    container.get("Status", ""),
+                    _format_ports(container.get("Publishers") or []),
+                ]
+            )
+
+    if queried_any:
+        _print_table(["RECIPE", "NAME", "IMAGE", "SERVICE", "STATUS", "PORTS"], rows)
     raise typer.Exit(code=exit_code)
 
 
