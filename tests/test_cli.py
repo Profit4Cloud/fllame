@@ -2544,7 +2544,7 @@ def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch
     # demo-b: built, but no container yet - filled in from compose.yaml instead.
     assert "demo-b" in result.output
     assert "fllame-demo-b" in result.output
-    assert "not running" in result.output
+    assert "Not running" in result.output
     assert "vllm/vllm-openai:v0.27.1" in result.output
     assert "8000:8000" in result.output
 
@@ -2594,7 +2594,7 @@ def test_status_reports_unbuilt_recipe_without_calling_docker(tmp_path: Path, mo
 
     assert result.exit_code == 0
     assert "demo" in result.output
-    assert "not built" in result.output
+    assert "Not built" in result.output
     assert "vllm/vllm-openai:v0.27.1" in result.output
     assert "8000:8000" in result.output
     assert called == []
@@ -2624,7 +2624,7 @@ def test_status_still_shows_a_built_recipe_when_docker_compose_ps_fails(
     assert result.exit_code == 1
     assert "Cannot connect to the Docker daemon" in result.output
     assert "demo" in result.output
-    assert "unknown" in result.output
+    assert "Unknown" in result.output
     assert "vllm/vllm-openai:v0.27.1" in result.output
 
 

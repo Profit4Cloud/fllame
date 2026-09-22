@@ -1262,13 +1262,13 @@ def _status_row_from_recipe(handle: str, recipe: Recipe) -> list[str]:
         handle,
         config.compose_project_name(handle),
         _resolve_image(recipe).image,
-        "not built",
+        "Not built",
         f"{recipe.port}:{recipe.port}",
     ]
 
 
 def _status_row_from_compose(
-    handle: str, recipe: Recipe, compose_path: Path, *, status: str = "not running"
+    handle: str, recipe: Recipe, compose_path: Path, *, status: str = "Not running"
 ) -> list[str]:
     """A built recipe with no confirmed container (never `serve`d, or
     `docker compose ps` itself failed) - compose.yaml's own `image`
@@ -1318,7 +1318,7 @@ def status() -> None:
         containers, code = _compose_ps_json(handle)
         if code != 0:
             exit_code = code
-            rows.append(_status_row_from_compose(handle, recipe, compose_path, status="unknown"))
+            rows.append(_status_row_from_compose(handle, recipe, compose_path, status="Unknown"))
             continue
         if not containers:
             rows.append(_status_row_from_compose(handle, recipe, compose_path))
