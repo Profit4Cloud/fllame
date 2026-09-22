@@ -34,8 +34,8 @@ Then you can run the fllame commands below within the activated environment.
 - fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub for candidate models, ranked by hardware fit/downloads/recency.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - fllame config show # Print fllame's currently configured settings.
-- fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml files still using the old default.
-- fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92).
+- fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
+- fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
 - fllame serve HANDLE [--yes] # Launch HANDLE's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame status # Show every recipe's container state via docker compose ps.
 - fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
@@ -44,7 +44,7 @@ Every command also takes `-h`/`--help`.
 
 ## Storage location
 
-Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Also, `.fllame-build.yaml` is added to recongize hand-edits of these files.
+Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Both are safe to hand-edit - fllame never overwrites them on its own.
 
 ## Recipe format
 
