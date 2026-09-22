@@ -70,10 +70,11 @@ Layers from low to high:
 
 ### Compose.yaml is editable by user
 
-A compose.yaml is generated with `recipe build HANDLE` or with `recipe add [--build]` and at no other time. 
-Advanced users are expected to edit the compose.yaml manually, so fllame should not overwrite these changes.
-The only exception `config set-default-image IMAGE`. The user is asked if the compose.yaml files should be updated. 
-If confirmed, a text replace is done, replaceing the old image with the new image. Manually edited images different from the default are left untouched. 
+A compose.yaml (and Dockerfile, if the recipe has preinstall) is generated with `recipe build HANDLE` or `recipe add [--build]`, and at no other time. 
+Advanced users are expected to edit the compose.yaml by hand, so fllame should not overwrite these changes.
+
+The only exceptions are `config set-default-image IMAGE` and
+`config set-default-gpu-memory-utilization VALUE`, which only do a text replace of the changed vales of these files, possibly followed by `docker build` for a changed `Dockerfile`.
 
 ## Implemented commands
 
@@ -89,7 +90,8 @@ If confirmed, a text replace is done, replaceing the old image with the new imag
 - model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] — Search the Hub for candidate models, ranked by hardware fit/downloads/recency.
 - model update [REPO_ID] [--apply] — Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - config show — Print the currently configured default Docker image.
-- config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml files still using the old default.
+- config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
+- config set-default-gpu-memory-utilization VALUE — Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own; offers to update existing compose.yaml files still using the old default.
 - serve HANDLE [--detach] [--yes] — Launch HANDLE's recipe via docker compose up; never touches the network.
 - status — Show every recipe's container state via docker compose ps.
 - stop HANDLE — Stop HANDLE's container via docker compose stop.
