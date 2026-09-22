@@ -825,8 +825,39 @@ def test_config_set_default_image_finds_and_updates_a_preinstall_recipes_dockerf
     assert text.startswith("FROM vllm/vllm-openai:v0.27.1\n")
     # Nothing else in the file was touched.
     assert "RUN pip install -U transformers" in text
-    assert "fllame recipe build" in result.output
-    assert "demo" in result.output
+    # The local image is rebuilt automatically from the patched Dockerfile.
+    assert "building 'fllame-demo:latest'" in result.output
+
+
+def test_config_set_default_image_dockerfile_rebuild_failure_still_keeps_the_patch(
+    tmp_path: Path, monkeypatch
+):
+    """The Dockerfile edit already applied is not rolled back just
+    because the follow-up rebuild failed - only the local image is
+    stale until a retry succeeds."""
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.26.0"])
+    dockerfile_path = _write_dockerfile_and_compose(tmp_path, "demo", "vllm/vllm-openai:v0.26.0")
+
+    class _FailedProcess:
+        returncode = 1
+
+    def fake_run(command):
+        if command[:2] == ["docker", "build"]:
+            return _FailedProcess()
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"], input="y\n"
+    )
+
+    assert result.exit_code == 0
+    assert "Failed to build 'fllame-demo:latest'" in result.output
+    assert "fllame recipe build demo" in result.output
+    assert dockerfile_path.read_text().startswith("FROM vllm/vllm-openai:v0.27.1\n")
 
 
 def test_config_set_default_image_never_touches_compose_yaml_for_a_preinstall_recipe(
