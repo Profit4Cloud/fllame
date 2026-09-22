@@ -644,8 +644,7 @@ def _replace_image_in_compose_file(path: Path, old_image: str, new_image: str) -
 
 @config_app.command("set-default-image")
 def config_set_default_image(image: str = typer.Argument(..., show_default=False)) -> None:
-    """Set the Docker image recipes fall back to when they don't pin
-    their own.
+    """Set the vLLM Docker image for recipes that do not define one.
 
     Only affects recipes that don't pin their own `image` - those keep
     using whatever they're pinned to either way. Existing `compose.yaml`
@@ -716,8 +715,7 @@ def config_set_default_image(image: str = typer.Argument(..., show_default=False
 def config_set_default_gpu_memory_utilization(
     value: float = typer.Argument(..., show_default=False),
 ) -> None:
-    """Set the `--gpu-memory-utilization` value `recipe build` injects
-    when a recipe's own command doesn't already set one.
+    """Set the `--gpu-memory-utilization` value for recipes that do not define one.
 
     An explicit `--gpu-memory-utilization` in a recipe's own command
     always wins over this default - fllame never overrides it. `serve`
