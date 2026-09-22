@@ -1268,7 +1268,7 @@ def _status_row_from_recipe(handle: str, recipe: Recipe) -> list[str]:
 
 
 def _status_row_from_compose(
-    handle: str, recipe: Recipe, compose_path: Path, *, status: str = "Not running"
+    handle: str, recipe: Recipe, compose_path: Path, *, status: str = "Never started"
 ) -> list[str]:
     """A built recipe with no confirmed container (never `serve`d, or
     `docker compose ps` itself failed) - compose.yaml's own `image`

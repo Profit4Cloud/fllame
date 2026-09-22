@@ -2544,7 +2544,7 @@ def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch
     # demo-b: built, but no container yet - filled in from compose.yaml instead.
     assert "demo-b" in result.output
     assert "fllame-demo-b" in result.output
-    assert "Not running" in result.output
+    assert "Never started" in result.output
     assert "vllm/vllm-openai:v0.27.1" in result.output
     assert "8000:8000" in result.output
 
