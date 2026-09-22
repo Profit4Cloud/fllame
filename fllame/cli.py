@@ -14,6 +14,7 @@ import typer
 import yaml
 from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
+from typer.core import TyperGroup
 
 from fllame import config, config_file
 from fllame.backends.vllm import (
@@ -45,7 +46,23 @@ from fllame.recipes.store import RecipeStore, autofix_whitespace
 # top of it - wired in explicitly since Click doesn't bind it by default.
 _CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, context_settings=_CONTEXT_SETTINGS)
+# Typer always lists plain @app.command()s before add_typer() sub-apps,
+# regardless of registration order, so the top-level `--help` listing
+# can't otherwise follow the happy path (see CLAUDE.md).
+_TOP_LEVEL_COMMAND_ORDER = ("config", "hardware", "model", "recipe", "serve", "status", "stop")
+
+
+class _TopLevelGroup(TyperGroup):
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return list(_TOP_LEVEL_COMMAND_ORDER)
+
+
+app = typer.Typer(
+    cls=_TopLevelGroup,
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings=_CONTEXT_SETTINGS,
+)
 recipe_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(recipe_app, name="recipe", help="Inspect the recipe registry.")
 hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
