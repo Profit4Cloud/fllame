@@ -878,7 +878,7 @@ def test_config_set_default_image_never_touches_compose_yaml_for_a_preinstall_re
     assert compose_path.read_text() == original_compose
 
 
-def test_config_set_default_image_confirm_prompt_explains_text_replace_not_rebuild(
+def test_config_set_default_image_confirm_prompt_explains_text_replace_and_dockerfile_rebuild(
     tmp_path: Path, monkeypatch
 ):
     _isolate(tmp_path, monkeypatch)
@@ -891,7 +891,7 @@ def test_config_set_default_image_confirm_prompt_explains_text_replace_not_rebui
     )
 
     assert "text replace" in result.output
-    assert "not a rebuild" in result.output
+    assert "docker build" in result.output
 
 
 def test_recipe_show_falls_back_to_configured_default_image(tmp_path: Path, monkeypatch):
@@ -1989,7 +1989,7 @@ def test_config_set_default_gpu_memory_utilization_confirm_prompt_explains_text_
     )
 
     assert "text replace" in result.output
-    assert "not a rebuild" in result.output
+    assert "hand edits are kept as-is" in result.output
 
 
 def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(

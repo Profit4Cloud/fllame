@@ -696,8 +696,8 @@ def config_set_default_image(image: str = typer.Argument(..., show_default=False
     for path in affected:
         typer.echo(f"  {path}")
     if not typer.confirm(
-        "Replace it with the new image in these files? (a text replace, not a "
-        "rebuild - any other hand edits are kept as-is)",
+        "Replace it with the new image in these files? (a text replace - hand edits "
+        "are kept as-is; an edited Dockerfile is then rebuilt via docker build)",
         default=False,
     ):
         return
@@ -793,8 +793,8 @@ def config_set_default_gpu_memory_utilization(
     for path in affected:
         typer.echo(f"  {path}")
     if not typer.confirm(
-        "Replace it with the new value in these files? (a text replace, not a "
-        "rebuild - any other hand edits are kept as-is)",
+        "Replace it with the new value in these files? (a text replace - hand "
+        "edits are kept as-is)",
         default=False,
     ):
         return
