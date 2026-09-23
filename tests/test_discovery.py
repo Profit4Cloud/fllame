@@ -287,7 +287,7 @@ def test_max_results_caps_output(monkeypatch):
     assert len(results) == 2
 
 
-def test_ranking_prefers_more_downloads_and_closer_to_size_ceiling(monkeypatch):
+def test_ranking_prefers_more_downloads_and_more_params(monkeypatch):
     _patch_list_models(
         monkeypatch,
         {
@@ -353,28 +353,47 @@ def test_ranking_by_downloads_survives_an_outlier_and_ignores_recency(monkeypatc
     ]
 
 
-def test_ranking_weighs_params_closeness_only_when_max_params_given(monkeypatch):
-    # Both candidates report identical estimated VRAM (same byte total,
-    # split across a 2-byte and a 1-byte dtype respectively) but
-    # different param counts, so this isolates the params-closeness half
-    # of the fit score from the VRAM-closeness half.
-    same_vram_half_params = _FakeModelInfo(
-        id="org/half-of-params-ceiling-AWQ",
+def test_ranking_rewards_params_not_vram(monkeypatch):
+    more_vram_fewer_params = _FakeModelInfo(
+        id="org/more-vram-fewer-params-AWQ",
         tags=["awq"],
-        safetensors=_FakeSafeTensorsInfo(total=1_000_000_000, parameters={"F16": 1_000_000_000}),
+        safetensors=_FakeSafeTensorsInfo(total=1_000_000_000, parameters={"F32": 1_000_000_000}),
     )
-    same_vram_at_params_ceiling = _FakeModelInfo(
-        id="org/at-params-ceiling-AWQ",
+    less_vram_more_params = _FakeModelInfo(
+        id="org/less-vram-more-params-AWQ",
         tags=["awq"],
         safetensors=_FakeSafeTensorsInfo(total=2_000_000_000, parameters={"U8": 2_000_000_000}),
     )
+    _patch_list_models(monkeypatch, {"awq": [more_vram_fewer_params, less_vram_more_params]})
+
+    results = search_models(quantizations=["awq"], max_size_gb=100.0)
+
+    assert results[0].repo_id == "org/less-vram-more-params-AWQ"
+
+
+def test_ranking_measures_params_against_max_params_when_given(monkeypatch):
+    # Relative to the largest candidate, 1B vs 2B is a big fit gap that
+    # outweighs 1000 vs 100 downloads; against a 100B ceiling it's a
+    # negligible one, so downloads decide instead.
     _patch_list_models(
-        monkeypatch, {"awq": [same_vram_half_params, same_vram_at_params_ceiling]}
+        monkeypatch,
+        {
+            "awq": [
+                _FakeModelInfo(
+                    id="org/popular-1B-AWQ", tags=["awq"], downloads=1000, downloads_all_time=1000
+                ),
+                _FakeModelInfo(
+                    id="org/larger-2B-AWQ", tags=["awq"], downloads=100, downloads_all_time=100
+                ),
+            ]
+        },
     )
 
-    results = search_models(quantizations=["awq"], max_size_gb=100.0, max_params_billion=2.0)
+    without_ceiling = search_models(quantizations=["awq"], max_size_gb=100.0)
+    with_ceiling = search_models(quantizations=["awq"], max_size_gb=100.0, max_params_billion=100.0)
 
-    assert results[0].repo_id == "org/at-params-ceiling-AWQ"
+    assert without_ceiling[0].repo_id == "org/larger-2B-AWQ"
+    assert with_ceiling[0].repo_id == "org/popular-1B-AWQ"
 
 
 def test_quantization_searches_run_concurrently(monkeypatch):

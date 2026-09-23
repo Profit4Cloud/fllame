@@ -1030,7 +1030,7 @@ def model_scan(
         "--max-size",
         show_default=False,
         help=(
-            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column). "
+            "Maximum estimated VRAM usage, in GB (see the estimated VRAM column). "
             "Defaults to this machine's hardware scan budget."
         ),
     ),
@@ -1051,7 +1051,8 @@ def model_scan(
     ),
     limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
 ) -> None:
-    """Search the Hugging Face Hub for models, ranked by fit and popularity."""
+    """Search the Hugging Face Hub for models, ranked by parameter count,
+    total downloads and 30-day downloads."""
     profile = scan_hardware() if quantization is None or max_size is None else None
 
     quantizations = [quantization] if quantization is not None else profile.supported_quantizations

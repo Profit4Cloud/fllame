@@ -50,11 +50,10 @@ _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER = 10
 # Hub's own tensor-element count ("Model size" on the model page).
 _EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified", "safetensors"]
 
-# _FIT_WEIGHT is a budget split between VRAM-closeness and
-# params-closeness when both are active (see `fit_score`), not two
-# separate weights - so a params bound never out-weighs popularity on
-# its own. No recency term: the recent download count already sinks a
-# stale model, and `lastModified` moves on any commit, even a README edit.
+# Fit rewards parameter count, not VRAM: bigger is better, and anything
+# over the VRAM or params bound is already filtered out. No recency
+# term: the recent download count already sinks a stale model, and
+# `lastModified` moves on any commit, even a README edit.
 _FIT_WEIGHT = 0.3
 _DOWNLOADS_ALL_TIME_WEIGHT = 0.3
 _DOWNLOADS_RECENT_WEIGHT = 0.4
@@ -69,7 +68,7 @@ _DOWNLOADS_ALL_TIME_LOG10_CEILING = 8.0
 
 # Deliberately 0.0, not a neutral average - missing evidence isn't a
 # known middling fit.
-_UNKNOWN_SIZE_SCORE = 0.0
+_UNKNOWN_PARAMS_SCORE = 0.0
 
 
 @dataclass(frozen=True)
@@ -154,7 +153,7 @@ def search_models(
                 )
             )
 
-    ranked = _rank(found, max_size_gb=max_size_gb, max_params_billion=max_params_billion)
+    ranked = _rank(found, max_params_billion=max_params_billion)
     return ranked[:max_results]
 
 
@@ -256,19 +255,19 @@ def _estimated_vram_gb(info: ModelInfo) -> float | None:
 
 
 def _rank(
-    candidates: list[ModelCandidate], *, max_size_gb: float, max_params_billion: float | None
+    candidates: list[ModelCandidate], *, max_params_billion: float | None
 ) -> list[ModelCandidate]:
-    def closeness(value: float | None, ceiling: float | None) -> float:
-        if value is None or ceiling is None or ceiling <= 0:
-            return _UNKNOWN_SIZE_SCORE
-        return min(1.0, value / ceiling)
+    """Without `max_params_billion` there's no absolute params ceiling,
+    so the largest candidate returned stands in for one."""
+    known_params = [c.params_billion for c in candidates if c.params_billion is not None]
+    params_ceiling = (
+        max_params_billion if max_params_billion is not None else max(known_params, default=None)
+    )
 
     def fit_score(c: ModelCandidate) -> float:
-        size_closeness = closeness(c.estimated_vram_gb, max_size_gb)
-        if max_params_billion is None:
-            return size_closeness
-        params_closeness = closeness(c.params_billion, max_params_billion)
-        return 0.5 * size_closeness + 0.5 * params_closeness
+        if c.params_billion is None or not params_ceiling:
+            return _UNKNOWN_PARAMS_SCORE
+        return min(1.0, c.params_billion / params_ceiling)
 
     def score(c: ModelCandidate) -> float:
         return (
