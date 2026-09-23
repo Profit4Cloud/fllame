@@ -361,7 +361,7 @@ def test_ranking_by_downloads_survives_an_outlier_and_ignores_recency(monkeypatc
 
 def test_ranking_measures_params_against_max_params_when_given(monkeypatch):
     # Relative to the largest candidate, 1B vs 2B is a big fit gap that
-    # outweighs 1000 vs 100 downloads; against a 100B ceiling it's a
+    # outweighs 1M vs 700k downloads; against a 100B ceiling it's a
     # negligible one, so downloads decide instead.
     _patch_hub(
         monkeypatch,
@@ -370,16 +370,14 @@ def test_ranking_measures_params_against_max_params_when_given(monkeypatch):
                 _model(
                     "org/popular-1B-AWQ",
                     ["awq"],
-                    params_billion=1.0,
-                    downloads=1000,
-                    downloads_all_time=1000,
+                    downloads=1_000_000,
+                    downloads_all_time=1_000_000,
                 ),
                 _model(
                     "org/larger-2B-AWQ",
                     ["awq"],
-                    params_billion=2.0,
-                    downloads=100,
-                    downloads_all_time=100,
+                    downloads=700_000,
+                    downloads_all_time=700_000,
                 ),
             ]
         },
@@ -390,6 +388,41 @@ def test_ranking_measures_params_against_max_params_when_given(monkeypatch):
 
     assert without_ceiling[0].repo_id == "org/larger-2B-AWQ"
     assert with_ceiling[0].repo_id == "org/popular-1B-AWQ"
+
+
+def test_ranking_lets_a_much_more_popular_model_beat_a_larger_one(monkeypatch):
+    # Real case: a 92.7B repo with 23.7k downloads outranked 27B ones with millions.
+    _patch_hub(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _model(
+                    "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+                    ["nvfp4"],
+                    params_billion=92.7,
+                    downloads=23_700,
+                    downloads_all_time=23_700,
+                ),
+                _model(
+                    "unsloth/Qwen3.8-27B-NVFP4",
+                    ["nvfp4"],
+                    downloads=3_200_000,
+                    downloads_all_time=4_700_000,
+                ),
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=1000.0)
+
+    assert results[0].repo_id == "unsloth/Qwen3.8-27B-NVFP4"
+
+
+def test_downloads_score_runs_from_the_floor_to_the_most_downloaded_result():
+    assert discovery._downloads_score(100, 100) == 0.0
+    assert discovery._downloads_score(5, 1_000) == 0.0
+    assert discovery._downloads_score(1_000_000, 1_000_000) == 1.0
+    assert discovery._downloads_score(10_000, 1_000_000) == pytest.approx(0.5, abs=0.001)
 
 
 def test_quantization_searches_run_concurrently(monkeypatch):

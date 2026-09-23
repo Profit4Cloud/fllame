@@ -73,13 +73,12 @@ _FIT_WEIGHT = 0.3
 _DOWNLOADS_ALL_TIME_WEIGHT = 0.3
 _DOWNLOADS_RECENT_WEIGHT = 0.4
 
-# Downloads span orders of magnitude, so they're scored on a fixed log
-# scale - linear min-max across results let one huge outlier flatten
-# everyone else to ~0. Fixed rather than relative so a score doesn't
-# depend on what else the search returned. All-time counts run roughly
-# 10x the ~30-day ones, hence the separate ceilings.
-_DOWNLOADS_RECENT_LOG10_CEILING = 7.0
-_DOWNLOADS_ALL_TIME_LOG10_CEILING = 8.0
+# Downloads span orders of magnitude, so they're scored on a log scale
+# - linear let one huge outlier flatten everyone else to ~0. It runs
+# from this floor (0.0) up to the most-downloaded result (1.0), so the
+# download terms use their full range rather than the narrow band real
+# counts occupy on a scale starting at zero downloads.
+_DOWNLOADS_FLOOR = 100
 
 # Deliberately 0.0, not a neutral average - missing evidence isn't a
 # known middling fit.
@@ -284,17 +283,21 @@ def _rank(
             return _UNKNOWN_PARAMS_SCORE
         return min(1.0, c.params_billion / params_ceiling)
 
+    most_all_time = max((c.downloads_all_time or 0 for c in candidates), default=0)
+    most_recent = max((c.downloads or 0 for c in candidates), default=0)
+
     def score(c: ModelCandidate) -> float:
         return (
             _FIT_WEIGHT * fit_score(c)
-            + _DOWNLOADS_ALL_TIME_WEIGHT
-            * _downloads_score(c.downloads_all_time, _DOWNLOADS_ALL_TIME_LOG10_CEILING)
-            + _DOWNLOADS_RECENT_WEIGHT
-            * _downloads_score(c.downloads, _DOWNLOADS_RECENT_LOG10_CEILING)
+            + _DOWNLOADS_ALL_TIME_WEIGHT * _downloads_score(c.downloads_all_time, most_all_time)
+            + _DOWNLOADS_RECENT_WEIGHT * _downloads_score(c.downloads, most_recent)
         )
 
     return sorted(candidates, key=score, reverse=True)
 
 
-def _downloads_score(downloads: int | None, log10_ceiling: float) -> float:
-    return min(1.0, math.log10(1 + (downloads or 0)) / log10_ceiling)
+def _downloads_score(downloads: int | None, most_downloads: int) -> float:
+    floor, ceiling = math.log10(1 + _DOWNLOADS_FLOOR), math.log10(1 + most_downloads)
+    if ceiling <= floor:
+        return 0.0
+    return max(0.0, (math.log10(1 + (downloads or 0)) - floor) / (ceiling - floor))
