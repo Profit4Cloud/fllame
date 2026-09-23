@@ -31,7 +31,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame hardware scan # Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
 - fllame model pull REPO_ID # Download REPO_ID into the Hugging Face cache.
 - fllame model list # List models currently present in the local cache (no network).
-- fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub for candidate models, ranked by hardware fit/downloads/recency.
+- fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub for candidate models, ranked by hardware fit and downloads.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - fllame config show # Print fllame's currently configured settings.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.

@@ -5,6 +5,7 @@ ranked best-first - a coarse heuristic, not a benchmarked guarantee.
 from __future__ import annotations
 
 import concurrent.futures
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,13 +51,21 @@ _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER = 10
 _EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified", "safetensors"]
 
 # _FIT_WEIGHT is a budget split between VRAM-closeness and
-# params-closeness when both are active (see `_fit_score`), not two
-# separate weights - so a params bound never out-weighs
-# popularity/recency on its own.
-_FIT_WEIGHT = 0.4
-_DOWNLOADS_ALL_TIME_WEIGHT = 0.2
-_DOWNLOADS_RECENT_WEIGHT = 0.2
-_RECENCY_WEIGHT = 0.2
+# params-closeness when both are active (see `fit_score`), not two
+# separate weights - so a params bound never out-weighs popularity on
+# its own. No recency term: the recent download count already sinks a
+# stale model, and `lastModified` moves on any commit, even a README edit.
+_FIT_WEIGHT = 0.3
+_DOWNLOADS_ALL_TIME_WEIGHT = 0.3
+_DOWNLOADS_RECENT_WEIGHT = 0.4
+
+# Downloads span orders of magnitude, so they're scored on a fixed log
+# scale - linear min-max across results let one huge outlier flatten
+# everyone else to ~0. Fixed rather than relative so a score doesn't
+# depend on what else the search returned. All-time counts run roughly
+# 10x the ~30-day ones, hence the separate ceilings.
+_DOWNLOADS_RECENT_LOG10_CEILING = 7.0
+_DOWNLOADS_ALL_TIME_LOG10_CEILING = 8.0
 
 # Deliberately 0.0, not a neutral average - missing evidence isn't a
 # known middling fit.
@@ -249,15 +258,6 @@ def _estimated_vram_gb(info: ModelInfo) -> float | None:
 def _rank(
     candidates: list[ModelCandidate], *, max_size_gb: float, max_params_billion: float | None
 ) -> list[ModelCandidate]:
-    if not candidates:
-        return []
-
-    downloads_recent = _normalize([c.downloads or 0 for c in candidates])
-    downloads_all_time = _normalize([c.downloads_all_time or 0 for c in candidates])
-    recency = _normalize(
-        [c.last_modified.timestamp() if c.last_modified else 0.0 for c in candidates]
-    )
-
     def closeness(value: float | None, ceiling: float | None) -> float:
         if value is None or ceiling is None or ceiling <= 0:
             return _UNKNOWN_SIZE_SCORE
@@ -270,22 +270,17 @@ def _rank(
         params_closeness = closeness(c.params_billion, max_params_billion)
         return 0.5 * size_closeness + 0.5 * params_closeness
 
-    weighted = [
-        (
+    def score(c: ModelCandidate) -> float:
+        return (
             _FIT_WEIGHT * fit_score(c)
-            + _DOWNLOADS_ALL_TIME_WEIGHT * downloads_all_time[i]
-            + _DOWNLOADS_RECENT_WEIGHT * downloads_recent[i]
-            + _RECENCY_WEIGHT * recency[i],
-            c,
+            + _DOWNLOADS_ALL_TIME_WEIGHT
+            * _downloads_score(c.downloads_all_time, _DOWNLOADS_ALL_TIME_LOG10_CEILING)
+            + _DOWNLOADS_RECENT_WEIGHT
+            * _downloads_score(c.downloads, _DOWNLOADS_RECENT_LOG10_CEILING)
         )
-        for i, c in enumerate(candidates)
-    ]
-    weighted.sort(key=lambda pair: pair[0], reverse=True)
-    return [c for _, c in weighted]
+
+    return sorted(candidates, key=score, reverse=True)
 
 
-def _normalize(values: list[float]) -> list[float]:
-    lowest, highest = min(values), max(values)
-    if highest == lowest:
-        return [0.5] * len(values)
-    return [(value - lowest) / (highest - lowest) for value in values]
+def _downloads_score(downloads: int | None, log10_ceiling: float) -> float:
+    return min(1.0, math.log10(1 + (downloads or 0)) / log10_ceiling)

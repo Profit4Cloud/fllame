@@ -301,7 +301,6 @@ def test_ranking_prefers_more_downloads_and_closer_to_size_ceiling(monkeypatch):
                     9.0,
                     downloads=10000,
                     downloads_all_time=100000,
-                    last_modified=datetime(2026, 1, 1, tzinfo=UTC),
                 ),
             ]
         },
@@ -310,6 +309,48 @@ def test_ranking_prefers_more_downloads_and_closer_to_size_ceiling(monkeypatch):
     results = search_models(quantizations=["awq"], max_size_gb=10.0)
 
     assert results[0].repo_id == "org/close-fit-vram-AWQ"
+
+
+def test_ranking_by_downloads_survives_an_outlier_and_ignores_recency(monkeypatch):
+    _patch_list_models(
+        monkeypatch,
+        {
+            "awq": [
+                _model_with_vram(
+                    "org/few-downloads-just-updated-AWQ",
+                    ["awq"],
+                    9.0,
+                    downloads=500,
+                    downloads_all_time=500,
+                    last_modified=datetime(2026, 9, 20, tzinfo=UTC),
+                ),
+                _model_with_vram(
+                    "org/popular-AWQ",
+                    ["awq"],
+                    9.0,
+                    downloads=500_000,
+                    downloads_all_time=500_000,
+                    last_modified=datetime(2026, 8, 1, tzinfo=UTC),
+                ),
+                _model_with_vram(
+                    "org/outlier-AWQ",
+                    ["awq"],
+                    9.0,
+                    downloads=10_000_000,
+                    downloads_all_time=100_000_000,
+                    last_modified=datetime(2026, 8, 1, tzinfo=UTC),
+                ),
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["awq"], max_size_gb=10.0)
+
+    assert [r.repo_id for r in results] == [
+        "org/outlier-AWQ",
+        "org/popular-AWQ",
+        "org/few-downloads-just-updated-AWQ",
+    ]
 
 
 def test_ranking_weighs_params_closeness_only_when_max_params_given(monkeypatch):

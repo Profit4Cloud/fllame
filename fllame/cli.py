@@ -1020,16 +1020,18 @@ def model_scan(
         None,
         "--quant",
         show_default=False,
-        help="Search only this quantization, ignoring the hardware scan's supported list.",
+        help=(
+            "Search only this quantization. Without this option, this machine's "
+            "supported quantizations are used."
+        ),
     ),
     max_size: float | None = typer.Option(
         None,
         "--max-size",
         show_default=False,
         help=(
-            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column) - "
-            "defaults to this machine's hardware scan budget when not given, "
-            "but is enforced either way."
+            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column). "
+            "Defaults to this machine's hardware scan budget."
         ),
     ),
     min_params: float | None = typer.Option(
@@ -1044,44 +1046,12 @@ def model_scan(
         show_default=False,
         help=(
             "Maximum size, in billions of parameters. Independent of --max-size "
-            "and not applied unless given - there's no hardware-based default for it."
+            "and not applied unless given."
         ),
     ),
     limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
 ) -> None:
-    """Search the Hugging Face Hub for models, ranked by fit and popularity.
-
-    --max-size is the primary size gate and is always in effect: give it
-    explicitly, or it defaults to a coarse VRAM/RAM-based budget from
-    this machine's hardware scan - a starting point, not a benchmarked
-    guarantee a result actually fits (see CLAUDE.md for why there's no
-    stronger guarantee yet). A result with no Hub-reported size at all
-    (no safetensors metadata - e.g. a GGUF-only export) is excluded only
-    when --max-size was given explicitly; against the hardware-scan
-    default it's left in, unpenalized, rather than judged against a
-    number nobody asked it to satisfy.
-
-    --min-params/--max-params are a separate, optional restriction on
-    declared parameter count layered on top, with no hardware-derived
-    default of their own and the same explicit-only exclusion rule for
-    an unknown value. Give neither and only --max-size applies; give
-    --max-params and both restrictions apply, and ranking then weighs
-    closeness to each equally alongside popularity/recency.
-
-    --quant searches only that quantization, still ignoring the hardware
-    scan's supported list either way.
-
-    Columns: PARAMS is the Hub's own reported parameter count where
-    known (falling back to a guess from the repo_id otherwise); EST.
-    VRAM is a separate, independent minimum weights-only VRAM estimate
-    computed directly from the checkpoint's real on-disk byte layout -
-    not derived from PARAMS, so the two can disagree for quantization
-    formats that pack multiple values into one stored byte. DOWNLOADS is
-    the Hub's recent (~30-day) download count, and UPDATED is how long
-    ago the repo was last modified - both also feed the ranking, along
-    with all-time downloads (not separately shown). QUANT is omitted
-    when every result already shares one quantization.
-    """
+    """Search the Hugging Face Hub for models, ranked by fit and popularity."""
     profile = scan_hardware() if quantization is None or max_size is None else None
 
     quantizations = [quantization] if quantization is not None else profile.supported_quantizations
