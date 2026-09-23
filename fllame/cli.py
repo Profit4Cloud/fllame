@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
+from fllame.models.vram import VramEstimateError, estimate_vram
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
@@ -97,7 +99,7 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe, *, default_gpu_memory_utilization: float) -> str | None:
-    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines, 
+    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines,
     also a `Dockerfile` is generated, which is used by `compose.yaml`.
     Returns the Dockerfile content written, or `None` when this
     recipe has no `preinstall`.
@@ -484,8 +486,7 @@ def recipe_add(
 
         env = {}
         for line in _read_block(
-            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D "
-            "to skip:"
+            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D " "to skip:"
         ):
             try:
                 key, value = parse_env_line(line)
@@ -565,6 +566,96 @@ def recipe_build(
     during serve time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
+
+
+_TOKEN_COUNT_SUFFIXES = {"": 1, "k": 1000, "K": 1024, "m": 1000**2, "M": 1024**2}
+
+
+def _parse_token_count(flag: str, value: str) -> int:
+    """vLLM's own convention for `--max-model-len`: lowercase suffixes
+    are decimal, uppercase binary (32k = 32000, 32K = 32768)."""
+    match = re.fullmatch(r"(\d+)([kKmM]?)", value.strip())
+    if match is None:
+        typer.echo(f"{flag} must be a whole number of tokens, got {value!r}.", err=True)
+        raise typer.Exit(code=1)
+    return int(match.group(1)) * _TOKEN_COUNT_SUFFIXES[match.group(2)]
+
+
+@recipe_app.command("vram")
+def recipe_vram(
+    handle: str = typer.Argument(..., show_default=False),
+    max_model_len: str | None = typer.Option(
+        None,
+        "--max-model-len",
+        show_default=False,
+        help="Context length per request, overriding the recipe's own value.",
+    ),
+    max_num_seqs: int | None = typer.Option(
+        None,
+        "--max-num-seqs",
+        show_default=False,
+        help="Concurrent requests, overriding the recipe's own value.",
+    ),
+    details: bool = typer.Option(False, "--details", help="Show how the estimate is calculated."),
+) -> None:
+    """Estimate the VRAM HANDLE's model needs as served by its recipe, from the pulled
+    model's config.json and weight files.
+
+    Use it to pick --gpu-memory-utilization: vLLM claims that share of GPU memory whatever
+    the model needs, and fills what the weights leave with KV cache.
+    """
+    recipe = _load_or_exit(handle)
+    args = recipe.serve_args
+
+    raw_max_model_len = max_model_len or extract_flag_value(args, "--max-model-len")
+    raw_max_num_seqs = (
+        str(max_num_seqs)
+        if max_num_seqs is not None
+        else extract_flag_value(args, "--max-num-seqs")
+    )
+    missing = [
+        flag
+        for flag, value in (
+            ("--max-model-len", raw_max_model_len),
+            ("--max-num-seqs", raw_max_num_seqs),
+        )
+        if value is None
+    ]
+    if missing:
+        flags = " and ".join(missing)
+        them = "them" if len(missing) > 1 else "it"
+        example = " ".join(f"{flag} N" for flag in missing)
+        typer.echo(
+            f"{flags} not found in recipe '{handle}'. Add {them} to this command with "
+            f"a value: fllame recipe vram {handle} {example}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    tensor_parallel_size = extract_flag_value(args, "--tensor-parallel-size") or extract_flag_value(
+        args, "-tp"
+    )
+    try:
+        estimate = estimate_vram(
+            recipe.repo_id,
+            max_model_len=_parse_token_count("--max-model-len", raw_max_model_len),
+            max_num_seqs=_parse_token_count("--max-num-seqs", raw_max_num_seqs),
+            kv_cache_dtype=extract_flag_value(args, "--kv-cache-dtype") or "auto",
+            tensor_parallel_size=int(tensor_parallel_size or 1),
+        )
+    except (VramEstimateError, ValueError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    if not details:
+        typer.echo(f"{estimate.total_gb:.1f} GB")
+        return
+    for part in estimate.parts:
+        typer.echo(f"{part.label + ':':<24}{part.gb:>7.1f} GB")
+        typer.echo(f"    {part.formula}")
+    typer.echo(f"{'Total:':<24}{estimate.total_gb:>7.1f} GB")
+    for note in estimate.notes:
+        typer.echo(note)
 
 
 def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
@@ -929,8 +1020,7 @@ def model_update(
     repo_id: str | None = typer.Argument(
         None,
         show_default=False,
-        help="Check only REPO_ID; omit to check every model currently in "
-        "the local cache.",
+        help="Check only REPO_ID; omit to check every model currently in " "the local cache.",
     ),
     apply: bool = typer.Option(
         False,
@@ -1020,16 +1110,18 @@ def model_scan(
         None,
         "--quant",
         show_default=False,
-        help="Search only this quantization, ignoring the hardware scan's supported list.",
+        help=(
+            "Search only this quantization. Without this option, this machine's "
+            "supported quantizations are used."
+        ),
     ),
     max_size: float | None = typer.Option(
         None,
         "--max-size",
         show_default=False,
         help=(
-            "Maximum estimated VRAM usage, in GB (see the EST. VRAM column) - "
-            "defaults to this machine's hardware scan budget when not given, "
-            "but is enforced either way."
+            "Maximum estimated VRAM usage, in GB (see the estimated VRAM column). "
+            "Defaults to this machine's hardware scan budget."
         ),
     ),
     min_params: float | None = typer.Option(
@@ -1044,43 +1136,26 @@ def model_scan(
         show_default=False,
         help=(
             "Maximum size, in billions of parameters. Independent of --max-size "
-            "and not applied unless given - there's no hardware-based default for it."
+            "and not applied unless given."
         ),
     ),
-    limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
+    limit: int = typer.Option(15, "--limit", help="Number of ranked results to show."),
 ) -> None:
-    """Search the Hugging Face Hub for models, ranked by fit and popularity.
+    """Search the Hugging Face Hub for models, ranked by parameter count,
+    total downloads and 30-day downloads.
 
-    --max-size is the primary size gate and is always in effect: give it
-    explicitly, or it defaults to a coarse VRAM/RAM-based budget from
-    this machine's hardware scan - a starting point, not a benchmarked
-    guarantee a result actually fits (see CLAUDE.md for why there's no
-    stronger guarantee yet). A result with no Hub-reported size at all
-    (no safetensors metadata - e.g. a GGUF-only export) is excluded only
-    when --max-size was given explicitly; against the hardware-scan
-    default it's left in, unpenalized, rather than judged against a
-    number nobody asked it to satisfy.
+    Parameter counts come from the repo name (e.g. 27B), falling back to the
+    Hub's own count.
 
-    --min-params/--max-params are a separate, optional restriction on
-    declared parameter count layered on top, with no hardware-derived
-    default of their own and the same explicit-only exclusion rule for
-    an unknown value. Give neither and only --max-size applies; give
-    --max-params and both restrictions apply, and ranking then weighs
-    closeness to each equally alongside popularity/recency.
+    Estimated VRAM assumes one request at a time with --max-model-len 32768:
+    weights estimated from the parameter count and quantization, plus 8 KB of
+    KV cache per token per billion parameters, plus 2 GB runtime overhead.
 
-    --quant searches only that quantization, still ignoring the hardware
-    scan's supported list either way.
+    Real VRAM use depends on the recipe, --max-model-len above all: if it isn't
+    set, vLLM uses the model's maximum context length, which can need far more.
 
-    Columns: PARAMS is the Hub's own reported parameter count where
-    known (falling back to a guess from the repo_id otherwise); EST.
-    VRAM is a separate, independent minimum weights-only VRAM estimate
-    computed directly from the checkpoint's real on-disk byte layout -
-    not derived from PARAMS, so the two can disagree for quantization
-    formats that pack multiple values into one stored byte. DOWNLOADS is
-    the Hub's recent (~30-day) download count, and UPDATED is how long
-    ago the repo was last modified - both also feed the ranking, along
-    with all-time downloads (not separately shown). QUANT is omitted
-    when every result already shares one quantization.
+    Each concurrent request needs its own KV cache, adding about 0.25 GB per
+    billion parameters at 32K context.
     """
     profile = scan_hardware() if quantization is None or max_size is None else None
 
@@ -1127,13 +1202,14 @@ def model_scan(
 
     show_quant_column = len(quantizations) > 1
     headers = ["REPO_ID", *(["QUANT"] if show_quant_column else []), "PARAMS", "EST. VRAM"]
-    headers += ["DOWNLOADS", "UPDATED"]
+    headers += ["DL TOTAL", "DL 30D", "UPDATED"]
     rows = [
         [
             c.repo_id,
             *([c.quantization] if show_quant_column else []),
             f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
             f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
+            _format_count(c.downloads_all_time),
             _format_count(c.downloads),
             _format_relative_time(c.last_modified),
         ]

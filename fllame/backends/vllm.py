@@ -29,7 +29,7 @@ def validate_gpu_memory_utilization(service: dict) -> str | None:
         parsed = float(value)
     except ValueError:
         return (
-            f"compose.yaml's --gpu-memory-utilization ('{value}') isn't a number. " 
+            f"compose.yaml's --gpu-memory-utilization ('{value}') isn't a number. "
             "Run `fllame recipe build` to regenerate compose.yaml, or set it by hand."
         )
 
