@@ -142,9 +142,7 @@ def test_local_estimate_vram_gb_uses_most_recently_modified_revision(monkeypatch
     current = _FakeRevision(
         files=[_FakeFile("model.safetensors", round(9 * 1024**3))], last_modified=2
     )
-    fake_info = _FakeCacheInfo(
-        [_FakeRepo("org/demo", "model", revisions=[stale, current])]
-    )
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "model", revisions=[stale, current])])
     monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
 
     assert cache.local_estimate_vram_gb("org/demo") == 9.0
@@ -171,3 +169,15 @@ def test_local_estimate_vram_gb_none_when_cache_dir_never_created(monkeypatch):
     monkeypatch.setattr(cache, "scan_cache_dir", raise_not_found)
 
     assert cache.local_estimate_vram_gb("org/demo") is None
+
+
+def test_cached_file_returns_the_snapshot_path_when_present(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    revision = _FakeRevision([])
+    revision.snapshot_path = tmp_path
+    fake_info = _FakeCacheInfo([_FakeRepo("org/demo", "model", [revision])])
+    monkeypatch.setattr(cache, "scan_cache_dir", lambda: fake_info)
+
+    assert cache.cached_file("org/demo", "config.json") == tmp_path / "config.json"
+    assert cache.cached_file("org/demo", "missing.json") is None
+    assert cache.cached_file("org/never-pulled", "config.json") is None

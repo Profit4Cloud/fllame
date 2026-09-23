@@ -10,6 +10,7 @@ from fllame.cli import app
 from fllame.domain.hardware import HardwareProfile
 from fllame.models.discovery import ModelCandidate
 from fllame.models.updater import UpdateStatus
+from fllame.models.vram import VramEstimate, VramPart
 
 runner = CliRunner()
 
@@ -375,9 +376,7 @@ def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeyp
     assert 'pip install -U "transformers>=5.8.0"' in text
 
 
-def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(
-    tmp_path: Path, monkeypatch
-):
+def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
         "pip install -U transformers",
@@ -593,9 +592,7 @@ def test_recipe_remove_warns_docker_image_is_not_cleaned_up(tmp_path: Path, monk
     assert "docker image prune" in result.output or "docker rmi" in result.output
 
 
-def test_recipe_remove_warns_docker_image_for_preinstall_recipe_too(
-    tmp_path: Path, monkeypatch
-):
+def test_recipe_remove_warns_docker_image_for_preinstall_recipe_too(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     directory = tmp_path / "demo"
     directory.mkdir(parents=True)
@@ -712,9 +709,7 @@ def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
     assert "default_image: vllm/vllm-openai:v0.27.1" in show_result.stdout
 
 
-def test_config_show_default_gpu_memory_utilization_defaults_to_0_92(
-    tmp_path: Path, monkeypatch
-):
+def test_config_show_default_gpu_memory_utilization_defaults_to_0_92(tmp_path: Path, monkeypatch):
     """Unlike default_image, this setting is never shown as unset -
     it always has a concrete value, 0.92 until explicitly changed."""
     _isolate(tmp_path, monkeypatch)
@@ -740,15 +735,11 @@ def _write_compose_with_image(tmp_path: Path, handle: str, image: str) -> Path:
     directory = tmp_path / handle
     directory.mkdir(parents=True, exist_ok=True)
     compose_path = directory / "compose.yaml"
-    compose_path.write_text(
-        f"services:\n  {handle}:\n    image: {image}\n    shm_size: 2gb\n"
-    )
+    compose_path.write_text(f"services:\n  {handle}:\n    image: {image}\n    shm_size: 2gb\n")
     return compose_path
 
 
-def test_config_set_default_image_no_prior_default_skips_batch_update(
-    tmp_path: Path, monkeypatch
-):
+def test_config_set_default_image_no_prior_default_skips_batch_update(tmp_path: Path, monkeypatch):
     """With no previously configured default, there's no old value to
     search compose.yaml files for - nothing to prompt about."""
     _isolate(tmp_path, monkeypatch)
@@ -797,9 +788,7 @@ def test_config_set_default_image_batch_update_declined_leaves_files_untouched(
     assert "image: vllm/vllm-openai:v0.26.0" in compose_path.read_text()
 
 
-def test_config_set_default_image_never_touches_a_custom_pinned_image(
-    tmp_path: Path, monkeypatch
-):
+def test_config_set_default_image_never_touches_a_custom_pinned_image(tmp_path: Path, monkeypatch):
     """A compose.yaml whose image doesn't literally match the previous
     default - a recipe-level pin, or a hand edit - is never listed or
     replaced, confirmation or not."""
@@ -1579,9 +1568,7 @@ def test_recipe_build_docker_build_failure_gives_friendly_error(tmp_path: Path, 
     assert "fllame recipe build demo" in result.output
 
 
-def test_recipe_build_docker_compose_pull_failure_gives_friendly_error(
-    tmp_path: Path, monkeypatch
-):
+def test_recipe_build_docker_compose_pull_failure_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -2021,9 +2008,7 @@ def test_config_set_default_gpu_memory_utilization_confirm_prompt_explains_text_
     assert "hand edits are kept as-is" in result.output
 
 
-def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(
-    tmp_path: Path, monkeypatch
-):
+def test_serve_refuses_when_compose_yaml_has_no_gpu_memory_utilization(tmp_path: Path, monkeypatch):
     """The exact scenario this check exists for: a compose.yaml that
     somehow ended up without --gpu-memory-utilization (hand-edited, or
     left over from before fllame always injected one) must never be
@@ -2106,9 +2091,7 @@ def test_recipe_build_warns_on_tensor_parallel_size_mismatch(tmp_path: Path, mon
     assert "--tensor-parallel-size" in result.output
 
 
-def test_recipe_build_no_tensor_parallel_size_warning_when_matching(
-    tmp_path: Path, monkeypatch
-):
+def test_recipe_build_no_tensor_parallel_size_warning_when_matching(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     directory = tmp_path / "demo"
     directory.mkdir(parents=True)
@@ -2180,9 +2163,7 @@ def test_recipe_build_cache_location_changed_aborts_when_declined(tmp_path: Path
     assert "/cache/old" in (tmp_path / "demo" / "compose.yaml").read_text()
 
 
-def test_recipe_build_cache_location_changed_continues_when_confirmed(
-    tmp_path: Path, monkeypatch
-):
+def test_recipe_build_cache_location_changed_continues_when_confirmed(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -2707,3 +2688,114 @@ def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert "docker" in result.output.lower()
+
+
+def _write_vram_recipe(tmp_path: Path, command: str, handle: str = "demo") -> None:
+    directory = tmp_path / handle
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "recipe.yaml").write_text(f"command: {command}\n")
+
+
+def _capture_vram_estimate(monkeypatch) -> dict:
+    captured = {}
+
+    def fake_estimate_vram(repo_id, **kwargs):
+        captured.update(repo_id=repo_id, **kwargs)
+        return VramEstimate(
+            parts=[
+                VramPart("Weights", 20.0, "cached .safetensors files"),
+                VramPart("KV cache", 8.0, "the KV formula"),
+            ],
+            notes=[],
+        )
+
+    monkeypatch.setattr(cli, "estimate_vram", fake_estimate_vram)
+    return captured
+
+
+def test_recipe_vram_prints_one_number_from_the_recipes_flags(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(
+        tmp_path,
+        "vllm serve org/demo --max-model-len 262144 --max-num-seqs 8 --kv-cache-dtype fp8 "
+        "--tensor-parallel-size 2",
+    )
+    captured = _capture_vram_estimate(monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "vram", "demo"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "28.0 GB"
+    assert captured == {
+        "repo_id": "org/demo",
+        "max_model_len": 262144,
+        "max_num_seqs": 8,
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 2,
+    }
+
+
+def test_recipe_vram_options_override_the_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(tmp_path, "vllm serve org/demo --max-model-len 262144 --max-num-seqs 8")
+    captured = _capture_vram_estimate(monkeypatch)
+
+    result = runner.invoke(
+        app, ["recipe", "vram", "demo", "--max-model-len", "32K", "--max-num-seqs", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["max_model_len"] == 32768
+    assert captured["max_num_seqs"] == 1
+    assert captured["kv_cache_dtype"] == "auto"
+
+
+def test_recipe_vram_requires_both_limits_without_inventing_defaults(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(tmp_path, "vllm serve org/demo")
+    _capture_vram_estimate(monkeypatch)
+
+    neither = runner.invoke(app, ["recipe", "vram", "demo"])
+    one = runner.invoke(app, ["recipe", "vram", "demo", "--max-model-len", "32768"])
+
+    assert neither.exit_code == 1
+    assert "--max-model-len and --max-num-seqs not found in recipe 'demo'" in neither.output
+    assert one.exit_code == 1
+    assert "--max-num-seqs not found" in one.output
+    assert "--max-model-len" not in one.output.split("not found")[0]
+
+
+def test_recipe_vram_details_shows_each_part_and_its_formula(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(tmp_path, "vllm serve org/demo --max-model-len 32768 --max-num-seqs 1")
+    _capture_vram_estimate(monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "vram", "demo", "--details"])
+
+    assert result.exit_code == 0, result.output
+    assert "Weights:" in result.stdout and "20.0 GB" in result.stdout
+    assert "the KV formula" in result.stdout
+    assert "Total:" in result.stdout and "28.0 GB" in result.stdout
+
+
+def test_recipe_vram_reports_an_unpulled_model(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(tmp_path, "vllm serve org/demo --max-model-len 32768 --max-num-seqs 1")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: False)
+    monkeypatch.setattr("fllame.models.vram.is_model_cached", lambda repo_id: False)
+
+    result = runner.invoke(app, ["recipe", "vram", "demo"])
+
+    assert result.exit_code == 1
+    assert "'org/demo' is not pulled" in result.output
+
+
+def test_recipe_vram_rejects_a_malformed_token_count(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_vram_recipe(tmp_path, "vllm serve org/demo --max-model-len lots --max-num-seqs 1")
+    _capture_vram_estimate(monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "vram", "demo"])
+
+    assert result.exit_code == 1
+    assert "--max-model-len must be a whole number of tokens" in result.output

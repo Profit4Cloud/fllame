@@ -14,6 +14,8 @@ from huggingface_hub import ModelInfo, list_models, model_info
 from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 
+from fllame.models.vram import RUNTIME_OVERHEAD_GB
+
 # `list_models(search=...)` fetches every matching page without a
 # `limit`, even though only `max_results` survives - capped at a
 # multiple of it instead, trading a small chance of missing a stray
@@ -62,9 +64,6 @@ _EIGHT_BIT_WEIGHT_BYTES_PER_PARAM = 1.05
 # need much less, older models without GQA more.
 _ASSUMED_MAX_MODEL_LEN = 32768
 _KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS = 8 * 1024
-
-# CUDA context, activation workspace and CUDA graphs.
-_MIN_RUNTIME_OVERHEAD_GB = 2.0
 
 # Fit rewards parameter count, not VRAM: bigger is better, and anything
 # over the VRAM or params bound is already filtered out. No recency
@@ -267,7 +266,7 @@ def _estimated_vram_gb(
 
 def _vram_gb(weight_bytes: float, *, params_billion: float) -> float:
     kv_bytes = _KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS * params_billion * _ASSUMED_MAX_MODEL_LEN
-    return (weight_bytes + kv_bytes) / (1024**3) + _MIN_RUNTIME_OVERHEAD_GB
+    return (weight_bytes + kv_bytes) / (1024**3) + RUNTIME_OVERHEAD_GB
 
 
 def _rank(

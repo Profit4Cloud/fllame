@@ -7,6 +7,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from fllame.models import discovery
 from fllame.models.discovery import search_models
+from fllame.models.vram import RUNTIME_OVERHEAD_GB
 
 _GIB = 1024**3
 
@@ -15,9 +16,7 @@ _KV_GB_PER_BILLION_PARAMS = 0.25
 
 
 def _expected_vram_gb(params_billion: float, weight_gb: float) -> float:
-    return (
-        weight_gb + _KV_GB_PER_BILLION_PARAMS * params_billion + discovery._MIN_RUNTIME_OVERHEAD_GB
-    )
+    return weight_gb + _KV_GB_PER_BILLION_PARAMS * params_billion + RUNTIME_OVERHEAD_GB
 
 
 @dataclass

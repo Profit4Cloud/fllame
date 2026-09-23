@@ -26,6 +26,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame recipe show HANDLE # Print HANDLE's resolved recipe as YAML.
 - fllame recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] # Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
 - fllame recipe build HANDLE [--yes] # Write (or overwrite) HANDLE's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
+- fllame recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] # Estimate the VRAM HANDLE's pulled model needs under its recipe (no network).
 - fllame recipe edit HANDLE # Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
 - fllame recipe remove HANDLE [--yes] # Delete HANDLE's whole recipe folder.
 - fllame hardware scan # Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.

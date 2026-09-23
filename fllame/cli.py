@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from fllame.models.discovery import search_models
 from fllame.models.puller import pull_model
 from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
+from fllame.models.vram import VramEstimateError, estimate_vram
 from fllame.recipes.naming import derive_handle
 from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
 from fllame.recipes.store import RecipeStore, autofix_whitespace
@@ -564,6 +566,96 @@ def recipe_build(
     during serve time.
     """
     _build_or_exit(_load_or_exit(handle), assume_yes=yes)
+
+
+_TOKEN_COUNT_SUFFIXES = {"": 1, "k": 1000, "K": 1024, "m": 1000**2, "M": 1024**2}
+
+
+def _parse_token_count(flag: str, value: str) -> int:
+    """vLLM's own convention for `--max-model-len`: lowercase suffixes
+    are decimal, uppercase binary (32k = 32000, 32K = 32768)."""
+    match = re.fullmatch(r"(\d+)([kKmM]?)", value.strip())
+    if match is None:
+        typer.echo(f"{flag} must be a whole number of tokens, got {value!r}.", err=True)
+        raise typer.Exit(code=1)
+    return int(match.group(1)) * _TOKEN_COUNT_SUFFIXES[match.group(2)]
+
+
+@recipe_app.command("vram")
+def recipe_vram(
+    handle: str = typer.Argument(..., show_default=False),
+    max_model_len: str | None = typer.Option(
+        None,
+        "--max-model-len",
+        show_default=False,
+        help="Context length per request, overriding the recipe's own value.",
+    ),
+    max_num_seqs: int | None = typer.Option(
+        None,
+        "--max-num-seqs",
+        show_default=False,
+        help="Concurrent requests, overriding the recipe's own value.",
+    ),
+    details: bool = typer.Option(False, "--details", help="Show how the estimate is calculated."),
+) -> None:
+    """Estimate the VRAM HANDLE's model needs as served by its recipe, from the pulled
+    model's config.json and weight files.
+
+    Use it to pick --gpu-memory-utilization: vLLM claims that share of GPU memory whatever
+    the model needs, and fills what the weights leave with KV cache.
+    """
+    recipe = _load_or_exit(handle)
+    args = recipe.serve_args
+
+    raw_max_model_len = max_model_len or extract_flag_value(args, "--max-model-len")
+    raw_max_num_seqs = (
+        str(max_num_seqs)
+        if max_num_seqs is not None
+        else extract_flag_value(args, "--max-num-seqs")
+    )
+    missing = [
+        flag
+        for flag, value in (
+            ("--max-model-len", raw_max_model_len),
+            ("--max-num-seqs", raw_max_num_seqs),
+        )
+        if value is None
+    ]
+    if missing:
+        flags = " and ".join(missing)
+        them = "them" if len(missing) > 1 else "it"
+        example = " ".join(f"{flag} N" for flag in missing)
+        typer.echo(
+            f"{flags} not found in recipe '{handle}'. Add {them} to this command with "
+            f"a value: fllame recipe vram {handle} {example}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    tensor_parallel_size = extract_flag_value(args, "--tensor-parallel-size") or extract_flag_value(
+        args, "-tp"
+    )
+    try:
+        estimate = estimate_vram(
+            recipe.repo_id,
+            max_model_len=_parse_token_count("--max-model-len", raw_max_model_len),
+            max_num_seqs=_parse_token_count("--max-num-seqs", raw_max_num_seqs),
+            kv_cache_dtype=extract_flag_value(args, "--kv-cache-dtype") or "auto",
+            tensor_parallel_size=int(tensor_parallel_size or 1),
+        )
+    except (VramEstimateError, ValueError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    if not details:
+        typer.echo(f"{estimate.total_gb:.1f} GB")
+        return
+    for part in estimate.parts:
+        typer.echo(f"{part.label + ':':<24}{part.gb:>7.1f} GB")
+        typer.echo(f"    {part.formula}")
+    typer.echo(f"{'Total:':<24}{estimate.total_gb:>7.1f} GB")
+    for note in estimate.notes:
+        typer.echo(note)
 
 
 def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:

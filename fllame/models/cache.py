@@ -5,6 +5,8 @@ filesystem scan, never `models/puller.py`'s network-touching
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from huggingface_hub import CachedRepoInfo, CachedRevisionInfo, scan_cache_dir
 from huggingface_hub.errors import CacheNotFound
 
@@ -71,3 +73,17 @@ def cached_revision_hash(repo_id: str) -> str | None:
     repo = _find_cached_repo(cache_info, repo_id)
     revision = _most_recent_revision(repo) if repo is not None else None
     return revision.commit_hash if revision is not None else None
+
+
+def cached_file(repo_id: str, filename: str) -> Path | None:
+    """`filename` from the most recent cached revision's snapshot."""
+    try:
+        cache_info = scan_cache_dir()
+    except CacheNotFound:
+        return None
+    repo = _find_cached_repo(cache_info, repo_id)
+    revision = _most_recent_revision(repo) if repo is not None else None
+    if revision is None:
+        return None
+    path = Path(revision.snapshot_path) / filename
+    return path if path.is_file() else None
