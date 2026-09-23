@@ -1052,7 +1052,12 @@ def model_scan(
     limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
 ) -> None:
     """Search the Hugging Face Hub for models, ranked by parameter count,
-    total downloads and 30-day downloads."""
+    total downloads and 30-day downloads.
+
+    Estimated VRAM is the minimum to start the model: its weight files, plus
+    1 GB KV cache (one sequence, --max-model-len 4096) and 2 GB runtime
+    overhead. Longer context or concurrent requests need more.
+    """
     profile = scan_hardware() if quantization is None or max_size is None else None
 
     quantizations = [quantization] if quantization is not None else profile.supported_quantizations

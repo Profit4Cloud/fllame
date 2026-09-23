@@ -7,37 +7,18 @@ from __future__ import annotations
 import concurrent.futures
 import math
 import re
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import TypeVar
 
-from huggingface_hub import ModelInfo, list_models, model_info
+from huggingface_hub import ModelInfo, hf_hub_url, list_models, model_info
 from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
 from requests.exceptions import RequestException
 
-_MULTIPLIER_BILLION_PARAMS = {"T": 1000.0, "B": 1.0, "M": 0.001}
-_SIZE_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)([TBM])", re.IGNORECASE)
-
-# Byte width per dtype the safetensors format defines - fixed by the
-# spec, so a packed 4-bit format still sizes correctly by reusing one
-# of these container dtypes.
-_SAFETENSORS_DTYPE_BYTES = {
-    "BOOL": 1,
-    "U8": 1,
-    "I8": 1,
-    "F8_E4M3": 1,
-    "F8_E5M2": 1,
-    "F8_E8M0": 1,
-    "I16": 2,
-    "U16": 2,
-    "F16": 2,
-    "BF16": 2,
-    "I32": 4,
-    "U32": 4,
-    "F32": 4,
-    "I64": 8,
-    "U64": 8,
-    "F64": 8,
-}
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 # `list_models(search=...)` fetches every matching page without a
 # `limit`, even though only `max_results` survives - capped at a
@@ -49,6 +30,28 @@ _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER = 10
 # every result. "safetensors" rides the same request and gives the
 # Hub's own tensor-element count ("Model size" on the model page).
 _EXPAND = ["tags", "downloads", "downloadsAllTime", "lastModified", "safetensors"]
+
+# The Hub's safetensors `total` is unreliable for a quantized repo - some
+# count packed values (a 27B AWQ build reporting 11B), others unpacked -
+# so a repo's `base_model:` tag is followed one level to the unquantized
+# original, whose count is trustworthy. The tag also comes in
+# `base_model:<relation>:<id>` form; only the bare one is read here.
+_BASE_MODEL_TAG_PREFIX = "base_model:"
+
+# Real on-disk weight size, since dtype element counts can't be turned
+# into bytes reliably across packing formats. The index is only
+# fetched when the repo holds more than one set of weights (e.g. a
+# `consolidated.safetensors` alongside sharded `model-*` files).
+_SHARDED_WEIGHTS_PATTERN = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
+_SAFETENSORS_INDEX = "model.safetensors.index.json"
+
+# The floor for just starting vLLM, not for serving well: KV cache for
+# one sequence at --max-model-len 4096 (sized for a ~30B dense GQA
+# model), plus CUDA context, activation workspace and CUDA graphs.
+_MIN_KV_CACHE_GB = 1.0
+_MIN_RUNTIME_OVERHEAD_GB = 2.0
+
+_MAX_CONCURRENT_LOOKUPS = 16
 
 # Fit rewards parameter count, not VRAM: bigger is better, and anything
 # over the VRAM or params bound is already filtered out. No recency
@@ -93,7 +96,7 @@ def search_models(
     max_results: int = 20,
 ) -> list[ModelCandidate]:
     """`exclude_unknown_size=True` drops a candidate with no safetensors
-    metadata to check against `max_size_gb` - only use it when
+    weight files to check against `max_size_gb` - only use it when
     `max_size_gb` is the caller's own explicit ask, since it can't be
     shown to satisfy a bound nobody asked this candidate to be measured
     against otherwise. `min_params_billion`/`max_params_billion` apply
@@ -102,19 +105,14 @@ def search_models(
     """
     exclude_unknown_params = min_params_billion is not None or max_params_billion is not None
     effective_min_params = min_params_billion if min_params_billion is not None else 0.0
-
-    found: list[ModelCandidate] = []
-    seen_ids: set[str] = set()
     search_limit = max_results * _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(quantizations), 1)) as executor:
-        infos_per_quantization = list(
-            executor.map(
-                lambda q: _fetch_quantization(q, query=query, search_limit=search_limit),
-                quantizations,
-            )
-        )
+    infos_per_quantization = _map_concurrently(
+        lambda q: _fetch_quantization(q, query=query, search_limit=search_limit), quantizations
+    )
 
+    matched: list[tuple[str, ModelInfo]] = []
+    seen_ids: set[str] = set()
     for q, infos in zip(quantizations, infos_per_quantization, strict=True):
         for info in infos:
             if info.id in seen_ids:
@@ -123,38 +121,85 @@ def search_models(
                 continue
             if _is_gguf(info.id, info.tags):
                 continue
+            seen_ids.add(info.id)
+            matched.append((q, info))
 
-            declared_params = _params_billion(info)
-            if declared_params is None:
-                if exclude_unknown_params:
-                    continue
-            elif declared_params < effective_min_params or (
-                max_params_billion is not None and declared_params > max_params_billion
-            ):
+    base_ids = sorted({b for _, info in matched if (b := _base_model_id(info.tags)) is not None})
+    base_params = dict(
+        zip(base_ids, _map_concurrently(_fetch_params_billion, base_ids), strict=True)
+    )
+
+    candidates: list[ModelCandidate] = []
+    for q, info in matched:
+        base_id = _base_model_id(info.tags)
+        params = base_params.get(base_id) if base_id is not None else None
+        if params is None:
+            params = _safetensors_total_billion(info)
+
+        if params is None:
+            if exclude_unknown_params:
                 continue
+        elif params < effective_min_params or (
+            max_params_billion is not None and params > max_params_billion
+        ):
+            continue
 
-            estimated_vram = _estimated_vram_gb(info)
-            if estimated_vram is None:
+        candidates.append(
+            ModelCandidate(
+                repo_id=info.id,
+                quantization=q,
+                params_billion=params,
+                estimated_vram_gb=None,
+                downloads=info.downloads,
+                downloads_all_time=info.downloads_all_time,
+                last_modified=info.last_modified,
+            )
+        )
+
+    ranked = _rank(candidates, max_params_billion=max_params_billion)
+    return _take_fitting(
+        ranked,
+        max_size_gb=max_size_gb,
+        exclude_unknown_size=exclude_unknown_size,
+        max_results=max_results,
+    )
+
+
+def _take_fitting(
+    ranked: list[ModelCandidate],
+    *,
+    max_size_gb: float,
+    exclude_unknown_size: bool,
+    max_results: int,
+) -> list[ModelCandidate]:
+    """Sizing a repo costs one request each, so it happens only after
+    ranking, walking down the list a batch at a time until
+    `max_results` fit - instead of sizing every search hit up front."""
+    fitting: list[ModelCandidate] = []
+    if max_results <= 0:
+        return fitting
+    for start in range(0, len(ranked), max_results):
+        batch = ranked[start : start + max_results]
+        sizes = _map_concurrently(lambda c: _estimated_vram_gb(c.repo_id), batch)
+        for candidate, size in zip(batch, sizes, strict=True):
+            if size is None:
                 if exclude_unknown_size:
                     continue
-            elif estimated_vram > max_size_gb:
+            elif size > max_size_gb:
                 continue
+            fitting.append(replace(candidate, estimated_vram_gb=size))
+            if len(fitting) == max_results:
+                return fitting
+    return fitting
 
-            seen_ids.add(info.id)
-            found.append(
-                ModelCandidate(
-                    repo_id=info.id,
-                    quantization=q,
-                    params_billion=declared_params,
-                    estimated_vram_gb=estimated_vram,
-                    downloads=info.downloads,
-                    downloads_all_time=info.downloads_all_time,
-                    last_modified=info.last_modified,
-                )
-            )
 
-    ranked = _rank(found, max_params_billion=max_params_billion)
-    return ranked[:max_results]
+def _map_concurrently(fn: Callable[[_T], _R], items: Iterable[_T]) -> list[_R]:
+    items = list(items)
+    if not items:
+        return []
+    workers = min(len(items), _MAX_CONCURRENT_LOOKUPS)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(fn, items))
 
 
 def _looks_like_repo_id(query: str) -> bool:
@@ -218,40 +263,68 @@ def _is_gguf(repo_id: str, tags: list[str] | None) -> bool:
     return repo_id.upper().endswith(("-GGUF", "_GGUF"))
 
 
-def _params_billion(info: ModelInfo) -> float | None:
-    """Falls back to guessing from the repo_id's naming convention only
-    when the Hub has no safetensors metadata - a repo_id often carries
-    more than one size-shaped number (a version, a total param count, an
-    MoE active-param count), so even this guess stays a heuristic.
-    """
-    if info.safetensors is not None:
-        return info.safetensors.total / 1_000_000_000
-
-    match = _SIZE_UNIT_PATTERN.search(info.id)
-    if not match:
-        return None
-    value, unit = float(match.group(1)), match.group(2).upper()
-    return value * _MULTIPLIER_BILLION_PARAMS[unit]
+def _base_model_id(tags: list[str] | None) -> str | None:
+    """`None` for a merge (several bare base tags) as well as for no tag
+    at all - there's no single original to take the count from."""
+    bases = [
+        tag.removeprefix(_BASE_MODEL_TAG_PREFIX)
+        for tag in tags or []
+        if tag.startswith(_BASE_MODEL_TAG_PREFIX)
+        and ":" not in tag.removeprefix(_BASE_MODEL_TAG_PREFIX)
+    ]
+    return bases[0] if len(bases) == 1 else None
 
 
-def _estimated_vram_gb(info: ModelInfo) -> float | None:
-    """Summed directly from `safetensors.parameters` (a `{dtype:
-    element_count}` breakdown) rather than `params_billion` and a
-    per-quantization bytes-per-param guess - the dtype+count already
-    gives the exact stored byte size regardless of packing. `None`
-    (not a partial sum) when a dtype isn't one this module knows the
-    byte width of.
-    """
+def _safetensors_total_billion(info: ModelInfo) -> float | None:
     if info.safetensors is None:
         return None
+    return info.safetensors.total / 1_000_000_000
+
+
+def _fetch_params_billion(repo_id: str) -> float | None:
     try:
-        total_bytes = sum(
-            count * _SAFETENSORS_DTYPE_BYTES[dtype.upper()]
-            for dtype, count in info.safetensors.parameters.items()
-        )
-    except KeyError:
+        return _safetensors_total_billion(model_info(repo_id, expand=["safetensors"]))
+    except (HfHubHTTPError, RequestException):
         return None
-    return total_bytes / (1024**3)
+
+
+def _estimated_vram_gb(repo_id: str) -> float | None:
+    try:
+        weight_bytes = _weight_bytes(repo_id)
+    except (HfHubHTTPError, RequestException, KeyError, ValueError):
+        return None
+    if weight_bytes is None:
+        return None
+    return weight_bytes / (1024**3) + _MIN_KV_CACHE_GB + _MIN_RUNTIME_OVERHEAD_GB
+
+
+def _weight_bytes(repo_id: str) -> int | None:
+    info = model_info(repo_id, files_metadata=True)
+    sizes = {
+        sibling.rfilename: sibling.size
+        for sibling in info.siblings or []
+        if sibling.rfilename.endswith(".safetensors") and "/" not in sibling.rfilename
+    }
+    if not sizes:
+        return None
+
+    has_index = any(sibling.rfilename == _SAFETENSORS_INDEX for sibling in info.siblings or [])
+    single_weight_set = all(_SHARDED_WEIGHTS_PATTERN.fullmatch(name) for name in sizes)
+    if has_index and not single_weight_set:
+        indexed = _indexed_weight_files(repo_id, revision=info.sha)
+        sizes = {name: size for name, size in sizes.items() if name in indexed}
+
+    if not sizes or any(size is None for size in sizes.values()):
+        return None
+    return sum(sizes.values())
+
+
+def _indexed_weight_files(repo_id: str, *, revision: str | None) -> set[str]:
+    response = get_session().get(
+        hf_hub_url(repo_id, _SAFETENSORS_INDEX, revision=revision), headers=build_hf_headers()
+    )
+    hf_raise_for_status(response)
+    return set(response.json()["weight_map"].values())
 
 
 def _rank(
