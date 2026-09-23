@@ -419,10 +419,38 @@ def test_ranking_lets_a_much_more_popular_model_beat_a_larger_one(monkeypatch):
 
 
 def test_downloads_score_runs_from_the_floor_to_the_most_downloaded_result():
-    assert discovery._downloads_score(100, 100) == 0.0
-    assert discovery._downloads_score(5, 1_000) == 0.0
+    assert discovery._downloads_score(10_000, 1_000_000) == 0.0
+    assert discovery._downloads_score(500, 1_000_000) == 0.0
+    assert discovery._downloads_score(5_000, 8_000) == 0.0
+    assert discovery._downloads_score(100_000, 1_000_000) == pytest.approx(0.5, abs=0.001)
     assert discovery._downloads_score(1_000_000, 1_000_000) == 1.0
-    assert discovery._downloads_score(10_000, 1_000_000) == pytest.approx(0.5, abs=0.001)
+
+
+def test_rarely_downloaded_models_come_after_every_popular_one(monkeypatch):
+    _patch_hub(
+        monkeypatch,
+        {
+            "nvfp4": [
+                _model(
+                    "huginnfork/Qwen3.8-Flash-Next-NVFP4-Abliterated",
+                    ["nvfp4"],
+                    params_billion=92.7,
+                    downloads=512,
+                    downloads_all_time=512,
+                ),
+                _model(
+                    "org/Qwen3.8-27B-NVFP4", ["nvfp4"], downloads=10_000, downloads_all_time=12_000
+                ),
+            ]
+        },
+    )
+
+    results = search_models(quantizations=["nvfp4"], max_size_gb=1000.0)
+
+    assert [c.repo_id for c in results] == [
+        "org/Qwen3.8-27B-NVFP4",
+        "huginnfork/Qwen3.8-Flash-Next-NVFP4-Abliterated",
+    ]
 
 
 def test_quantization_searches_run_concurrently(monkeypatch):

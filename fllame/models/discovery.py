@@ -77,8 +77,10 @@ _DOWNLOADS_RECENT_WEIGHT = 0.4
 # - linear let one huge outlier flatten everyone else to ~0. It runs
 # from this floor (0.0) up to the most-downloaded result (1.0), so the
 # download terms use their full range rather than the narrow band real
-# counts occupy on a scale starting at zero downloads.
-_DOWNLOADS_FLOOR = 100
+# counts occupy on a scale starting at zero downloads. A repo whose
+# all-time count is still under the floor is a last resort, listed only
+# once nothing better is left - otherwise size alone could lift it.
+_DOWNLOADS_FLOOR = 10_000
 
 # Deliberately 0.0, not a neutral average - missing evidence isn't a
 # known middling fit.
@@ -170,8 +172,10 @@ def search_models(
 
     ranked = _rank(candidates, max_params_billion=max_params_billion)
     known_size = [c for c in ranked if c.estimated_vram_gb is not None]
+    popular = [c for c in known_size if (c.downloads_all_time or 0) >= _DOWNLOADS_FLOOR]
+    rarely_downloaded = [c for c in known_size if (c.downloads_all_time or 0) < _DOWNLOADS_FLOOR]
     unknown_size = [c for c in ranked if c.estimated_vram_gb is None]
-    return (known_size + unknown_size)[:max_results]
+    return (popular + rarely_downloaded + unknown_size)[:max_results]
 
 
 def _looks_like_repo_id(query: str) -> bool:
