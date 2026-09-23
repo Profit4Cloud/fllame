@@ -26,13 +26,13 @@ Then you can run the fllame commands below within the activated environment.
 - fllame recipe show HANDLE # Print HANDLE's resolved recipe as YAML.
 - fllame recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] # Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
 - fllame recipe build HANDLE [--yes] # Write (or overwrite) HANDLE's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
-- fllame recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] # Estimate the VRAM HANDLE's pulled model needs under its recipe (no network).
+- fllame recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] # Estimate VRAM for HANDLE's recipe.
 - fllame recipe edit HANDLE # Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
 - fllame recipe remove HANDLE [--yes] # Delete HANDLE's whole recipe folder.
 - fllame hardware scan # Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
 - fllame model pull REPO_ID # Download REPO_ID into the Hugging Face cache.
 - fllame model list # List models currently present in the local cache (no network).
-- fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub for candidate models, ranked by hardware fit and downloads.
+- fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub, ranked by downloads and size.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - fllame config show # Print fllame's currently configured settings.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
