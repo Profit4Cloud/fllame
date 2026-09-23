@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from typing import TypeVar
 
 from huggingface_hub import ModelInfo, hf_hub_url, list_models, model_info
@@ -45,10 +46,19 @@ _BASE_MODEL_TAG_PREFIX = "base_model:"
 _SHARDED_WEIGHTS_PATTERN = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
 _SAFETENSORS_INDEX = "model.safetensors.index.json"
 
-# The floor for just starting vLLM, not for serving well: KV cache for
-# one sequence at --max-model-len 4096 (sized for a ~30B dense GQA
-# model), plus CUDA context, activation workspace and CUDA graphs.
-_MIN_KV_CACHE_GB = 1.0
+# EST. VRAM is the floor for one request at a time at this context
+# length - vLLM's own default is the model's full context, often far
+# longer. KV cache is sized from the model's config.json at vLLM's
+# default ("auto") KV dtype, i.e. the unquantized model's BF16/FP16.
+_ASSUMED_MAX_MODEL_LEN = 32768
+_KV_CACHE_BYTES_PER_ELEMENT = 2
+
+# Only used when config.json is missing or its architecture isn't one
+# `_kv_cache_bytes` understands: dense GQA models land roughly between
+# 4 and 16 KiB per token per billion params.
+_FALLBACK_KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS = 8 * 1024
+
+# CUDA context, activation workspace and CUDA graphs.
 _MIN_RUNTIME_OVERHEAD_GB = 2.0
 
 _MAX_CONCURRENT_LOOKUPS = 16
@@ -156,9 +166,15 @@ def search_models(
             )
         )
 
+    # A quantized repo's config.json can be missing or rewritten by the
+    # quantizer; the base model's describes the same architecture, and
+    # is fetched once for every quant of it.
+    config_repo_ids = {info.id: _base_model_id(info.tags) or info.id for _, info in matched}
+
     ranked = _rank(candidates, max_params_billion=max_params_billion)
     return _take_fitting(
         ranked,
+        config_repo_ids=config_repo_ids,
         max_size_gb=max_size_gb,
         exclude_unknown_size=exclude_unknown_size,
         max_results=max_results,
@@ -168,29 +184,45 @@ def search_models(
 def _take_fitting(
     ranked: list[ModelCandidate],
     *,
+    config_repo_ids: dict[str, str],
     max_size_gb: float,
     exclude_unknown_size: bool,
     max_results: int,
 ) -> list[ModelCandidate]:
-    """Sizing a repo costs one request each, so it happens only after
+    """Sizing a repo costs requests of its own, so it happens only after
     ranking, walking down the list a batch at a time until
-    `max_results` fit - instead of sizing every search hit up front."""
+    `max_results` fit - instead of sizing every search hit up front. An
+    unknown size is a last resort, only filling what's left once the
+    whole list is walked."""
     fitting: list[ModelCandidate] = []
+    unknown_size: list[ModelCandidate] = []
+    configs: dict[str, dict | None] = {}
     if max_results <= 0:
         return fitting
     for start in range(0, len(ranked), max_results):
         batch = ranked[start : start + max_results]
-        sizes = _map_concurrently(lambda c: _estimated_vram_gb(c.repo_id), batch)
-        for candidate, size in zip(batch, sizes, strict=True):
+        missing_configs = sorted({config_repo_ids[c.repo_id] for c in batch} - configs.keys())
+        lookups = [partial(_weight_bytes_or_none, c.repo_id) for c in batch] + [
+            partial(_fetch_config, repo_id) for repo_id in missing_configs
+        ]
+        results = _map_concurrently(lambda lookup: lookup(), lookups)
+        weights, fetched_configs = results[: len(batch)], results[len(batch) :]
+        configs.update(zip(missing_configs, fetched_configs, strict=True))
+
+        for candidate, weight_bytes in zip(batch, weights, strict=True):
+            size = _estimated_vram_gb(
+                weight_bytes,
+                config=configs[config_repo_ids[candidate.repo_id]],
+                params_billion=candidate.params_billion,
+            )
             if size is None:
-                if exclude_unknown_size:
-                    continue
-            elif size > max_size_gb:
-                continue
-            fitting.append(replace(candidate, estimated_vram_gb=size))
-            if len(fitting) == max_results:
-                return fitting
-    return fitting
+                if not exclude_unknown_size:
+                    unknown_size.append(candidate)
+            elif size <= max_size_gb:
+                fitting.append(replace(candidate, estimated_vram_gb=size))
+                if len(fitting) == max_results:
+                    return fitting
+    return fitting + unknown_size[: max_results - len(fitting)]
 
 
 def _map_concurrently(fn: Callable[[_T], _R], items: Iterable[_T]) -> list[_R]:
@@ -288,14 +320,65 @@ def _fetch_params_billion(repo_id: str) -> float | None:
         return None
 
 
-def _estimated_vram_gb(repo_id: str) -> float | None:
-    try:
-        weight_bytes = _weight_bytes(repo_id)
-    except (HfHubHTTPError, RequestException, KeyError, ValueError):
-        return None
+def _estimated_vram_gb(
+    weight_bytes: int | None, *, config: dict | None, params_billion: float | None
+) -> float | None:
     if weight_bytes is None:
         return None
-    return weight_bytes / (1024**3) + _MIN_KV_CACHE_GB + _MIN_RUNTIME_OVERHEAD_GB
+    kv_bytes = _kv_cache_bytes(config) if config is not None else None
+    if kv_bytes is None:
+        if params_billion is None:
+            return None
+        kv_bytes = (
+            _FALLBACK_KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS
+            * params_billion
+            * _ASSUMED_MAX_MODEL_LEN
+        )
+    return (weight_bytes + kv_bytes) / (1024**3) + _MIN_RUNTIME_OVERHEAD_GB
+
+
+def _kv_cache_bytes(config: dict) -> int | None:
+    """Only attention layers hold a per-token KV cache: a linear-attention
+    (Mamba/DeltaNet-style) layer keeps a small fixed state instead, and
+    a sliding-window layer caches at most its window. MLA models cache
+    one compressed latent per token rather than a K and V per head."""
+    text_config = config.get("text_config") or config.get("llm_config") or config
+    try:
+        layer_count = int(text_config["num_hidden_layers"])
+        layer_types = text_config.get("layer_types")
+        interval = text_config.get("full_attention_interval")
+        if layer_types:
+            full_layers = sum(t == "full_attention" for t in layer_types)
+            sliding_layers = sum(t == "sliding_attention" for t in layer_types)
+        elif interval:
+            full_layers, sliding_layers = layer_count // int(interval), 0
+        else:
+            full_layers, sliding_layers = layer_count, 0
+
+        if text_config.get("kv_lora_rank"):
+            elements_per_token_per_layer = int(text_config["kv_lora_rank"]) + int(
+                text_config["qk_rope_head_dim"]
+            )
+        else:
+            heads = int(text_config["num_attention_heads"])
+            kv_heads = int(text_config.get("num_key_value_heads") or heads)
+            head_dim = int(text_config.get("head_dim") or int(text_config["hidden_size"]) // heads)
+            elements_per_token_per_layer = 2 * kv_heads * head_dim
+
+        window = text_config.get("sliding_window") or _ASSUMED_MAX_MODEL_LEN
+        cached_tokens = full_layers * _ASSUMED_MAX_MODEL_LEN + sliding_layers * min(
+            int(window), _ASSUMED_MAX_MODEL_LEN
+        )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return cached_tokens * elements_per_token_per_layer * _KV_CACHE_BYTES_PER_ELEMENT
+
+
+def _weight_bytes_or_none(repo_id: str) -> int | None:
+    try:
+        return _weight_bytes(repo_id)
+    except (HfHubHTTPError, RequestException, KeyError, ValueError):
+        return None
 
 
 def _weight_bytes(repo_id: str) -> int | None:
@@ -320,11 +403,25 @@ def _weight_bytes(repo_id: str) -> int | None:
 
 
 def _indexed_weight_files(repo_id: str, *, revision: str | None) -> set[str]:
+    return set(_fetch_json(repo_id, _SAFETENSORS_INDEX, revision=revision)["weight_map"].values())
+
+
+def _fetch_config(repo_id: str) -> dict | None:
+    try:
+        config = _fetch_json(repo_id, "config.json")
+    except (HfHubHTTPError, RequestException, ValueError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def _fetch_json(repo_id: str, filename: str, *, revision: str | None = None):
+    """Read straight off the Hub rather than via `hf_hub_download`, which
+    would leave a partial repo in the HF cache for `model list` to show."""
     response = get_session().get(
-        hf_hub_url(repo_id, _SAFETENSORS_INDEX, revision=revision), headers=build_hf_headers()
+        hf_hub_url(repo_id, filename, revision=revision), headers=build_hf_headers()
     )
     hf_raise_for_status(response)
-    return set(response.json()["weight_map"].values())
+    return response.json()
 
 
 def _rank(

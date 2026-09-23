@@ -8,7 +8,16 @@ from fllame.models import discovery
 from fllame.models.discovery import search_models
 
 _GIB = 1024**3
-_MIN_OVERHEAD_GB = discovery._MIN_KV_CACHE_GB + discovery._MIN_RUNTIME_OVERHEAD_GB
+
+# 8 layers x 8 KV heads x 128 head_dim x (K+V) x 2 bytes = 32 KiB per
+# token, so exactly 1 GiB of KV cache at the assumed 32768-token context.
+_ONE_GIB_KV_CONFIG = {
+    "num_hidden_layers": 8,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+}
+_OVERHEAD_GB = 1.0 + discovery._MIN_RUNTIME_OVERHEAD_GB
 
 
 @dataclass
@@ -67,11 +76,15 @@ def _patch_hub(
     monkeypatch,
     by_search_term: dict[str, list[_FakeModelInfo]],
     other_repos: list[_FakeModelInfo] = (),
+    configs: dict[str, dict | None] | None = None,
 ) -> list[tuple[str, dict]]:
-    """Returns the log of `model_info` calls, as (repo_id, kwargs)."""
+    """Returns the log of `model_info` calls, as (repo_id, kwargs). Every
+    repo's config.json is `_ONE_GIB_KV_CONFIG` unless `configs` says
+    otherwise (`None` for a repo without one)."""
     repos = {info.id: info for infos in by_search_term.values() for info in infos}
     repos.update({info.id: info for info in other_repos})
     calls: list[tuple[str, dict]] = []
+    configs = configs or {}
 
     def fake_list_models(*, search, expand, limit):
         return by_search_term.get(search, [])
@@ -82,8 +95,13 @@ def _patch_hub(
             raise HfHubHTTPError("404 Client Error")
         return repos[repo_id]
 
+    def fake_fetch_config(repo_id):
+        calls.append((repo_id, {"config": True}))
+        return configs.get(repo_id, _ONE_GIB_KV_CONFIG)
+
     monkeypatch.setattr(discovery, "list_models", fake_list_models)
     monkeypatch.setattr(discovery, "model_info", fake_model_info)
+    monkeypatch.setattr(discovery, "_fetch_config", fake_fetch_config)
     return calls
 
 
@@ -198,10 +216,11 @@ def test_each_base_model_is_looked_up_once(monkeypatch):
 
     search_models(quantizations=["awq"], max_size_gb=100.0)
 
-    assert [repo_id for repo_id, _ in calls].count("Qwen/Qwen3.8-27B") == 1
+    params_lookups = [repo_id for repo_id, kwargs in calls if not kwargs.get("config")]
+    assert params_lookups.count("Qwen/Qwen3.8-27B") == 1
 
 
-def test_estimated_vram_is_weight_files_plus_minimum_overhead(monkeypatch):
+def test_estimated_vram_is_weight_files_plus_kv_cache_and_runtime_overhead(monkeypatch):
     sharded = _FakeModelInfo(
         id="org/sharded-AWQ",
         tags=["awq"],
@@ -222,7 +241,7 @@ def test_estimated_vram_is_weight_files_plus_minimum_overhead(monkeypatch):
 
     results = search_models(quantizations=["awq"], max_size_gb=100.0)
 
-    assert results[0].estimated_vram_gb == 10.0 + _MIN_OVERHEAD_GB
+    assert results[0].estimated_vram_gb == 10.0 + _OVERHEAD_GB
 
 
 def test_estimated_vram_reads_the_index_when_several_weight_sets_exist(monkeypatch):
@@ -248,7 +267,7 @@ def test_estimated_vram_reads_the_index_when_several_weight_sets_exist(monkeypat
 
     results = search_models(quantizations=["fp8"], max_size_gb=100.0)
 
-    assert results[0].estimated_vram_gb == 10.0 + _MIN_OVERHEAD_GB
+    assert results[0].estimated_vram_gb == 10.0 + _OVERHEAD_GB
     assert indexed_lookups == [("org/both-formats-FP8", "abc123")]
 
 
@@ -271,7 +290,7 @@ def test_known_vram_over_max_size_excluded(monkeypatch):
     assert results == []
 
 
-def test_minimum_overhead_counts_against_max_size(monkeypatch):
+def test_kv_cache_and_overhead_count_against_max_size(monkeypatch):
     _patch_hub(monkeypatch, {"awq": [_model("org/weights-fit-AWQ", ["awq"], weights_gb=9.0)]})
 
     results = search_models(quantizations=["awq"], max_size_gb=10.0)
@@ -293,6 +312,125 @@ def test_unknown_vram_excluded_when_max_size_is_explicit(monkeypatch):
     results = search_models(quantizations=["awq"], max_size_gb=10.0, exclude_unknown_size=True)
 
     assert results == []
+
+
+def test_unknown_size_only_fills_up_after_every_known_fit(monkeypatch):
+    _patch_hub(
+        monkeypatch,
+        {
+            "awq": [
+                _model("org/unknown-size-AWQ", ["awq"], downloads=1_000_000),
+                _model("org/known-a-AWQ", ["awq"], weights_gb=5.0, downloads=1000),
+                _model("org/known-b-AWQ", ["awq"], weights_gb=5.0, downloads=100),
+            ]
+        },
+    )
+
+    two = search_models(quantizations=["awq"], max_size_gb=100.0, max_results=2)
+    three = search_models(quantizations=["awq"], max_size_gb=100.0, max_results=3)
+
+    assert [c.repo_id for c in two] == ["org/known-a-AWQ", "org/known-b-AWQ"]
+    assert [c.repo_id for c in three] == [
+        "org/known-a-AWQ",
+        "org/known-b-AWQ",
+        "org/unknown-size-AWQ",
+    ]
+
+
+def test_kv_cache_sized_from_the_base_models_config_fetched_once(monkeypatch):
+    calls = _patch_hub(
+        monkeypatch,
+        {
+            "awq": [
+                _model(f"org/quant-{i}-AWQ", ["awq"], weights_gb=5.0, base_model="Qwen/Qwen3.8-27B")
+                for i in range(3)
+            ]
+        },
+        other_repos=[_model("Qwen/Qwen3.8-27B", [], params_billion=27.78)],
+    )
+
+    results = search_models(quantizations=["awq"], max_size_gb=100.0)
+
+    assert {c.estimated_vram_gb for c in results} == {5.0 + _OVERHEAD_GB}
+    config_lookups = [repo_id for repo_id, kwargs in calls if kwargs.get("config")]
+    assert config_lookups == ["Qwen/Qwen3.8-27B"]
+
+
+def test_kv_cache_falls_back_to_param_count_without_a_config(monkeypatch):
+    _patch_hub(
+        monkeypatch,
+        {"awq": [_model("org/no-config-AWQ", ["awq"], params_billion=10.0, weights_gb=10.0)]},
+        configs={"org/no-config-AWQ": None},
+    )
+
+    results = search_models(quantizations=["awq"], max_size_gb=100.0)
+
+    # 8 KiB per token per billion params x 10B x 32768 tokens = 2.5 GiB.
+    assert results[0].estimated_vram_gb == 10.0 + 2.5 + discovery._MIN_RUNTIME_OVERHEAD_GB
+
+
+def test_estimated_vram_unknown_without_config_or_param_count(monkeypatch):
+    _patch_hub(
+        monkeypatch,
+        {"awq": [_model("org/no-config-AWQ", ["awq"], weights_gb=10.0)]},
+        configs={"org/no-config-AWQ": None},
+    )
+
+    results = search_models(quantizations=["awq"], max_size_gb=100.0)
+
+    assert results[0].estimated_vram_gb is None
+
+
+def test_kv_cache_bytes_for_a_dense_model():
+    assert discovery._kv_cache_bytes(_ONE_GIB_KV_CONFIG) == _GIB
+
+
+def test_kv_cache_bytes_derives_head_dim_and_defaults_kv_heads():
+    config = {"num_hidden_layers": 8, "num_attention_heads": 8, "hidden_size": 1024}
+
+    assert discovery._kv_cache_bytes(config) == _GIB
+
+
+def test_kv_cache_bytes_reads_a_multimodal_models_text_config():
+    assert discovery._kv_cache_bytes({"text_config": _ONE_GIB_KV_CONFIG}) == _GIB
+
+
+def test_kv_cache_bytes_counts_only_full_attention_layers():
+    hybrid = {
+        **_ONE_GIB_KV_CONFIG,
+        "layer_types": ["linear_attention"] * 6 + ["full_attention"] * 2,
+    }
+    interval = {**_ONE_GIB_KV_CONFIG, "full_attention_interval": 4}
+
+    assert discovery._kv_cache_bytes(hybrid) == _GIB // 4
+    assert discovery._kv_cache_bytes(interval) == _GIB // 4
+
+
+def test_kv_cache_bytes_caps_sliding_window_layers_at_their_window():
+    config = {
+        **_ONE_GIB_KV_CONFIG,
+        "layer_types": ["sliding_attention"] * 4 + ["full_attention"] * 4,
+        "sliding_window": 4096,
+    }
+
+    # Half the layers at the full 32768 tokens, half at 4096 (1/8 of it).
+    assert discovery._kv_cache_bytes(config) == _GIB // 2 + _GIB // 16
+
+
+def test_kv_cache_bytes_for_mla():
+    # (512 latent + 64 rope) x 2 bytes x 61 layers x 32768 tokens.
+    config = {
+        "num_hidden_layers": 61,
+        "num_attention_heads": 128,
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
+    }
+
+    assert discovery._kv_cache_bytes(config) == 576 * 2 * 61 * 32768
+
+
+def test_kv_cache_bytes_unknown_for_an_unrecognized_config():
+    assert discovery._kv_cache_bytes({"model_type": "something-new"}) is None
 
 
 def test_sizing_walks_the_ranked_list_only_until_enough_fit(monkeypatch):

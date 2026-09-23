@@ -1054,9 +1054,10 @@ def model_scan(
     """Search the Hugging Face Hub for models, ranked by parameter count,
     total downloads and 30-day downloads.
 
-    Estimated VRAM is the minimum to start the model: its weight files, plus
-    1 GB KV cache (one sequence, --max-model-len 4096) and 2 GB runtime
-    overhead. Longer context or concurrent requests need more.
+    Estimated VRAM is the minimum to serve one request at a time with
+    --max-model-len 32768: the weight files, plus the KV cache computed from
+    the model's config.json, plus 2 GB runtime overhead. More concurrent
+    requests or a longer context need more.
     """
     profile = scan_hardware() if quantization is None or max_size is None else None
 
