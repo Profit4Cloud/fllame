@@ -418,12 +418,22 @@ def test_ranking_lets_a_much_more_popular_model_beat_a_larger_one(monkeypatch):
     assert results[0].repo_id == "unsloth/Qwen3.8-27B-NVFP4"
 
 
-def test_downloads_score_runs_from_the_floor_to_the_most_downloaded_result():
-    assert discovery._downloads_score(10_000, 1_000_000) == 0.0
-    assert discovery._downloads_score(500, 1_000_000) == 0.0
-    assert discovery._downloads_score(5_000, 8_000) == 0.0
-    assert discovery._downloads_score(100_000, 1_000_000) == pytest.approx(0.5, abs=0.001)
-    assert discovery._downloads_score(1_000_000, 1_000_000) == 1.0
+@pytest.mark.parametrize(
+    ("downloads", "score"),
+    [
+        (4_200_000, 0.96),
+        (1_000_000, 0.8),
+        (316_000, 0.5),
+        (100_000, 0.2),
+        (50_000, 0.1),
+        (10_000, 0.02),
+        (1_000, 0.0),
+        (0, 0.0),
+        (None, 0.0),
+    ],
+)
+def test_downloads_score_is_an_s_curve_around_316k(downloads, score):
+    assert discovery._downloads_score(downloads) == pytest.approx(score, abs=0.01)
 
 
 def test_rarely_downloaded_models_come_after_every_popular_one(monkeypatch):

@@ -5,7 +5,6 @@ ranked best-first - a coarse heuristic, not a benchmarked guarantee.
 from __future__ import annotations
 
 import concurrent.futures
-import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,13 +72,16 @@ _FIT_WEIGHT = 0.3
 _DOWNLOADS_ALL_TIME_WEIGHT = 0.3
 _DOWNLOADS_RECENT_WEIGHT = 0.4
 
-# Downloads span orders of magnitude, so they're scored on a log scale
-# - linear let one huge outlier flatten everyone else to ~0. It runs
-# from this floor (0.0) up to the most-downloaded result (1.0), so the
-# download terms use their full range rather than the narrow band real
-# counts occupy on a scale starting at zero downloads. A repo whose
-# all-time count is still under the floor is a last resort, listed only
-# once nothing better is left - otherwise size alone could lift it.
+# Downloads span orders of magnitude, so they're scored on an S-curve
+# over their log: 1 / (1 + (midpoint / downloads) ^ steepness). Fixed
+# rather than relative to the results, so a search that only finds
+# barely used repos can't make them look popular: 50k scores 0.1,
+# 100k 0.2, the midpoint 0.5, 1M 0.8, 4M+ ~0.96. The same curve serves
+# both counts. A repo whose all-time count is still under the floor is
+# a last resort, listed only once nothing better is left - otherwise
+# size alone could lift it.
+_DOWNLOADS_MIDPOINT = 316_000
+_DOWNLOADS_STEEPNESS = 1.2
 _DOWNLOADS_FLOOR = 10_000
 
 # Deliberately 0.0, not a neutral average - missing evidence isn't a
@@ -287,21 +289,17 @@ def _rank(
             return _UNKNOWN_PARAMS_SCORE
         return min(1.0, c.params_billion / params_ceiling)
 
-    most_all_time = max((c.downloads_all_time or 0 for c in candidates), default=0)
-    most_recent = max((c.downloads or 0 for c in candidates), default=0)
-
     def score(c: ModelCandidate) -> float:
         return (
             _FIT_WEIGHT * fit_score(c)
-            + _DOWNLOADS_ALL_TIME_WEIGHT * _downloads_score(c.downloads_all_time, most_all_time)
-            + _DOWNLOADS_RECENT_WEIGHT * _downloads_score(c.downloads, most_recent)
+            + _DOWNLOADS_ALL_TIME_WEIGHT * _downloads_score(c.downloads_all_time)
+            + _DOWNLOADS_RECENT_WEIGHT * _downloads_score(c.downloads)
         )
 
     return sorted(candidates, key=score, reverse=True)
 
 
-def _downloads_score(downloads: int | None, most_downloads: int) -> float:
-    floor, ceiling = math.log10(1 + _DOWNLOADS_FLOOR), math.log10(1 + most_downloads)
-    if ceiling <= floor:
+def _downloads_score(downloads: int | None) -> float:
+    if not downloads:
         return 0.0
-    return max(0.0, (math.log10(1 + (downloads or 0)) - floor) / (ceiling - floor))
+    return 1 / (1 + (_DOWNLOADS_MIDPOINT / downloads) ** _DOWNLOADS_STEEPNESS)
