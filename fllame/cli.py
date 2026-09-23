@@ -1097,13 +1097,14 @@ def model_scan(
 
     show_quant_column = len(quantizations) > 1
     headers = ["REPO_ID", *(["QUANT"] if show_quant_column else []), "PARAMS", "EST. VRAM"]
-    headers += ["DOWNLOADS", "UPDATED"]
+    headers += ["DL TOTAL", "DL 30D", "UPDATED"]
     rows = [
         [
             c.repo_id,
             *([c.quantization] if show_quant_column else []),
             f"{c.params_billion:.1f}B" if c.params_billion is not None else "unknown",
             f"{c.estimated_vram_gb:.1f} GB" if c.estimated_vram_gb is not None else "unknown",
+            _format_count(c.downloads_all_time),
             _format_count(c.downloads),
             _format_relative_time(c.last_modified),
         ]

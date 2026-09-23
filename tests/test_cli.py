@@ -1288,7 +1288,10 @@ def test_model_scan_defaults_use_hardware_scan(monkeypatch):
     assert result.exit_code == 0
     assert "org/demo-7B-AWQ" in result.stdout
     assert "14.0 GB" in result.stdout
-    assert "100" in result.stdout  # DOWNLOADS
+    assert "DL TOTAL" in result.stdout
+    assert "1.0k" in result.stdout  # DL TOTAL
+    assert "DL 30D" in result.stdout
+    assert "100" in result.stdout  # DL 30D
     assert "unknown" in result.stdout  # UPDATED, since last_modified=None
     assert "QUANT" in result.stdout  # multiple quantizations searched, so shown
     assert set(captured["quantizations"]) == {"awq", "gptq", "fp8"}
