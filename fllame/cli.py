@@ -1054,9 +1054,14 @@ def model_scan(
     """Search the Hugging Face Hub for models, ranked by parameter count,
     total downloads and 30-day downloads.
 
+    Parameter counts come from the repo name (e.g. 27B), falling back to the
+    Hub's own count.
+
     Estimated VRAM is the minimum to serve one request at a time with
-    --max-model-len 32768: the weight files, plus the KV cache computed from
-    the model's config.json, plus 2 GB runtime overhead. More concurrent
+    --max-model-len 32768: the weights, plus 8 KB of KV cache per token per
+    billion parameters, plus 2 GB runtime overhead. For the models listed,
+    the weights are the actual file sizes; for filtering the rest, they are
+    estimated from the parameter count and quantization. More concurrent
     requests or a longer context need more.
     """
     profile = scan_hardware() if quantization is None or max_size is None else None
