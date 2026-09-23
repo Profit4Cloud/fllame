@@ -27,9 +27,14 @@ class _FakeSafeTensorsInfo:
 
 
 @dataclass
-class _FakeSibling:
-    rfilename: str
+class _FakeFile:
+    path: str
     size: int | None
+
+
+@dataclass
+class _FakeFolder:
+    path: str
 
 
 @dataclass
@@ -40,8 +45,7 @@ class _FakeModelInfo:
     downloads_all_time: int | None = 0
     last_modified: datetime | None = None
     safetensors: _FakeSafeTensorsInfo | None = None
-    siblings: list[_FakeSibling] = field(default_factory=list)
-    sha: str | None = None
+    files: list[_FakeFile] = field(default_factory=list)
 
 
 def _model(
@@ -63,8 +67,8 @@ def _model(
             if params_billion is not None
             else None
         ),
-        siblings=(
-            [_FakeSibling("model.safetensors", round(weights_gb * _GIB))]
+        files=(
+            [_FakeFile("model.safetensors", round(weights_gb * _GIB))]
             if weights_gb is not None
             else []
         ),
@@ -78,7 +82,7 @@ def _patch_hub(
     other_repos: list[_FakeModelInfo] = (),
     configs: dict[str, dict | None] | None = None,
 ) -> list[tuple[str, dict]]:
-    """Returns the log of `model_info` calls, as (repo_id, kwargs). Every
+    """Returns the log of Hub lookups, as (repo_id, kwargs). Every
     repo's config.json is `_ONE_GIB_KV_CONFIG` unless `configs` says
     otherwise (`None` for a repo without one)."""
     repos = {info.id: info for infos in by_search_term.values() for info in infos}
@@ -95,12 +99,20 @@ def _patch_hub(
             raise HfHubHTTPError("404 Client Error")
         return repos[repo_id]
 
+    def fake_list_repo_tree(repo_id):
+        calls.append((repo_id, {"tree": True}))
+        if repo_id not in repos:
+            raise HfHubHTTPError("404 Client Error")
+        top_level = {f.path.split("/")[0]: f for f in repos[repo_id].files}
+        return [f if "/" not in f.path else _FakeFolder(p) for p, f in top_level.items()]
+
     def fake_fetch_config(repo_id):
         calls.append((repo_id, {"config": True}))
         return configs.get(repo_id, _ONE_GIB_KV_CONFIG)
 
     monkeypatch.setattr(discovery, "list_models", fake_list_models)
     monkeypatch.setattr(discovery, "model_info", fake_model_info)
+    monkeypatch.setattr(discovery, "list_repo_tree", fake_list_repo_tree)
     monkeypatch.setattr(discovery, "_fetch_config", fake_fetch_config)
     return calls
 
@@ -224,17 +236,17 @@ def test_estimated_vram_is_weight_files_plus_kv_cache_and_runtime_overhead(monke
     sharded = _FakeModelInfo(
         id="org/sharded-AWQ",
         tags=["awq"],
-        siblings=[
-            _FakeSibling("model-00001-of-00002.safetensors", 6 * _GIB),
-            _FakeSibling("model-00002-of-00002.safetensors", 4 * _GIB),
-            _FakeSibling("model.safetensors.index.json", 1000),
-            _FakeSibling("pytorch_model.bin", 99 * _GIB),
-            _FakeSibling("original/model.safetensors", 99 * _GIB),
+        files=[
+            _FakeFile("model-00001-of-00002.safetensors", 6 * _GIB),
+            _FakeFile("model-00002-of-00002.safetensors", 4 * _GIB),
+            _FakeFile("model.safetensors.index.json", 1000),
+            _FakeFile("pytorch_model.bin", 99 * _GIB),
+            _FakeFile("original/model.safetensors", 99 * _GIB),
         ],
     )
     _patch_hub(monkeypatch, {"awq": [sharded]})
 
-    def fail_if_called(repo_id, *, revision):
+    def fail_if_called(repo_id):
         raise AssertionError("a single weight set needs no index lookup")
 
     monkeypatch.setattr(discovery, "_indexed_weight_files", fail_if_called)
@@ -248,19 +260,18 @@ def test_estimated_vram_reads_the_index_when_several_weight_sets_exist(monkeypat
     both_formats = _FakeModelInfo(
         id="org/both-formats-FP8",
         tags=["fp8"],
-        sha="abc123",
-        siblings=[
-            _FakeSibling("consolidated.safetensors", 10 * _GIB),
-            _FakeSibling("model-00001-of-00002.safetensors", 6 * _GIB),
-            _FakeSibling("model-00002-of-00002.safetensors", 4 * _GIB),
-            _FakeSibling("model.safetensors.index.json", 1000),
+        files=[
+            _FakeFile("consolidated.safetensors", 10 * _GIB),
+            _FakeFile("model-00001-of-00002.safetensors", 6 * _GIB),
+            _FakeFile("model-00002-of-00002.safetensors", 4 * _GIB),
+            _FakeFile("model.safetensors.index.json", 1000),
         ],
     )
     _patch_hub(monkeypatch, {"fp8": [both_formats]})
     indexed_lookups = []
 
-    def fake_indexed_weight_files(repo_id, *, revision):
-        indexed_lookups.append((repo_id, revision))
+    def fake_indexed_weight_files(repo_id):
+        indexed_lookups.append(repo_id)
         return {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
 
     monkeypatch.setattr(discovery, "_indexed_weight_files", fake_indexed_weight_files)
@@ -268,12 +279,12 @@ def test_estimated_vram_reads_the_index_when_several_weight_sets_exist(monkeypat
     results = search_models(quantizations=["fp8"], max_size_gb=100.0)
 
     assert results[0].estimated_vram_gb == 10.0 + _OVERHEAD_GB
-    assert indexed_lookups == [("org/both-formats-FP8", "abc123")]
+    assert indexed_lookups == ["org/both-formats-FP8"]
 
 
 def test_estimated_vram_unknown_without_safetensors_files(monkeypatch):
     bin_only = _FakeModelInfo(
-        id="org/bin-only-AWQ", tags=["awq"], siblings=[_FakeSibling("pytorch_model.bin", _GIB)]
+        id="org/bin-only-AWQ", tags=["awq"], files=[_FakeFile("pytorch_model.bin", _GIB)]
     )
     _patch_hub(monkeypatch, {"awq": [bin_only]})
 
@@ -435,7 +446,8 @@ def test_kv_cache_bytes_unknown_for_an_unrecognized_config():
 
 def test_sizing_walks_the_ranked_list_only_until_enough_fit(monkeypatch):
     # Ranked by downloads: the top three are too big, so the first two
-    # that fit are #4 and #5. Sized two at a time, #7 and #8 never are.
+    # that fit are #4 and #5. With two lookups in flight, #6 may already
+    # be queued by then, but #7 and #8 never are.
     candidates = [
         _model(
             f"org/rank-{rank}-AWQ",
@@ -446,12 +458,14 @@ def test_sizing_walks_the_ranked_list_only_until_enough_fit(monkeypatch):
         for rank in range(1, 9)
     ]
     calls = _patch_hub(monkeypatch, {"awq": candidates})
+    monkeypatch.setattr(discovery, "_MAX_CONCURRENT_LOOKUPS", 2)
 
     results = search_models(quantizations=["awq"], max_size_gb=10.0, max_results=2)
 
     assert [c.repo_id for c in results] == ["org/rank-4-AWQ", "org/rank-5-AWQ"]
-    sized = {repo_id for repo_id, kwargs in calls if kwargs.get("files_metadata")}
-    assert sized == {f"org/rank-{rank}-AWQ" for rank in range(1, 7)}
+    sized = {repo_id for repo_id, kwargs in calls if kwargs.get("tree")}
+    assert "org/rank-7-AWQ" not in sized
+    assert "org/rank-8-AWQ" not in sized
 
 
 def test_quantization_match_via_tag_or_repo_id_suffix(monkeypatch):
@@ -661,13 +675,13 @@ def test_repo_sizing_runs_concurrently(monkeypatch):
     per_call_delay = 0.2
     candidates = [_model(f"org/model-{i}-AWQ", ["awq"], weights_gb=1.0) for i in range(5)]
     _patch_hub(monkeypatch, {"awq": candidates})
-    fake_model_info = discovery.model_info
+    fake_list_repo_tree = discovery.list_repo_tree
 
-    def slow_model_info(repo_id, **kwargs):
+    def slow_list_repo_tree(repo_id):
         time.sleep(per_call_delay)
-        return fake_model_info(repo_id, **kwargs)
+        return fake_list_repo_tree(repo_id)
 
-    monkeypatch.setattr(discovery, "model_info", slow_model_info)
+    monkeypatch.setattr(discovery, "list_repo_tree", slow_list_repo_tree)
 
     start = time.monotonic()
     search_models(quantizations=["awq"], max_size_gb=100.0)

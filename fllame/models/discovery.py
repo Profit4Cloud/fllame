@@ -5,15 +5,16 @@ ranked best-first - a coarse heuristic, not a benchmarked guarantee.
 from __future__ import annotations
 
 import concurrent.futures
+import itertools
 import math
 import re
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from functools import partial
 from typing import TypeVar
 
-from huggingface_hub import ModelInfo, hf_hub_url, list_models, model_info
+from huggingface_hub import ModelInfo, hf_hub_url, list_models, list_repo_tree, model_info
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
 from requests.exceptions import RequestException
@@ -190,29 +191,32 @@ def _take_fitting(
     max_results: int,
 ) -> list[ModelCandidate]:
     """Sizing a repo costs requests of its own, so it happens only after
-    ranking, walking down the list a batch at a time until
-    `max_results` fit - instead of sizing every search hit up front. An
-    unknown size is a last resort, only filling what's left once the
-    whole list is walked."""
+    ranking, walking down the list with a rolling window of lookups in
+    flight until `max_results` fit - instead of sizing every search hit
+    up front. An unknown size is a last resort, only filling what's left
+    once the whole list is walked."""
     fitting: list[ModelCandidate] = []
     unknown_size: list[ModelCandidate] = []
-    configs: dict[str, dict | None] = {}
     if max_results <= 0:
         return fitting
-    for start in range(0, len(ranked), max_results):
-        batch = ranked[start : start + max_results]
-        missing_configs = sorted({config_repo_ids[c.repo_id] for c in batch} - configs.keys())
-        lookups = [partial(_weight_bytes_or_none, c.repo_id) for c in batch] + [
-            partial(_fetch_config, repo_id) for repo_id in missing_configs
-        ]
-        results = _map_concurrently(lambda lookup: lookup(), lookups)
-        weights, fetched_configs = results[: len(batch)], results[len(batch) :]
-        configs.update(zip(missing_configs, fetched_configs, strict=True))
 
-        for candidate, weight_bytes in zip(batch, weights, strict=True):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_LOOKUPS)
+    config_futures: dict[str, concurrent.futures.Future] = {}
+
+    def submit(c: ModelCandidate):
+        config_repo_id = config_repo_ids[c.repo_id]
+        if config_repo_id not in config_futures:
+            config_futures[config_repo_id] = executor.submit(_fetch_config, config_repo_id)
+        return c, executor.submit(_weight_bytes_or_none, c.repo_id), config_futures[config_repo_id]
+
+    upcoming = iter(ranked)
+    in_flight = deque(submit(c) for c in itertools.islice(upcoming, _MAX_CONCURRENT_LOOKUPS))
+    try:
+        while in_flight:
+            candidate, weight_future, config_future = in_flight.popleft()
             size = _estimated_vram_gb(
-                weight_bytes,
-                config=configs[config_repo_ids[candidate.repo_id]],
+                weight_future.result(),
+                config=config_future.result(),
                 params_billion=candidate.params_billion,
             )
             if size is None:
@@ -222,6 +226,10 @@ def _take_fitting(
                 fitting.append(replace(candidate, estimated_vram_gb=size))
                 if len(fitting) == max_results:
                     return fitting
+            if (next_candidate := next(upcoming, None)) is not None:
+                in_flight.append(submit(next_candidate))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return fitting + unknown_size[: max_results - len(fitting)]
 
 
@@ -382,28 +390,26 @@ def _weight_bytes_or_none(repo_id: str) -> int | None:
 
 
 def _weight_bytes(repo_id: str) -> int | None:
-    info = model_info(repo_id, files_metadata=True)
-    sizes = {
-        sibling.rfilename: sibling.size
-        for sibling in info.siblings or []
-        if sibling.rfilename.endswith(".safetensors") and "/" not in sibling.rfilename
-    }
+    """A non-recursive tree listing, which is far cheaper than
+    `model_info(files_metadata=True)` and already limited to the
+    top-level files that hold the weights."""
+    top_level = {entry.path: getattr(entry, "size", None) for entry in list_repo_tree(repo_id)}
+    sizes = {path: size for path, size in top_level.items() if path.endswith(".safetensors")}
     if not sizes:
         return None
 
-    has_index = any(sibling.rfilename == _SAFETENSORS_INDEX for sibling in info.siblings or [])
-    single_weight_set = all(_SHARDED_WEIGHTS_PATTERN.fullmatch(name) for name in sizes)
-    if has_index and not single_weight_set:
-        indexed = _indexed_weight_files(repo_id, revision=info.sha)
-        sizes = {name: size for name, size in sizes.items() if name in indexed}
+    single_weight_set = all(_SHARDED_WEIGHTS_PATTERN.fullmatch(path) for path in sizes)
+    if _SAFETENSORS_INDEX in top_level and not single_weight_set:
+        indexed = _indexed_weight_files(repo_id)
+        sizes = {path: size for path, size in sizes.items() if path in indexed}
 
     if not sizes or any(size is None for size in sizes.values()):
         return None
     return sum(sizes.values())
 
 
-def _indexed_weight_files(repo_id: str, *, revision: str | None) -> set[str]:
-    return set(_fetch_json(repo_id, _SAFETENSORS_INDEX, revision=revision)["weight_map"].values())
+def _indexed_weight_files(repo_id: str) -> set[str]:
+    return set(_fetch_json(repo_id, _SAFETENSORS_INDEX)["weight_map"].values())
 
 
 def _fetch_config(repo_id: str) -> dict | None:
@@ -414,12 +420,10 @@ def _fetch_config(repo_id: str) -> dict | None:
     return config if isinstance(config, dict) else None
 
 
-def _fetch_json(repo_id: str, filename: str, *, revision: str | None = None):
+def _fetch_json(repo_id: str, filename: str):
     """Read straight off the Hub rather than via `hf_hub_download`, which
     would leave a partial repo in the HF cache for `model list` to show."""
-    response = get_session().get(
-        hf_hub_url(repo_id, filename, revision=revision), headers=build_hf_headers()
-    )
+    response = get_session().get(hf_hub_url(repo_id, filename), headers=build_hf_headers())
     hf_raise_for_status(response)
     return response.json()
 
