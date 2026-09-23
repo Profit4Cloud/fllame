@@ -107,7 +107,7 @@ def search_models(
     min_params_billion: float | None = None,
     max_params_billion: float | None = None,
     query: str | None = None,
-    max_results: int = 20,
+    max_results: int = 15,
 ) -> list[ModelCandidate]:
     """`exclude_unknown_size=True` drops a candidate whose size can't be
     estimated (no parameter count, or an unknown quantization) - only

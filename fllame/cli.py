@@ -1139,7 +1139,7 @@ def model_scan(
             "and not applied unless given."
         ),
     ),
-    limit: int = typer.Option(20, "--limit", help="Number of ranked results to show."),
+    limit: int = typer.Option(15, "--limit", help="Number of ranked results to show."),
 ) -> None:
     """Search the Hugging Face Hub for models, ranked by parameter count,
     total downloads and 30-day downloads.
