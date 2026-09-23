@@ -24,6 +24,7 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   models/discovery.py # Searches the HF Hub for candidate models, ranked.
   models/sizing.py   # The coarse hardware memory budget `--max-size` defaults to.
   models/updater.py  # Checks a cached model against the Hub for a newer revision.
+  models/vram.py    #  VRAM estimate for a recipe
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -84,10 +85,11 @@ The only exceptions are `config set-default-image IMAGE` and
 - recipe build HANDLE — Regenerate HANDLE's compose.yaml standalone, without starting it.
 - recipe edit HANDLE — Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
 - recipe remove HANDLE [--yes] — Delete HANDLE's whole recipe folder.
+- recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] — Estimate VRAM for HANDLE's recipe.
 - hardware scan — Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
 - model pull REPO_ID — Download REPO_ID into the Hugging Face cache.
 - model list — List models currently present in the local cache (no network).
-- model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] — Search the Hub for candidate models, ranked by hardware fit/downloads/recency.
+- model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] — Search the Hub, ranked by downloads and size.
 - model update [REPO_ID] [--apply] — Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - config show — Print the currently configured default Docker image.
 - config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
