@@ -5,22 +5,14 @@ ranked best-first - a coarse heuristic, not a benchmarked guarantee.
 from __future__ import annotations
 
 import concurrent.futures
-import itertools
 import math
 import re
-from collections import deque
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TypeVar
 
-from huggingface_hub import ModelInfo, hf_hub_url, list_models, list_repo_tree, model_info
+from huggingface_hub import ModelInfo, list_models, model_info
 from huggingface_hub.errors import HfHubHTTPError
-from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
 from requests.exceptions import RequestException
-
-_T = TypeVar("_T")
-_R = TypeVar("_R")
 
 # `list_models(search=...)` fetches every matching page without a
 # `limit`, even though only `max_results` survives - capped at a
@@ -73,15 +65,6 @@ _KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS = 8 * 1024
 
 # CUDA context, activation workspace and CUDA graphs.
 _MIN_RUNTIME_OVERHEAD_GB = 2.0
-
-# Real on-disk weight size replaces the estimate for the rows actually
-# shown. The index is only fetched when the repo holds more than one
-# set of weights (e.g. a `consolidated.safetensors` alongside sharded
-# `model-*` files).
-_SHARDED_WEIGHTS_PATTERN = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
-_SAFETENSORS_INDEX = "model.safetensors.index.json"
-
-_MAX_CONCURRENT_LOOKUPS = 20
 
 # Fit rewards parameter count, not VRAM: bigger is better, and anything
 # over the VRAM or params bound is already filtered out. No recency
@@ -137,9 +120,13 @@ def search_models(
     effective_min_params = min_params_billion if min_params_billion is not None else 0.0
     search_limit = max_results * _SEARCH_LIMIT_PER_QUANTIZATION_MULTIPLIER
 
-    infos_per_quantization = _map_concurrently(
-        lambda q: _fetch_quantization(q, query=query, search_limit=search_limit), quantizations
-    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(quantizations), 1)) as executor:
+        infos_per_quantization = list(
+            executor.map(
+                lambda q: _fetch_quantization(q, query=query, search_limit=search_limit),
+                quantizations,
+            )
+        )
 
     candidates: list[ModelCandidate] = []
     seen_ids: set[str] = set()
@@ -186,59 +173,7 @@ def search_models(
     ranked = _rank(candidates, max_params_billion=max_params_billion)
     known_size = [c for c in ranked if c.estimated_vram_gb is not None]
     unknown_size = [c for c in ranked if c.estimated_vram_gb is None]
-    fitting = _take_fitting(known_size, max_size_gb=max_size_gb, max_results=max_results)
-    return fitting + unknown_size[: max(0, max_results - len(fitting))]
-
-
-def _take_fitting(
-    ranked: list[ModelCandidate], *, max_size_gb: float, max_results: int
-) -> list[ModelCandidate]:
-    """Replaces the estimate with real weight file sizes, only for rows
-    that make the cut: one request per repo, with a rolling window of
-    lookups in flight, walking down the ranked list only as far as a
-    real size pushing a row over `max_size_gb` requires. A failed
-    lookup keeps the estimate."""
-    fitting: list[ModelCandidate] = []
-    if max_results <= 0:
-        return fitting
-
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(max_results, _MAX_CONCURRENT_LOOKUPS)
-    )
-    upcoming = iter(ranked)
-    in_flight = deque(
-        (c, executor.submit(_weight_bytes_or_none, c.repo_id))
-        for c in itertools.islice(upcoming, max_results)
-    )
-    try:
-        while in_flight:
-            candidate, weight_future = in_flight.popleft()
-            weight_bytes = weight_future.result()
-            size = (
-                _vram_gb(weight_bytes, params_billion=candidate.params_billion)
-                if weight_bytes is not None and candidate.params_billion is not None
-                else candidate.estimated_vram_gb
-            )
-            if size <= max_size_gb:
-                fitting.append(replace(candidate, estimated_vram_gb=size))
-                if len(fitting) == max_results:
-                    return fitting
-            if (next_candidate := next(upcoming, None)) is not None:
-                in_flight.append(
-                    (next_candidate, executor.submit(_weight_bytes_or_none, next_candidate.repo_id))
-                )
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-    return fitting
-
-
-def _map_concurrently(fn: Callable[[_T], _R], items: Iterable[_T]) -> list[_R]:
-    items = list(items)
-    if not items:
-        return []
-    workers = min(len(items), _MAX_CONCURRENT_LOOKUPS)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(fn, items))
+    return (known_size + unknown_size)[:max_results]
 
 
 def _looks_like_repo_id(query: str) -> bool:
@@ -333,44 +268,6 @@ def _estimated_vram_gb(
 def _vram_gb(weight_bytes: float, *, params_billion: float) -> float:
     kv_bytes = _KV_BYTES_PER_TOKEN_PER_BILLION_PARAMS * params_billion * _ASSUMED_MAX_MODEL_LEN
     return (weight_bytes + kv_bytes) / (1024**3) + _MIN_RUNTIME_OVERHEAD_GB
-
-
-def _weight_bytes_or_none(repo_id: str) -> int | None:
-    try:
-        return _weight_bytes(repo_id)
-    except (HfHubHTTPError, RequestException, KeyError, ValueError):
-        return None
-
-
-def _weight_bytes(repo_id: str) -> int | None:
-    """A non-recursive tree listing, which is far cheaper than
-    `model_info(files_metadata=True)` and already limited to the
-    top-level files that hold the weights."""
-    top_level = {entry.path: getattr(entry, "size", None) for entry in list_repo_tree(repo_id)}
-    sizes = {path: size for path, size in top_level.items() if path.endswith(".safetensors")}
-    if not sizes:
-        return None
-
-    single_weight_set = all(_SHARDED_WEIGHTS_PATTERN.fullmatch(path) for path in sizes)
-    if _SAFETENSORS_INDEX in top_level and not single_weight_set:
-        indexed = _indexed_weight_files(repo_id)
-        sizes = {path: size for path, size in sizes.items() if path in indexed}
-
-    if not sizes or any(size is None for size in sizes.values()):
-        return None
-    return sum(sizes.values())
-
-
-def _indexed_weight_files(repo_id: str) -> set[str]:
-    return set(_fetch_json(repo_id, _SAFETENSORS_INDEX)["weight_map"].values())
-
-
-def _fetch_json(repo_id: str, filename: str):
-    """Read straight off the Hub rather than via `hf_hub_download`, which
-    would leave a partial repo in the HF cache for `model list` to show."""
-    response = get_session().get(hf_hub_url(repo_id, filename), headers=build_hf_headers())
-    hf_raise_for_status(response)
-    return response.json()
 
 
 def _rank(

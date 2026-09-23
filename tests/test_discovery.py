@@ -27,17 +27,6 @@ class _FakeSafeTensorsInfo:
 
 
 @dataclass
-class _FakeFile:
-    path: str
-    size: int | None
-
-
-@dataclass
-class _FakeFolder:
-    path: str
-
-
-@dataclass
 class _FakeModelInfo:
     id: str
     tags: list[str] = field(default_factory=list)
@@ -45,7 +34,6 @@ class _FakeModelInfo:
     downloads_all_time: int | None = 0
     last_modified: datetime | None = None
     safetensors: _FakeSafeTensorsInfo | None = None
-    files: list[_FakeFile] = field(default_factory=list)
 
 
 def _model(
@@ -53,7 +41,6 @@ def _model(
     tags: list[str],
     *,
     params_billion: float | None = None,
-    weights_gb: float | None = None,
     **kwargs,
 ) -> _FakeModelInfo:
     """`params_billion` is the Hub's own safetensors total, which only
@@ -66,11 +53,6 @@ def _model(
             if params_billion is not None
             else None
         ),
-        files=(
-            [_FakeFile("model.safetensors", round(weights_gb * _GIB))]
-            if weights_gb is not None
-            else []
-        ),
         **kwargs,
     )
 
@@ -80,7 +62,7 @@ def _patch_hub(
     by_search_term: dict[str, list[_FakeModelInfo]],
     other_repos: list[_FakeModelInfo] = (),
 ) -> list[tuple[str, dict]]:
-    """Returns the log of per-repo Hub lookups, as (repo_id, kwargs)."""
+    """Returns the log of `model_info` calls, as (repo_id, kwargs)."""
     repos = {info.id: info for infos in by_search_term.values() for info in infos}
     repos.update({info.id: info for info in other_repos})
     calls: list[tuple[str, dict]] = []
@@ -94,21 +76,9 @@ def _patch_hub(
             raise HfHubHTTPError("404 Client Error")
         return repos[repo_id]
 
-    def fake_list_repo_tree(repo_id):
-        calls.append((repo_id, {"tree": True}))
-        if repo_id not in repos:
-            raise HfHubHTTPError("404 Client Error")
-        top_level = {f.path.split("/")[0]: f for f in repos[repo_id].files}
-        return [f if "/" not in f.path else _FakeFolder(p) for p, f in top_level.items()]
-
     monkeypatch.setattr(discovery, "list_models", fake_list_models)
     monkeypatch.setattr(discovery, "model_info", fake_model_info)
-    monkeypatch.setattr(discovery, "list_repo_tree", fake_list_repo_tree)
     return calls
-
-
-def _sized(calls: list[tuple[str, dict]]) -> set[str]:
-    return {repo_id for repo_id, kwargs in calls if kwargs.get("tree")}
 
 
 def test_filters_by_params_range(monkeypatch):
@@ -221,7 +191,7 @@ def test_unknown_quantization_has_unknown_size(monkeypatch):
     assert results[0].estimated_vram_gb is None
 
 
-def test_estimate_over_max_size_excluded_without_a_lookup(monkeypatch):
+def test_estimate_over_max_size_excluded(monkeypatch):
     calls = _patch_hub(monkeypatch, {"awq": [_model("org/too-big-70B-AWQ", ["awq"])]})
 
     results = search_models(quantizations=["awq"], max_size_gb=10.0)
@@ -230,103 +200,8 @@ def test_estimate_over_max_size_excluded_without_a_lookup(monkeypatch):
     assert calls == []
 
 
-def test_shown_rows_use_real_weight_file_sizes(monkeypatch):
-    sharded = _FakeModelInfo(
-        id="org/sharded-10B-AWQ",
-        tags=["awq"],
-        files=[
-            _FakeFile("model-00001-of-00002.safetensors", 6 * _GIB),
-            _FakeFile("model-00002-of-00002.safetensors", 4 * _GIB),
-            _FakeFile("model.safetensors.index.json", 1000),
-            _FakeFile("pytorch_model.bin", 99 * _GIB),
-            _FakeFile("original/model.safetensors", 99 * _GIB),
-        ],
-    )
-    _patch_hub(monkeypatch, {"awq": [sharded]})
-
-    def fail_if_called(repo_id):
-        raise AssertionError("a single weight set needs no index lookup")
-
-    monkeypatch.setattr(discovery, "_indexed_weight_files", fail_if_called)
-
-    results = search_models(quantizations=["awq"], max_size_gb=100.0)
-
-    assert results[0].estimated_vram_gb == _expected_vram_gb(10.0, weight_gb=10.0)
-
-
-def test_real_size_reads_the_index_when_several_weight_sets_exist(monkeypatch):
-    both_formats = _FakeModelInfo(
-        id="org/both-formats-10B-FP8",
-        tags=["fp8"],
-        files=[
-            _FakeFile("consolidated.safetensors", 10 * _GIB),
-            _FakeFile("model-00001-of-00002.safetensors", 6 * _GIB),
-            _FakeFile("model-00002-of-00002.safetensors", 4 * _GIB),
-            _FakeFile("model.safetensors.index.json", 1000),
-        ],
-    )
-    _patch_hub(monkeypatch, {"fp8": [both_formats]})
-    indexed_lookups = []
-
-    def fake_indexed_weight_files(repo_id):
-        indexed_lookups.append(repo_id)
-        return {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
-
-    monkeypatch.setattr(discovery, "_indexed_weight_files", fake_indexed_weight_files)
-
-    results = search_models(quantizations=["fp8"], max_size_gb=100.0)
-
-    assert results[0].estimated_vram_gb == _expected_vram_gb(10.0, weight_gb=10.0)
-    assert indexed_lookups == ["org/both-formats-10B-FP8"]
-
-
-def test_estimate_kept_when_the_repo_has_no_safetensors_files(monkeypatch):
-    bin_only = _FakeModelInfo(
-        id="org/bin-only-10B-FP8", tags=["fp8"], files=[_FakeFile("pytorch_model.bin", _GIB)]
-    )
-    _patch_hub(monkeypatch, {"fp8": [bin_only]})
-
-    results = search_models(quantizations=["fp8"], max_size_gb=100.0)
-
-    assert results[0].estimated_vram_gb == pytest.approx(
-        _expected_vram_gb(10.0, weight_gb=10e9 * 1.05 / _GIB)
-    )
-
-
-def test_real_size_over_max_size_is_replaced_by_the_next_candidate(monkeypatch):
+def test_unknown_size_only_fills_up_after_every_known_fit(monkeypatch):
     _patch_hub(
-        monkeypatch,
-        {
-            "awq": [
-                _model(
-                    "org/bigger-than-it-looks-10B-AWQ", ["awq"], weights_gb=50.0, downloads=1000
-                ),
-                _model("org/next-10B-AWQ", ["awq"], weights_gb=5.0, downloads=10),
-            ]
-        },
-    )
-
-    results = search_models(quantizations=["awq"], max_size_gb=20.0, max_results=1)
-
-    assert [c.repo_id for c in results] == ["org/next-10B-AWQ"]
-
-
-def test_only_shown_rows_are_sized(monkeypatch):
-    candidates = [
-        _model(f"org/rank-{rank}-1B-AWQ", ["awq"], weights_gb=1.0, downloads=10 ** (9 - rank))
-        for rank in range(1, 9)
-    ]
-    calls = _patch_hub(monkeypatch, {"awq": candidates})
-
-    results = search_models(quantizations=["awq"], max_size_gb=10.0, max_results=2)
-
-    assert [c.repo_id for c in results] == ["org/rank-1-1B-AWQ", "org/rank-2-1B-AWQ"]
-    # With two lookups in flight, #3 may already be queued, but no further.
-    assert not _sized(calls) & {f"org/rank-{rank}-1B-AWQ" for rank in range(4, 9)}
-
-
-def test_unknown_size_only_fills_up_after_every_known_fit_and_is_never_sized(monkeypatch):
-    calls = _patch_hub(
         monkeypatch,
         {
             "awq": [
@@ -346,7 +221,6 @@ def test_unknown_size_only_fills_up_after_every_known_fit_and_is_never_sized(mon
         "org/known-b-1B-AWQ",
         "org/unknown-size-AWQ",
     ]
-    assert "org/unknown-size-AWQ" not in _sized(calls)
 
 
 def test_unknown_size_excluded_when_max_size_is_explicit(monkeypatch):
@@ -486,26 +360,6 @@ def test_ranking_by_downloads_survives_an_outlier_and_ignores_recency(monkeypatc
     ]
 
 
-def test_ranking_rewards_params_not_vram(monkeypatch):
-    _patch_hub(
-        monkeypatch,
-        {
-            "awq": [
-                _model(
-                    "org/more-vram-fewer-params-AWQ", ["awq"], params_billion=1.0, weights_gb=4.0
-                ),
-                _model(
-                    "org/less-vram-more-params-AWQ", ["awq"], params_billion=2.0, weights_gb=2.0
-                ),
-            ]
-        },
-    )
-
-    results = search_models(quantizations=["awq"], max_size_gb=100.0)
-
-    assert results[0].repo_id == "org/less-vram-more-params-AWQ"
-
-
 def test_ranking_measures_params_against_max_params_when_given(monkeypatch):
     # Relative to the largest candidate, 1B vs 2B is a big fit gap that
     # outweighs 1000 vs 100 downloads; against a 100B ceiling it's a
@@ -560,25 +414,6 @@ def test_quantization_searches_run_concurrently(monkeypatch):
     assert elapsed < per_call_delay * 3
 
 
-def test_repo_sizing_runs_concurrently(monkeypatch):
-    per_call_delay = 0.2
-    candidates = [_model(f"org/model-{i}-1B-AWQ", ["awq"], weights_gb=1.0) for i in range(5)]
-    _patch_hub(monkeypatch, {"awq": candidates})
-    fake_list_repo_tree = discovery.list_repo_tree
-
-    def slow_list_repo_tree(repo_id):
-        time.sleep(per_call_delay)
-        return fake_list_repo_tree(repo_id)
-
-    monkeypatch.setattr(discovery, "list_repo_tree", slow_list_repo_tree)
-
-    start = time.monotonic()
-    search_models(quantizations=["awq"], max_size_gb=100.0)
-    elapsed = time.monotonic() - start
-
-    assert elapsed < per_call_delay * 3
-
-
 def test_query_shaped_like_a_repo_id_falls_back_to_a_direct_lookup(monkeypatch):
     """The fuzzy search finding nothing for an exact `org/repo` query
     (a real, observed case - the Hub's own search doesn't tokenize a
@@ -587,7 +422,7 @@ def test_query_shaped_like_a_repo_id_falls_back_to_a_direct_lookup(monkeypatch):
     _patch_hub(
         monkeypatch,
         {},
-        other_repos=[_model("org/exact-repo-nvfp4", ["nvfp4"], weights_gb=20.0)],
+        other_repos=[_model("org/exact-repo-nvfp4", ["nvfp4"])],
     )
 
     results = search_models(
@@ -600,7 +435,7 @@ def test_query_shaped_like_a_repo_id_falls_back_to_a_direct_lookup(monkeypatch):
 def test_query_shaped_like_a_repo_id_skips_direct_lookup_when_search_already_found_it(
     monkeypatch,
 ):
-    found = _model("org/exact-repo-nvfp4", ["nvfp4"], weights_gb=20.0)
+    found = _model("org/exact-repo-nvfp4", ["nvfp4"])
     calls = _patch_hub(monkeypatch, {"nvfp4 org/exact-repo-nvfp4": [found]})
 
     results = search_models(

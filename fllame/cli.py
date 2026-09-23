@@ -97,7 +97,7 @@ def _load_or_exit(handle: str) -> Recipe:
 
 
 def _write_recipe_compose(recipe: Recipe, *, default_gpu_memory_utilization: float) -> str | None:
-    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines, 
+    """Writes `compose.yaml` for a recipe. If the recipe has preinstall lines,
     also a `Dockerfile` is generated, which is used by `compose.yaml`.
     Returns the Dockerfile content written, or `None` when this
     recipe has no `preinstall`.
@@ -484,8 +484,7 @@ def recipe_add(
 
         env = {}
         for line in _read_block(
-            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D "
-            "to skip:"
+            "Environment variables, one KEY=VALUE per line - blank line or Ctrl-D " "to skip:"
         ):
             try:
                 key, value = parse_env_line(line)
@@ -929,8 +928,7 @@ def model_update(
     repo_id: str | None = typer.Argument(
         None,
         show_default=False,
-        help="Check only REPO_ID; omit to check every model currently in "
-        "the local cache.",
+        help="Check only REPO_ID; omit to check every model currently in " "the local cache.",
     ),
     apply: bool = typer.Option(
         False,
@@ -1057,12 +1055,15 @@ def model_scan(
     Parameter counts come from the repo name (e.g. 27B), falling back to the
     Hub's own count.
 
-    Estimated VRAM is the minimum to serve one request at a time with
-    --max-model-len 32768: the weights, plus 8 KB of KV cache per token per
-    billion parameters, plus 2 GB runtime overhead. For the models listed,
-    the weights are the actual file sizes; for filtering the rest, they are
-    estimated from the parameter count and quantization. More concurrent
-    requests or a longer context need more.
+    Estimated VRAM assumes one request at a time with --max-model-len 32768:
+    weights estimated from the parameter count and quantization, plus 8 KB of
+    KV cache per token per billion parameters, plus 2 GB runtime overhead.
+
+    Real VRAM use depends on the recipe, --max-model-len above all: if it isn't
+    set, vLLM uses the model's maximum context length, which can need far more.
+
+    Each concurrent request needs its own KV cache, adding about 0.25 GB per
+    billion parameters at 32K context.
     """
     profile = scan_hardware() if quantization is None or max_size is None else None
 
