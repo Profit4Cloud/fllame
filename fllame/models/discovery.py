@@ -73,11 +73,10 @@ _DOWNLOADS_ALL_TIME_WEIGHT = 0.3
 _DOWNLOADS_RECENT_WEIGHT = 0.4
 
 # Downloads span orders of magnitude, so they're scored on an S-curve
-# over their log: 1 / (1 + (midpoint / downloads) ^ steepness). Fixed
-# rather than relative to the results, so a search that only finds
-# barely used repos can't make them look popular: 50k scores 0.1,
-# 100k 0.2, the midpoint 0.5, 1M 0.8, 4M+ ~0.96. The same curve serves
-# both counts. A repo whose all-time count is still under the floor is
+# over their log: 1 / (1 + (midpoint / downloads) ^ steepness) - 50k
+# scores 0.1, 100k 0.2, the midpoint 0.5, 1M 0.8 - then scaled so the
+# most-downloaded result gets exactly 1.0. The same curve serves both
+# counts. A repo whose all-time count is still under the floor is
 # a last resort, listed only once nothing better is left - otherwise
 # size alone could lift it.
 _DOWNLOADS_MIDPOINT = 316_000
@@ -289,17 +288,25 @@ def _rank(
             return _UNKNOWN_PARAMS_SCORE
         return min(1.0, c.params_billion / params_ceiling)
 
+    top_all_time = max((_downloads_curve(c.downloads_all_time) for c in candidates), default=0.0)
+    top_recent = max((_downloads_curve(c.downloads) for c in candidates), default=0.0)
+
     def score(c: ModelCandidate) -> float:
         return (
             _FIT_WEIGHT * fit_score(c)
-            + _DOWNLOADS_ALL_TIME_WEIGHT * _downloads_score(c.downloads_all_time)
-            + _DOWNLOADS_RECENT_WEIGHT * _downloads_score(c.downloads)
+            + _DOWNLOADS_ALL_TIME_WEIGHT
+            * _relative(_downloads_curve(c.downloads_all_time), top_all_time)
+            + _DOWNLOADS_RECENT_WEIGHT * _relative(_downloads_curve(c.downloads), top_recent)
         )
 
     return sorted(candidates, key=score, reverse=True)
 
 
-def _downloads_score(downloads: int | None) -> float:
+def _downloads_curve(downloads: int | None) -> float:
     if not downloads:
         return 0.0
     return 1 / (1 + (_DOWNLOADS_MIDPOINT / downloads) ** _DOWNLOADS_STEEPNESS)
+
+
+def _relative(value: float, top: float) -> float:
+    return value / top if top > 0 else 0.0

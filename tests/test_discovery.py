@@ -432,8 +432,18 @@ def test_ranking_lets_a_much_more_popular_model_beat_a_larger_one(monkeypatch):
         (None, 0.0),
     ],
 )
-def test_downloads_score_is_an_s_curve_around_316k(downloads, score):
-    assert discovery._downloads_score(downloads) == pytest.approx(score, abs=0.01)
+def test_downloads_curve_is_an_s_curve_around_316k(downloads, score):
+    assert discovery._downloads_curve(downloads) == pytest.approx(score, abs=0.01)
+
+
+def test_downloads_are_scaled_so_the_most_downloaded_result_scores_one():
+    top = discovery._downloads_curve(4_200_000)
+
+    assert discovery._relative(top, top) == 1.0
+    assert discovery._relative(discovery._downloads_curve(1_000_000), top) == pytest.approx(
+        0.84, abs=0.01
+    )
+    assert discovery._relative(0.5, 0.0) == 0.0
 
 
 def test_rarely_downloaded_models_come_after_every_popular_one(monkeypatch):
