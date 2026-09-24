@@ -1556,9 +1556,10 @@ def bench(
         )
         raise typer.Exit(code=1)
 
-    started = datetime.now(UTC)
-    stamp = started.strftime("%Y%m%d-%H%M%S")
+    started = datetime.now().astimezone()
+    stamp = started.strftime("%Y%m%d-%H%M")
     run_dir = config.recipe_dir(handle) / "bench" / stamp
+    shutil.rmtree(run_dir, ignore_errors=True)
     run_dir.mkdir(parents=True)
     container_dir = f"/tmp/fllame-bench-{stamp}"
 
@@ -1577,7 +1578,7 @@ def bench(
     vllm_version = version.stdout.strip() if version.returncode == 0 else ""
     params = {
         "handle": handle,
-        "started_at": started.isoformat(),
+        "started_at": started.isoformat(timespec="seconds"),
         "model": model,
         "base_url": base_url,
         "input_len": input_len,

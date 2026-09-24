@@ -3062,3 +3062,23 @@ def test_bench_progress_mirrors_latest_output_line_behind_prefix(monkeypatch):
     assert progress[1].endswith("Concurrency: 1 |   0%|    | 0/10")
     assert progress[-1].endswith("Concurrency: 1 |  20%|#   | 2/10 [02:36<10:25]")
     assert any(arg.startswith("COLUMNS=") for arg in commands[0])
+
+
+def test_bench_rerun_within_same_minute_replaces_run_folder(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    _patch_bench_docker(monkeypatch, _fake_bench_docker([]))
+    fixed = cli.datetime(2026, 9, 24, 12, 0, 5).astimezone()
+
+    class _FixedDatetime(cli.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(cli, "datetime", _FixedDatetime)
+
+    assert runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"]).exit_code == 0
+    assert runner.invoke(app, ["bench", "demo", "--concurrency", "2"]).exit_code == 0
+
+    (run_dir,) = (tmp_path / "demo" / "bench").iterdir()
+    assert run_dir.name == "20260924-1200"
+    assert sorted(p.name for p in run_dir.glob("c*.json")) == ["c2.json"]
