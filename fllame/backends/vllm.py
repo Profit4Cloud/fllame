@@ -105,6 +105,8 @@ class VllmServingBackend:
             "HF_HOME": _CONTAINER_HF_HOME,
             "HF_HUB_CACHE": _CONTAINER_HF_HOME,
             "HF_HUB_OFFLINE": "1",
+            # Without a TTY, Python block-buffers stdout and `docker logs` stalls.
+            "PYTHONUNBUFFERED": "1",
             **recipe.env,
         }
         serve_args = list(recipe.serve_args)

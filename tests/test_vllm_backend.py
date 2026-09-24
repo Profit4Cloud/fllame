@@ -71,6 +71,7 @@ def test_build_service_with_gpus(monkeypatch):
         "HF_HOME=/root/.cache/huggingface",
         "HF_HUB_CACHE=/root/.cache/huggingface",
         "HF_HUB_OFFLINE=1",
+        "PYTHONUNBUFFERED=1",
         "FOO=bar",
     ]
     assert service["volumes"] == ["/home/user/.cache/huggingface:/root/.cache/huggingface"]
