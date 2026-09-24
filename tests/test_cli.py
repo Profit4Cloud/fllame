@@ -2948,8 +2948,8 @@ def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, mon
         assert command[command.index("--base-url") + 1] == "http://localhost:8000"
     lines = result.stdout.splitlines()
     assert lines[0].split()[:3] == ["CONC", "PROMPTS", "FAILED"]
-    assert lines[1].split()[:4] == ["1", "10", "8", "1.50"]
-    assert lines[2].split()[:4] == ["4", "12", "4", "1.50"]
+    assert lines[1].split()[:4] == ["1", "10", "8", "0.67"]
+    assert lines[2].split()[:4] == ["4", "12", "4", "0.67"]
 
 
 def test_bench_saves_reproducible_run_folder(tmp_path: Path, monkeypatch):
@@ -3000,7 +3000,7 @@ def test_bench_help_explains_every_column():
     result = runner.invoke(app, ["bench", "-h"])
 
     assert result.exit_code == 0
-    for header in ("CONC", "FAILED", "OUT TOK/S", "P99 TTFT MS", "ITL MS"):
+    for header in ("CONC", "FAILED", "S/REQ", "OUT TOK/S", "TPOT MS"):
         assert header in result.stdout
 
 

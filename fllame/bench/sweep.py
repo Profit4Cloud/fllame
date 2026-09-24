@@ -28,13 +28,19 @@ class Column:
     header: str
     help: str
     key: str | None = None
+    inverted: bool = False
 
 
 COLUMNS = (
     Column("CONC", "Maximum number of requests in flight at once."),
     Column("PROMPTS", "Number of requests sent at this concurrency level."),
     Column("FAILED", "Requests that errored instead of completing."),
-    Column("REQ/S", "Completed requests per second.", "request_throughput"),
+    Column(
+        "S/REQ",
+        "Seconds per completed request, over the whole level.",
+        "request_throughput",
+        inverted=True,
+    ),
     Column(
         "OUT TOK/S", "Generated tokens per second, summed over all requests.", "output_throughput"
     ),
@@ -44,9 +50,7 @@ COLUMNS = (
         "total_token_throughput",
     ),
     Column("TTFT MS", "Mean time until a request's first token arrives.", "mean_ttft_ms"),
-    Column("P99 TTFT MS", "Time to first token for the slowest 1% of requests.", "p99_ttft_ms"),
     Column("TPOT MS", "Mean time per generated token, excluding the first.", "mean_tpot_ms"),
-    Column("ITL MS", "Mean gap between two consecutive streamed tokens.", "mean_itl_ms"),
 )
 
 
@@ -102,8 +106,6 @@ def bench_command(
         "--random-output-len", str(output_len),
         "--max-concurrency", str(level.concurrency),
         "--num-prompts", str(level.num_prompts),
-        "--percentile-metrics", "ttft,tpot,itl",
-        "--metric-percentiles", "99",
         "--save-result",
         "--result-dir", result_dir,
         "--result-filename", result_filename,
@@ -129,7 +131,14 @@ def result_cells(level: Level, result: dict) -> list[str]:
         str(level.num_prompts),
         str(failed) if isinstance(failed, int) else "-",
     ]
-    return cells + [_format_metric(result.get(column.key)) for column in COLUMNS[3:]]
+    return cells + [_format_metric(_metric(result, column)) for column in COLUMNS[3:]]
+
+
+def _metric(result: dict, column: Column) -> object:
+    value = result.get(column.key)
+    if column.inverted and isinstance(value, int | float):
+        return 1 / value if value > 0 else None
+    return value
 
 
 def column_widths() -> list[int]:

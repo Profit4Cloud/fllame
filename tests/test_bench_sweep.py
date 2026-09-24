@@ -84,17 +84,15 @@ def test_result_cells():
         "output_throughput": 1234.56,
         "total_token_throughput": 12000.4,
         "mean_ttft_ms": 250.0,
-        "p99_ttft_ms": 900.25,
         "mean_tpot_ms": 20.04,
-        "mean_itl_ms": 19.96,
     }
     assert result_cells(Level(4, 16), result) == [
-        "4", "16", "1", "0.51", "1235", "12000", "250.0", "900.2", "20.0", "20.0",
+        "4", "16", "1", "1.95", "1235", "12000", "250.0", "20.0",
     ]  # fmt: skip
 
 
 def test_result_cells_prefers_reported_failed_count_and_dashes_missing_metrics():
-    cells = result_cells(Level(1, 10), {"completed": 10, "failed": 2})
+    cells = result_cells(Level(1, 10), {"completed": 10, "failed": 2, "request_throughput": 0})
     assert cells[:3] == ["1", "10", "2"]
     assert set(cells[3:]) == {"-"}
 
