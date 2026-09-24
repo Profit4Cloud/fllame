@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,6 +28,21 @@ from fllame.backends.vllm import (
     generate_dockerfile,
     tensor_parallel_size_mismatch_warning,
     validate_gpu_memory_utilization,
+)
+from fllame.bench.sweep import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_INPUT_LEN,
+    DEFAULT_OUTPUT_LEN,
+    Level,
+    SweepError,
+    bench_command,
+    build_levels,
+    column_widths,
+    columns_help,
+    format_row,
+    header_row,
+    parse_int_list,
+    result_cells,
 )
 from fllame.compose.generator import generate_compose, write_compose_file
 from fllame.domain.recipe import Recipe, RecipeError
@@ -52,7 +70,16 @@ _CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 # Typer always lists plain @app.command()s before add_typer() sub-apps,
 # regardless of registration order, so the top-level `--help` listing
 # can't otherwise follow the happy path (see CLAUDE.md).
-_TOP_LEVEL_COMMAND_ORDER = ("config", "hardware", "model", "recipe", "serve", "status", "stop")
+_TOP_LEVEL_COMMAND_ORDER = (
+    "config",
+    "hardware",
+    "model",
+    "recipe",
+    "serve",
+    "bench",
+    "status",
+    "stop",
+)
 
 
 class _TopLevelGroup(TyperGroup):
@@ -1329,6 +1356,281 @@ def serve(
             "after this returns is expected, not a problem."
         )
     raise typer.Exit(code=code)
+
+
+def _exec_in_container(handle: str, *command: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["docker", *_compose_args(handle, "exec", "-T", handle, *command)],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as e:
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1) from e
+
+
+# Run with the container's own python: the vLLM image is not guaranteed to ship curl.
+_PROBE_SCRIPT = """
+import sys, urllib.request
+base = sys.argv[1]
+urllib.request.urlopen(base + "/health", timeout=5)
+print(urllib.request.urlopen(base + "/v1/models", timeout=5).read().decode())
+"""
+
+# `docker exec` without a TTY doesn't forward Ctrl-C into the container, so the
+# bench process is signalled explicitly. Walks /proc rather than calling pkill,
+# which the vLLM image isn't guaranteed to ship either.
+_STOP_BENCH_SCRIPT = """
+import os, signal, sys
+marker = sys.argv[1]
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\\0", b" ").decode()
+    except OSError:
+        continue
+    if marker in cmdline and int(pid) != os.getpid():
+        os.kill(int(pid), signal.SIGINT)
+"""
+
+
+def _require_running(handle: str) -> None:
+    containers, code = _compose_ps_json(handle)
+    if code != 0:
+        raise typer.Exit(code=code)
+    if any(c.get("State") == "running" for c in containers if c.get("Service", handle) == handle):
+        return
+    typer.echo(
+        f"'{handle}' is not running - start it first with `fllame serve {handle}`.", err=True
+    )
+    raise typer.Exit(code=1)
+
+
+def _served_command(handle: str) -> list[str]:
+    """What the container actually runs, from compose.yaml - it may have
+    been hand-edited away from recipe.yaml."""
+    try:
+        compose = yaml.safe_load((config.recipe_dir(handle) / "compose.yaml").read_text())
+        return [str(token) for token in compose["services"][handle].get("command") or []]
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError, OSError):
+        return []
+
+
+def _probe_served_model(handle: str, base_url: str) -> dict:
+    result = _exec_in_container(handle, "python3", "-c", _PROBE_SCRIPT, base_url)
+    try:
+        return json.loads(result.stdout)["data"][0]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        pass
+    typer.echo(
+        f"'{handle}' is running, but vLLM isn't answering at {base_url} yet - the model is "
+        f"probably still loading. Follow it with: docker logs -f "
+        f"{config.compose_project_name(handle)}",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _run_showing_progress(
+    handle: str, prefix: str, command: list[str]
+) -> subprocess.CompletedProcess:
+    live = sys.stdout.isatty()
+    width = shutil.get_terminal_size().columns - 1
+    # tqdm can't size its bar over a pipe and falls back to $COLUMNS.
+    columns = max(width - len(prefix), 40)
+    try:
+        process = subprocess.Popen(
+            [
+                "docker",
+                *_compose_args(handle, "exec", "-T", "-e", f"COLUMNS={columns}", handle, *command),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError as e:
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1) from e
+
+    output: list[str] = []
+    latest = [""]
+
+    def read() -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
+        while chunk := process.stdout.read1(4096):
+            text = decoder.decode(chunk)
+            output.append(text)
+            # tqdm redraws with \r, ordinary log lines end in \n.
+            *done, pending = re.split(r"[\r\n]", pending + text)
+            for line in (*done, pending):
+                if line.strip():
+                    latest[0] = line.rstrip()
+
+    # A daemon thread, so Ctrl-C can exit without waiting on a docker client
+    # that's still attached to the container.
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    shown = None
+    try:
+        while reader.is_alive():
+            if live and latest[0] != shown:
+                shown = latest[0]
+                sys.stdout.write(f"\r\033[K{(prefix + shown)[:width]}")
+                sys.stdout.flush()
+            reader.join(0.1)
+    finally:
+        if live:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+    return subprocess.CompletedProcess(process.args, process.wait(), "".join(output), "")
+
+
+def _save_bench_context(
+    run_dir: Path, recipe: Recipe, params: dict, *, vllm_version: str | None
+) -> None:
+    recipe_dir = config.recipe_dir(recipe.handle)
+    for name in ("recipe.yaml", "compose.yaml", "Dockerfile"):
+        if (recipe_dir / name).is_file():
+            shutil.copy2(recipe_dir / name, run_dir / name)
+    settings = {
+        "default_image": config_file.get_default_image() or _FALLBACK_IMAGE,
+        "default_gpu_memory_utilization": config_file.get_default_gpu_memory_utilization(),
+    }
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(settings, sort_keys=False))
+    (run_dir / "params.yaml").write_text(
+        yaml.safe_dump({**params, "vllm_version": vllm_version}, sort_keys=False)
+    )
+
+
+@app.command(
+    help=(
+        "Benchmark HANDLE's running container with `vllm bench serve` at several "
+        "concurrency levels, on random prompts - a speed test, not a quality test. "
+        "HANDLE must already be up via `fllame serve`.\n\n"
+        "Every run is saved to HANDLE's bench/<timestamp>/ folder, with the result JSON "
+        "per level plus the recipe, compose.yaml, Dockerfile, config and parameters used.\n\n"
+        "Columns:\n\n\b\n" + columns_help()
+    )
+)
+def bench(
+    handle: str = typer.Argument(..., show_default=False),
+    concurrency: str = typer.Option(
+        ",".join(str(c) for c in DEFAULT_CONCURRENCY),
+        "--concurrency",
+        help="Comma-separated concurrency levels.",
+    ),
+    num_prompts: str | None = typer.Option(
+        None,
+        "--num-prompts",
+        show_default=False,
+        help="Comma-separated requests per level, each a multiple of its concurrency "
+        "[default: at least 10 requests and 2 full waves].",
+    ),
+    input_len: int = typer.Option(DEFAULT_INPUT_LEN, "--input-len", help="Prompt tokens."),
+    output_len: int = typer.Option(DEFAULT_OUTPUT_LEN, "--output-len", help="Generated tokens."),
+) -> None:
+    recipe = _load_or_exit(handle)
+    _require_compose_built(recipe)
+    try:
+        levels = build_levels(
+            parse_int_list("--concurrency", concurrency),
+            parse_int_list("--num-prompts", num_prompts) if num_prompts is not None else None,
+        )
+    except SweepError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    _require_running(handle)
+    port = extract_flag_value(_served_command(handle), "--port") or "8000"
+    base_url = f"http://localhost:{port}"
+    served = _probe_served_model(handle, base_url)
+    model = served["id"]
+
+    max_model_len = served.get("max_model_len")
+    if isinstance(max_model_len, int) and input_len + output_len > max_model_len:
+        typer.echo(
+            f"--input-len {input_len} + --output-len {output_len} exceeds '{handle}''s "
+            f"max model length of {max_model_len} tokens - lower either.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    started = datetime.now().astimezone()
+    stamp = started.strftime("%Y%m%d-%H%M")
+    run_dir = config.recipe_dir(handle) / "bench" / stamp
+    shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir(parents=True)
+    container_dir = f"/tmp/fllame-bench-{stamp}"
+
+    def command_for(level: Level) -> list[str]:
+        return bench_command(
+            model=model,
+            base_url=base_url,
+            level=level,
+            input_len=input_len,
+            output_len=output_len,
+            result_dir=container_dir,
+            result_filename=f"c{level.concurrency}.json",
+        )
+
+    version = _exec_in_container(handle, "vllm", "--version")
+    vllm_version = version.stdout.strip() if version.returncode == 0 else ""
+    params = {
+        "handle": handle,
+        "started_at": started.isoformat(timespec="seconds"),
+        "model": model,
+        "base_url": base_url,
+        "input_len": input_len,
+        "output_len": output_len,
+        "levels": [dataclasses.asdict(level) for level in levels],
+        "commands": [shlex.join(command_for(level)) for level in levels],
+    }
+    _save_bench_context(
+        run_dir,
+        recipe,
+        params,
+        vllm_version=vllm_version or None,
+    )
+
+    widths = column_widths()
+    lines = [header_row(widths)]
+    try:
+        for level in levels:
+            result = _run_showing_progress(
+                handle, f"Concurrency: {level.concurrency} | ", command_for(level)
+            )
+            if result.returncode != 0:
+                typer.echo((result.stdout + result.stderr).rstrip(), err=True)
+                typer.echo(
+                    f"`vllm bench serve` failed at concurrency {level.concurrency} - see "
+                    f"its output above. Levels finished so far are in {run_dir}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            saved = _exec_in_container(handle, "cat", f"{container_dir}/c{level.concurrency}.json")
+            try:
+                data = json.loads(saved.stdout)
+            except json.JSONDecodeError:
+                data = {}
+            (run_dir / f"c{level.concurrency}.json").write_text(json.dumps(data, indent=2))
+            if len(lines) == 1:
+                typer.echo(lines[0])
+            lines.append(format_row(result_cells(level, data), widths))
+            typer.echo(lines[-1])
+    except KeyboardInterrupt:
+        _exec_in_container(handle, "python3", "-c", _STOP_BENCH_SCRIPT, container_dir)
+        typer.echo(
+            f"interrupted - stopped `vllm bench serve` in '{handle}'. Levels finished so far "
+            f"are in {run_dir}",
+            err=True,
+        )
+        raise typer.Exit(code=130) from None
+    finally:
+        _exec_in_container(handle, "rm", "-rf", container_dir)
+        (run_dir / "results.txt").write_text("\n".join(lines) + "\n")
+
+    typer.echo(f"\nsaved to {run_dir}")
 
 
 def _status_row_from_recipe(handle: str, recipe: Recipe) -> list[str]:

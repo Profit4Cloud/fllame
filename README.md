@@ -38,6 +38,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
 - fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
 - fllame serve HANDLE [--yes] # Launch HANDLE's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
+- fllame bench HANDLE [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside HANDLE's running container, print a results table, and save a reproducible run to HANDLE's bench/<timestamp>/ folder.
 - fllame status # Show every recipe's container state via docker compose ps.
 - fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
 
