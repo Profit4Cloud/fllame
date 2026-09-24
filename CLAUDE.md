@@ -9,7 +9,7 @@ that always runs before serving.
 
 ```
 fllame/            # The package. CLI (Typer), domain types, backends, generators.
-  cli.py             # Entry point - `recipe`, `hardware`, `model`, `serve`, `status`, `stop`.
+  cli.py             # Entry point - `recipe`, `hardware`, `model`, `serve`, `bench`, `status`, `stop`.
   domain/recipe.py   # The `Recipe` type and its validation.
   domain/hardware.py # The `HardwareProfile` type - a scan snapshot, never persisted.
   backends/           # `ServingBackend` seam; `vllm.py` is the only implementation,
@@ -25,6 +25,7 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   models/sizing.py   # The coarse hardware memory budget `--max-size` defaults to.
   models/updater.py  # Checks a cached model against the Hub for a newer revision.
   models/vram.py    #  VRAM estimate for a recipe
+  bench/sweep.py     # `vllm bench serve` concurrency sweep: commands and results table.
 tests/              # pytest, one module per fllame/ module above.
 examples/recipes/   # Sample recipe files, for reference - not loaded at runtime.
 ```
@@ -53,7 +54,7 @@ Two phases, hard rule:
 
 - **Setup** - `recipe add`/`edit`/`remove`/`build`, `model pull`/`scan`/
   `update`, `hardware scan`, `config`. Network allowed.
-- **Running** - `serve`, `status`, `stop`. Network not allowed.
+- **Running** - `serve`, `bench`, `status`, `stop`. Network not allowed.
 
 The principle is: "pull online, run fully offline". 
 `HF_HUB_OFFLINE=1`on the container extends it to vLLM. 
@@ -97,6 +98,7 @@ The only exceptions are `config set-default-image IMAGE` and
 - config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
 - config set-default-gpu-memory-utilization VALUE — Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own; offers to update existing compose.yaml files still using the old default.
 - serve HANDLE [--detach] [--yes] — Launch HANDLE's recipe via docker compose up; never touches the network.
+- bench HANDLE [--concurrency LIST] [--num-prompts LIST] [--input-len N] [--output-len N] — Benchmark HANDLE's running container at several concurrency levels; saves each run to its bench/ folder.
 - status — Show every recipe's container state via docker compose ps.
 - stop HANDLE — Stop HANDLE's container via docker compose stop.
 
@@ -111,4 +113,5 @@ The only exceptions are `config set-default-image IMAGE` and
 4. recipe add [VLLM_SERVE_LINE...]
 5. recipe build HANDLE
 6. serve HANDLE
-7. stop HANDLE
+7. bench HANDLE
+8. stop HANDLE
