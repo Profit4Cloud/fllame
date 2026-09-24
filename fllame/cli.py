@@ -9,8 +9,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1378,6 +1378,22 @@ urllib.request.urlopen(base + "/health", timeout=5)
 print(urllib.request.urlopen(base + "/v1/models", timeout=5).read().decode())
 """
 
+# `docker exec` without a TTY doesn't forward Ctrl-C into the container, so the
+# bench process is signalled explicitly. Walks /proc rather than calling pkill,
+# which the vLLM image isn't guaranteed to ship either.
+_STOP_BENCH_SCRIPT = """
+import os, signal, sys
+marker = sys.argv[1]
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\\0", b" ").decode()
+    except OSError:
+        continue
+    if marker in cmdline and int(pid) != os.getpid():
+        os.kill(int(pid), signal.SIGINT)
+"""
+
 
 def _require_running(handle: str) -> None:
     containers, code = _compose_ps_json(handle)
@@ -1422,10 +1438,21 @@ _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 def _run_with_spinner(label: str, run) -> subprocess.CompletedProcess:
     spin = sys.stdout.isatty()
     started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(run)
-        frame = 0
-        while not future.done():
+    outcome: dict = {}
+
+    def target() -> None:
+        try:
+            outcome["result"] = run()
+        except BaseException as e:
+            outcome["error"] = e
+
+    # A daemon thread, so Ctrl-C can exit without waiting on a docker client
+    # that's still attached to the container.
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    frame = 0
+    try:
+        while worker.is_alive():
             if spin:
                 elapsed = int(time.monotonic() - started)
                 sys.stdout.write(
@@ -1434,11 +1461,14 @@ def _run_with_spinner(label: str, run) -> subprocess.CompletedProcess:
                 )
                 sys.stdout.flush()
                 frame += 1
-            time.sleep(0.1)
-    if spin:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
-    return future.result()
+            worker.join(0.1)
+    finally:
+        if spin:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def _save_bench_context(
@@ -1572,6 +1602,14 @@ def bench(
             (run_dir / f"c{level.concurrency}.json").write_text(json.dumps(data, indent=2))
             lines.append(format_row(result_cells(level, data), widths))
             typer.echo(lines[-1])
+    except KeyboardInterrupt:
+        _exec_in_container(handle, "python3", "-c", _STOP_BENCH_SCRIPT, container_dir)
+        typer.echo(
+            f"interrupted - stopped `vllm bench serve` in '{handle}'. Levels finished so far "
+            f"are in {run_dir}",
+            err=True,
+        )
+        raise typer.Exit(code=130) from None
     finally:
         _exec_in_container(handle, "rm", "-rf", container_dir)
         (run_dir / "results.txt").write_text("\n".join(lines) + "\n")

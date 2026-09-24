@@ -2981,3 +2981,27 @@ def test_bench_help_explains_every_column():
     assert result.exit_code == 0
     for header in ("CONC", "FAILED", "OUT TOK/S", "P99 TTFT MS", "ITL MS"):
         assert header in result.stdout
+
+
+def test_bench_ctrl_c_stops_bench_inside_container(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    fake_docker = _fake_bench_docker(commands)
+
+    def fake_run(command, **kwargs):
+        if "bench" in command and "serve" in command:
+            commands.append(command)
+            raise KeyboardInterrupt
+        return fake_docker(command, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
+
+    assert result.exit_code == 130
+    (bench_command,) = _bench_commands(commands)
+    result_dir = bench_command[bench_command.index("--result-dir") + 1]
+    stop = next(c for c in commands if cli._STOP_BENCH_SCRIPT in c)
+    assert stop[-1] == result_dir
+    assert "stopped `vllm bench serve`" in result.output
+    assert any(c[-3:] == ["rm", "-rf", result_dir] for c in commands)
