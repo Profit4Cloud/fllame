@@ -1501,9 +1501,6 @@ def bench(
     base_url = f"http://localhost:{port}"
     served = _probe_served_model(handle, base_url)
     model = served["id"]
-    # A --served-model-name isn't a repo id, so bench can't load the tokenizer by it.
-    root = served.get("root")
-    tokenizer = root if root and root != model else None
 
     max_model_len = served.get("max_model_len")
     if isinstance(max_model_len, int) and input_len + output_len > max_model_len:
@@ -1523,7 +1520,6 @@ def bench(
     def command_for(level: Level) -> list[str]:
         return bench_command(
             model=model,
-            tokenizer=tokenizer,
             base_url=base_url,
             level=level,
             input_len=input_len,

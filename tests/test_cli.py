@@ -2813,7 +2813,7 @@ def _fake_bench_docker(
     probe_ok=True,
     bench_returncode=0,
 ):
-    served = served or {"id": "org/demo", "root": "org/demo", "max_model_len": 32768}
+    served = served or {"id": "org/demo", "max_model_len": 32768}
 
     def fake_run(command, **kwargs):
         commands.append(command)
@@ -2887,7 +2887,7 @@ def test_bench_reports_server_still_loading(tmp_path: Path, monkeypatch):
 def test_bench_rejects_lengths_over_max_model_len(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    served = {"id": "org/demo", "root": "org/demo", "max_model_len": 8192}
+    served = {"id": "org/demo", "max_model_len": 8192}
     monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, served=served))
 
     result = runner.invoke(app, ["bench", "demo"])
@@ -2925,7 +2925,6 @@ def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, mon
         assert command[command.index("exec") : command.index("exec") + 3] == ["exec", "-T", "demo"]
         assert command[command.index("--model") + 1] == "org/demo"
         assert command[command.index("--base-url") + 1] == "http://localhost:8000"
-        assert "--tokenizer" not in command
     lines = result.stdout.splitlines()
     assert lines[0].split()[:3] == ["CONC", "PROMPTS", "FAILED"]
     assert lines[1].split()[:4] == ["1", "10", "8", "1.50"]
@@ -2960,20 +2959,6 @@ def test_bench_saves_reproducible_run_folder(tmp_path: Path, monkeypatch):
     assert set(settings) == {"default_image", "default_gpu_memory_utilization"}
     assert json.loads((run_dir / "c2.json").read_text())["completed"] == 4
     assert str(run_dir) in result.stdout
-
-
-def test_bench_passes_tokenizer_for_served_model_name(tmp_path: Path, monkeypatch):
-    _setup_bench(tmp_path, monkeypatch)
-    commands = []
-    served = {"id": "demo-alias", "root": "org/demo", "max_model_len": 32768}
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, served=served))
-
-    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1"])
-
-    assert result.exit_code == 0, result.output
-    (command,) = _bench_commands(commands)
-    assert command[command.index("--model") + 1] == "demo-alias"
-    assert command[command.index("--tokenizer") + 1] == "org/demo"
 
 
 def test_bench_stops_on_failed_level_and_cleans_up(tmp_path: Path, monkeypatch):

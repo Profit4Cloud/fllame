@@ -85,7 +85,6 @@ def build_levels(concurrency: list[int], num_prompts: list[int] | None) -> list[
 def bench_command(
     *,
     model: str,
-    tokenizer: str | None,
     base_url: str,
     level: Level,
     input_len: int,
@@ -109,8 +108,6 @@ def bench_command(
         "--result-dir", result_dir,
         "--result-filename", result_filename,
     ]  # fmt: skip
-    if tokenizer is not None:
-        command += ["--tokenizer", tokenizer]
     return command
 
 

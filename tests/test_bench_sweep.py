@@ -47,10 +47,9 @@ def test_build_levels_rejects_partial_wave():
         build_levels([8], [20])
 
 
-def _command(tokenizer=None):
+def _command():
     return bench_command(
         model="org/demo",
-        tokenizer=tokenizer,
         base_url="http://localhost:8000",
         level=Level(4, 16),
         input_len=100,
@@ -76,11 +75,6 @@ def test_bench_command():
     assert _flag(command, "--result-dir") == "/tmp/x"
     assert _flag(command, "--result-filename") == "c4.json"
     assert "--save-result" in command
-    assert "--tokenizer" not in command
-
-
-def test_bench_command_with_tokenizer():
-    assert _flag(_command(tokenizer="org/repo"), "--tokenizer") == "org/repo"
 
 
 def test_result_cells():
