@@ -1595,7 +1595,6 @@ def bench(
 
     widths = column_widths()
     lines = [header_row(widths)]
-    typer.echo(lines[0])
     try:
         for level in levels:
             result = _run_showing_progress(
@@ -1615,6 +1614,8 @@ def bench(
             except json.JSONDecodeError:
                 data = {}
             (run_dir / f"c{level.concurrency}.json").write_text(json.dumps(data, indent=2))
+            if len(lines) == 1:
+                typer.echo(lines[0])
             lines.append(format_row(result_cells(level, data), widths))
             typer.echo(lines[-1])
     except KeyboardInterrupt:

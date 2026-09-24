@@ -3020,6 +3020,7 @@ def test_bench_ctrl_c_stops_bench_inside_container(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
 
     assert result.exit_code == 130
+    assert "CONC" not in result.stdout
     (bench_command,) = _bench_commands(commands)
     result_dir = bench_command[bench_command.index("--result-dir") + 1]
     stop = next(c for c in commands if cli._STOP_BENCH_SCRIPT in c)
@@ -3082,3 +3083,27 @@ def test_bench_rerun_within_same_minute_replaces_run_folder(tmp_path: Path, monk
     (run_dir,) = (tmp_path / "demo" / "bench").iterdir()
     assert run_dir.name == "20260924-1200"
     assert sorted(p.name for p in run_dir.glob("c*.json")) == ["c2.json"]
+
+
+def test_bench_ctrl_c_keeps_finished_levels(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    fake_docker = _fake_bench_docker(commands)
+
+    def fake_run(command, **kwargs):
+        if (
+            "--max-concurrency" in command
+            and command[command.index("--max-concurrency") + 1] == "8"
+        ):
+            raise KeyboardInterrupt
+        return fake_docker(command, **kwargs)
+
+    _patch_bench_docker(monkeypatch, fake_run)
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4,8"])
+
+    assert result.exit_code == 130
+    (run_dir,) = (tmp_path / "demo" / "bench").iterdir()
+    assert sorted(p.name for p in run_dir.glob("c*.json")) == ["c1.json", "c4.json"]
+    results = (run_dir / "results.txt").read_text().splitlines()
+    assert [line.split()[0] for line in results] == ["CONC", "1", "4"]
