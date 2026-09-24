@@ -1,4 +1,6 @@
+import io
 import json
+import time
 from pathlib import Path
 
 import yaml
@@ -2839,6 +2841,24 @@ def _fake_bench_docker(
     return fake_run
 
 
+class _FakePopen:
+    def __init__(self, fake_run, command, **kwargs):
+        result = fake_run(command)
+        self.args = command
+        self.stdout = io.BytesIO((result.stdout + result.stderr).encode())
+        self._returncode = result.returncode
+
+    def wait(self) -> int:
+        return self._returncode
+
+
+def _patch_bench_docker(monkeypatch, fake_run) -> None:
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        cli.subprocess, "Popen", lambda command, **kwargs: _FakePopen(fake_run, command)
+    )
+
+
 def _bench_commands(commands: list) -> list[list[str]]:
     return [c for c in commands if "bench" in c and "serve" in c]
 
@@ -2863,7 +2883,7 @@ def test_bench_requires_compose_built(tmp_path: Path, monkeypatch):
 def test_bench_requires_running_container(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, containers=[]))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands, containers=[]))
 
     result = runner.invoke(app, ["bench", "demo"])
 
@@ -2875,7 +2895,7 @@ def test_bench_requires_running_container(tmp_path: Path, monkeypatch):
 def test_bench_reports_server_still_loading(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, probe_ok=False))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands, probe_ok=False))
 
     result = runner.invoke(app, ["bench", "demo"])
 
@@ -2888,7 +2908,7 @@ def test_bench_rejects_lengths_over_max_model_len(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
     served = {"id": "org/demo", "max_model_len": 8192}
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, served=served))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands, served=served))
 
     result = runner.invoke(app, ["bench", "demo"])
 
@@ -2901,7 +2921,7 @@ def test_bench_rejects_lengths_over_max_model_len(tmp_path: Path, monkeypatch):
 def test_bench_rejects_bad_levels_before_touching_docker(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands))
 
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "4", "--num-prompts", "6"])
 
@@ -2913,7 +2933,7 @@ def test_bench_rejects_bad_levels_before_touching_docker(tmp_path: Path, monkeyp
 def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands))
 
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
 
@@ -2922,7 +2942,8 @@ def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, mon
     assert [c[c.index("--max-concurrency") + 1] for c in bench_commands] == ["1", "4"]
     for command in bench_commands:
         assert command[command.index("-p") + 1] == "fllame-demo"
-        assert command[command.index("exec") : command.index("exec") + 3] == ["exec", "-T", "demo"]
+        assert command[command.index("exec") + 1] == "-T"
+        assert "demo" in command[command.index("exec") :]
         assert command[command.index("--model") + 1] == "org/demo"
         assert command[command.index("--base-url") + 1] == "http://localhost:8000"
     lines = result.stdout.splitlines()
@@ -2934,7 +2955,7 @@ def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, mon
 def test_bench_saves_reproducible_run_folder(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands))
 
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "2", "--input-len", "100"])
 
@@ -2964,7 +2985,7 @@ def test_bench_saves_reproducible_run_folder(tmp_path: Path, monkeypatch):
 def test_bench_stops_on_failed_level_and_cleans_up(tmp_path: Path, monkeypatch):
     _setup_bench(tmp_path, monkeypatch)
     commands = []
-    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, bench_returncode=1))
+    _patch_bench_docker(monkeypatch, _fake_bench_docker(commands, bench_returncode=1))
 
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
 
@@ -2994,7 +3015,7 @@ def test_bench_ctrl_c_stops_bench_inside_container(tmp_path: Path, monkeypatch):
             raise KeyboardInterrupt
         return fake_docker(command, **kwargs)
 
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    _patch_bench_docker(monkeypatch, fake_run)
 
     result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
 
@@ -3005,3 +3026,39 @@ def test_bench_ctrl_c_stops_bench_inside_container(tmp_path: Path, monkeypatch):
     assert stop[-1] == result_dir
     assert "stopped `vllm bench serve`" in result.output
     assert any(c[-3:] == ["rm", "-rf", result_dir] for c in commands)
+
+
+class _SlowStream:
+    def __init__(self, chunks: list[str]):
+        self._chunks = [chunk.encode() for chunk in chunks]
+
+    def read1(self, size: int) -> bytes:
+        time.sleep(0.25)
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_bench_progress_mirrors_latest_output_line_behind_prefix(monkeypatch):
+    chunks = ["Starting run\n  0%|    | 0/10\r", " 20%|#   | 2/10 [02:36<10:25]\r"]
+    process = _FakePopen(lambda command: _FakeCompletedProcess(), ["docker"])
+    process.stdout = _SlowStream(chunks)
+    commands = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return process
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True, raising=False)
+    shown = []
+    monkeypatch.setattr(
+        cli.sys.stdout, "write", lambda text: shown.append(text) or len(text), raising=False
+    )
+
+    result = cli._run_showing_progress("demo", "Concurrency: 1 | ", ["vllm", "bench", "serve"])
+
+    assert result.stdout == "".join(chunks)
+    progress = [text for text in shown if "Concurrency" in text]
+    assert progress[0].endswith("Concurrency: 1 | ")
+    assert progress[1].endswith("Concurrency: 1 |   0%|    | 0/10")
+    assert progress[-1].endswith("Concurrency: 1 |  20%|#   | 2/10 [02:36<10:25]")
+    assert any(arg.startswith("COLUMNS=") for arg in commands[0])

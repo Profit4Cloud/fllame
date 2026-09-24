@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import json
 import re
@@ -10,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1432,43 +1432,58 @@ def _probe_served_model(handle: str, base_url: str) -> dict:
     raise typer.Exit(code=1)
 
 
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+def _run_showing_progress(
+    handle: str, prefix: str, command: list[str]
+) -> subprocess.CompletedProcess:
+    live = sys.stdout.isatty()
+    width = shutil.get_terminal_size().columns - 1
+    # tqdm can't size its bar over a pipe and falls back to $COLUMNS.
+    columns = max(width - len(prefix), 40)
+    try:
+        process = subprocess.Popen(
+            [
+                "docker",
+                *_compose_args(handle, "exec", "-T", "-e", f"COLUMNS={columns}", handle, *command),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError as e:
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1) from e
 
+    output: list[str] = []
+    latest = [""]
 
-def _run_with_spinner(label: str, run) -> subprocess.CompletedProcess:
-    spin = sys.stdout.isatty()
-    started = time.monotonic()
-    outcome: dict = {}
-
-    def target() -> None:
-        try:
-            outcome["result"] = run()
-        except BaseException as e:
-            outcome["error"] = e
+    def read() -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
+        while chunk := process.stdout.read1(4096):
+            text = decoder.decode(chunk)
+            output.append(text)
+            # tqdm redraws with \r, ordinary log lines end in \n.
+            *done, pending = re.split(r"[\r\n]", pending + text)
+            for line in (*done, pending):
+                if line.strip():
+                    latest[0] = line.rstrip()
 
     # A daemon thread, so Ctrl-C can exit without waiting on a docker client
     # that's still attached to the container.
-    worker = threading.Thread(target=target, daemon=True)
-    worker.start()
-    frame = 0
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    shown = None
     try:
-        while worker.is_alive():
-            if spin:
-                elapsed = int(time.monotonic() - started)
-                sys.stdout.write(
-                    f"\r{_SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]} {label} "
-                    f"{elapsed // 60}m{elapsed % 60:02d}s"
-                )
+        while reader.is_alive():
+            if live and latest[0] != shown:
+                shown = latest[0]
+                sys.stdout.write(f"\r\033[K{(prefix + shown)[:width]}")
                 sys.stdout.flush()
-                frame += 1
-            worker.join(0.1)
+            reader.join(0.1)
     finally:
-        if spin:
+        if live:
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["result"]
+    return subprocess.CompletedProcess(process.args, process.wait(), "".join(output), "")
 
 
 def _save_bench_context(
@@ -1582,9 +1597,8 @@ def bench(
     typer.echo(lines[0])
     try:
         for level in levels:
-            result = _run_with_spinner(
-                f"concurrency {level.concurrency}, {level.num_prompts} requests",
-                lambda level=level: _exec_in_container(handle, *command_for(level)),
+            result = _run_showing_progress(
+                handle, f"Concurrency: {level.concurrency} | ", command_for(level)
             )
             if result.returncode != 0:
                 typer.echo((result.stdout + result.stderr).rstrip(), err=True)
