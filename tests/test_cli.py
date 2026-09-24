@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import yaml
 from huggingface_hub.errors import HfHubHTTPError
 from typer.testing import CliRunner
 
@@ -2799,3 +2800,199 @@ def test_recipe_vram_rejects_a_malformed_token_count(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 1
     assert "--max-model-len must be a whole number of tokens" in result.output
+
+
+_RUNNING = [{"Service": "demo", "State": "running", "Name": "fllame-demo"}]
+
+
+def _fake_bench_docker(
+    commands: list,
+    *,
+    containers=_RUNNING,
+    served=None,
+    probe_ok=True,
+    bench_returncode=0,
+):
+    served = served or {"id": "org/demo", "root": "org/demo", "max_model_len": 32768}
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[-2:] == ["--format", "json"]:
+            return _FakeSubprocessResult(stdout=json.dumps(containers))
+        if "exec" not in command:
+            return _FakeCompletedProcess()
+        inner = command[command.index("demo", command.index("exec")) + 1 :]
+        if inner[0] == "python3":
+            stdout = json.dumps({"data": [served]}) if probe_ok else ""
+            return _FakeSubprocessResult(stdout=stdout, returncode=0 if probe_ok else 1)
+        if inner[:2] == ["vllm", "--version"]:
+            return _FakeSubprocessResult(stdout="0.27.1\n")
+        if inner[:3] == ["vllm", "bench", "serve"]:
+            return _FakeSubprocessResult(stdout="bench output", returncode=bench_returncode)
+        if inner[0] == "cat":
+            concurrency = int(Path(inner[1]).stem[1:])
+            return _FakeSubprocessResult(
+                stdout=json.dumps({"completed": concurrency * 2, "request_throughput": 1.5})
+            )
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
+def _bench_commands(commands: list) -> list[list[str]]:
+    return [c for c in commands if "bench" in c and "serve" in c]
+
+
+def _setup_bench(tmp_path: Path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+
+
+def test_bench_requires_compose_built(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+
+    result = runner.invoke(app, ["bench", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame recipe build demo" in result.output
+
+
+def test_bench_requires_running_container(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, containers=[]))
+
+    result = runner.invoke(app, ["bench", "demo"])
+
+    assert result.exit_code == 1
+    assert "fllame serve demo" in result.output
+    assert not _bench_commands(commands)
+
+
+def test_bench_reports_server_still_loading(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, probe_ok=False))
+
+    result = runner.invoke(app, ["bench", "demo"])
+
+    assert result.exit_code == 1
+    assert "still loading" in result.output
+    assert "docker logs -f fllame-demo" in result.output
+
+
+def test_bench_rejects_lengths_over_max_model_len(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    served = {"id": "org/demo", "root": "org/demo", "max_model_len": 8192}
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, served=served))
+
+    result = runner.invoke(app, ["bench", "demo"])
+
+    assert result.exit_code == 1
+    assert "8192" in result.output
+    assert not _bench_commands(commands)
+    assert not (tmp_path / "demo" / "bench").exists()
+
+
+def test_bench_rejects_bad_levels_before_touching_docker(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "4", "--num-prompts", "6"])
+
+    assert result.exit_code == 1
+    assert "not a multiple" in result.output
+    assert commands == []
+
+
+def test_bench_runs_each_level_in_container_and_prints_table(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
+
+    assert result.exit_code == 0, result.output
+    bench_commands = _bench_commands(commands)
+    assert [c[c.index("--max-concurrency") + 1] for c in bench_commands] == ["1", "4"]
+    for command in bench_commands:
+        assert command[command.index("-p") + 1] == "fllame-demo"
+        assert command[command.index("exec") : command.index("exec") + 3] == ["exec", "-T", "demo"]
+        assert command[command.index("--model") + 1] == "org/demo"
+        assert command[command.index("--base-url") + 1] == "http://localhost:8000"
+        assert "--tokenizer" not in command
+    lines = result.stdout.splitlines()
+    assert lines[0].split()[:3] == ["CONC", "PROMPTS", "FAILED"]
+    assert lines[1].split()[:4] == ["1", "10", "8", "1.50"]
+    assert lines[2].split()[:4] == ["4", "12", "4", "1.50"]
+
+
+def test_bench_saves_reproducible_run_folder(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands))
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "2", "--input-len", "100"])
+
+    assert result.exit_code == 0, result.output
+    (run_dir,) = (tmp_path / "demo" / "bench").iterdir()
+    assert {p.name for p in run_dir.iterdir()} == {
+        "recipe.yaml",
+        "compose.yaml",
+        "config.yaml",
+        "params.yaml",
+        "c2.json",
+        "results.txt",
+    }
+    compose = (tmp_path / "demo" / "compose.yaml").read_text()
+    assert (run_dir / "compose.yaml").read_text() == compose
+    params = yaml.safe_load((run_dir / "params.yaml").read_text())
+    assert params["input_len"] == 100
+    assert params["levels"] == [{"concurrency": 2, "num_prompts": 10}]
+    assert params["vllm_version"] == "0.27.1"
+    assert params["commands"][0].startswith("vllm bench serve")
+    settings = yaml.safe_load((run_dir / "config.yaml").read_text())
+    assert set(settings) == {"default_image", "default_gpu_memory_utilization"}
+    assert json.loads((run_dir / "c2.json").read_text())["completed"] == 4
+    assert str(run_dir) in result.stdout
+
+
+def test_bench_passes_tokenizer_for_served_model_name(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    served = {"id": "demo-alias", "root": "org/demo", "max_model_len": 32768}
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, served=served))
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1"])
+
+    assert result.exit_code == 0, result.output
+    (command,) = _bench_commands(commands)
+    assert command[command.index("--model") + 1] == "demo-alias"
+    assert command[command.index("--tokenizer") + 1] == "org/demo"
+
+
+def test_bench_stops_on_failed_level_and_cleans_up(tmp_path: Path, monkeypatch):
+    _setup_bench(tmp_path, monkeypatch)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_bench_docker(commands, bench_returncode=1))
+
+    result = runner.invoke(app, ["bench", "demo", "--concurrency", "1,4"])
+
+    assert result.exit_code == 1
+    assert "bench output" in result.output
+    assert "failed at concurrency 1" in result.output
+    assert len(_bench_commands(commands)) == 1
+    assert any("rm" in c for c in commands)
+
+
+def test_bench_help_explains_every_column():
+    result = runner.invoke(app, ["bench", "-h"])
+
+    assert result.exit_code == 0
+    for header in ("CONC", "FAILED", "OUT TOK/S", "P99 TTFT MS", "ITL MS"):
+        assert header in result.stdout
