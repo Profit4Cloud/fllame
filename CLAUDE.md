@@ -1,7 +1,7 @@
 # Repo orientation
 
 fllame is a headless CLI for serving models with vLLM: a recipe registry
-(handle -> HF repo id + Docker image + `vllm serve` flags), a compiler
+(RECIPE_ID -> REPO_ID + Docker image + `vllm serve` flags), a compiler
 from recipe to self-contained docker-compose folder, and a download step
 that always runs before serving.
 
@@ -16,7 +16,7 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
                        # turning a Recipe into a docker-compose service definition.
   recipes/store.py   # Reads/writes Recipes from a directory of hand-edited YAML files.
   recipes/parser.py  # Parses a pasted export/vllm-serve block for `recipe add`.
-  recipes/naming.py  # Derives a recipe handle from a repo_id.
+  recipes/naming.py  # Derives a RECIPE_ID from a REPO_ID.
   hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   compose/generator.py # Compiles one recipe into its own compose folder.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
@@ -74,7 +74,7 @@ Layers from low to high:
 
 ### Compose.yaml is editable by user
 
-A compose.yaml (and Dockerfile, if the recipe has preinstall) is generated with `recipe build HANDLE` or `recipe add [--build]`, and at no other time. 
+A compose.yaml (and Dockerfile, if the recipe has preinstall) is generated with `recipe build RECIPE_ID` or `recipe add [--build]`, and at no other time. 
 Advanced users are expected to edit the compose.yaml by hand, so fllame should not overwrite these changes.
 
 The only exceptions are `config set-default-image IMAGE` and
@@ -82,13 +82,13 @@ The only exceptions are `config set-default-image IMAGE` and
 
 ## Implemented commands
 
-- recipe list — List every recipe handle in $FLLAME_RECIPES_DIR.
-- recipe show HANDLE — Print HANDLE's resolved recipe as YAML.
+- recipe list — List every RECIPE_ID in $FLLAME_RECIPES_DIR.
+- recipe show RECIPE_ID — Print RECIPE_ID's resolved recipe as YAML.
 - recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] — Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
-- recipe build HANDLE — Regenerate HANDLE's compose.yaml standalone, without starting it.
-- recipe edit HANDLE — Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
-- recipe remove HANDLE [--yes] — Delete HANDLE's whole recipe folder.
-- recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] — Estimate VRAM for HANDLE's recipe.
+- recipe build RECIPE_ID — Regenerate RECIPE_ID's compose.yaml standalone, without starting it.
+- recipe edit RECIPE_ID — Open RECIPE_ID's recipe.yaml in $EDITOR and re-validate on save.
+- recipe remove RECIPE_ID [--yes] — Delete RECIPE_ID's whole recipe folder.
+- recipe vram RECIPE_ID [--max-model-len N] [--max-num-seqs N] [--details] — Estimate VRAM for RECIPE_ID's recipe.
 - hardware scan — Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
 - model pull REPO_ID — Download REPO_ID into the Hugging Face cache.
 - model list — List models currently present in the local cache (no network).
@@ -97,10 +97,10 @@ The only exceptions are `config set-default-image IMAGE` and
 - config show — Print the currently configured default Docker image.
 - config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
 - config set-default-gpu-memory-utilization VALUE — Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own; offers to update existing compose.yaml files still using the old default.
-- serve HANDLE [--detach] [--yes] — Launch HANDLE's recipe via docker compose up; never touches the network.
-- bench HANDLE [--concurrency LIST] [--num-prompts LIST] [--input-len N] [--output-len N] — Benchmark HANDLE's running container at several concurrency levels; saves each run to its bench/ folder.
+- serve RECIPE_ID [--detach] [--yes] — Launch RECIPE_ID's recipe via docker compose up; never touches the network.
+- bench RECIPE_ID [--concurrency LIST] [--num-prompts LIST] [--input-len N] [--output-len N] — Benchmark RECIPE_ID's running container at several concurrency levels; saves each run to its bench/ folder.
 - status — Show every recipe's container state via docker compose ps.
-- stop HANDLE — Stop HANDLE's container via docker compose stop.
+- stop RECIPE_ID — Stop RECIPE_ID's container via docker compose stop.
 
 ## Commands to implement
 - recipe scan — Scans the vLLM website for recipes.
@@ -111,7 +111,7 @@ The only exceptions are `config set-default-image IMAGE` and
 2. model scan
 3. model pull REPO_ID
 4. recipe add [VLLM_SERVE_LINE...]
-5. recipe build HANDLE
-6. serve HANDLE
-7. bench HANDLE
-8. stop HANDLE
+5. recipe build RECIPE_ID
+6. serve RECIPE_ID
+7. bench RECIPE_ID
+8. stop RECIPE_ID

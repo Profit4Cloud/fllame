@@ -96,7 +96,11 @@ app = typer.Typer(
 recipe_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(recipe_app, name="recipe", help="Create, build and inspect recipes.")
 hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
+app.add_typer(
+    hardware_app,
+    name="hardware",
+    help="Detect this machine's GPU(s), VRAM, RAM and supported quantizations.",
+)
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
 config_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
@@ -947,7 +951,7 @@ def config_set_default_gpu_memory_utilization(
 
 @hardware_app.command("scan")
 def hardware_scan() -> None:
-    """Detect GPU(s), VRAM, and RAM on this machine."""
+    """Detect GPU(s), VRAM, RAM and supported quantizations on this machine."""
     profile = scan_hardware()
     if not profile.has_gpu:
         typer.echo("gpu:            none detected (no nvidia-smi on PATH)")
