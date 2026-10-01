@@ -3,7 +3,7 @@
 A headless CLI for vLLM serving. A recipe is a plain YAML file you write
 and commit to your own repo (like a Helm `values.yaml` or an Ollama
 Modelfile) describing which model, which Docker image, and which `vllm
-serve` flags to use. `fllame serve HANDLE` resolves one into a
+serve` flags to use. `fllame serve RECIPE_ID` resolves one into a
 `docker compose` service and runs it - no web UI, nothing installed on
 the host beyond fllame and Docker.
 
@@ -22,13 +22,13 @@ Then you can run the fllame commands below within the activated environment.
 
 ## Commands
 
-- fllame recipe list # List every recipe handle.
-- fllame recipe show HANDLE # Print HANDLE's resolved recipe as YAML.
+- fllame recipe list # List every RECIPE_ID.
+- fllame recipe show RECIPE_ID # Print RECIPE_ID's resolved recipe as YAML.
 - fllame recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] # Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
-- fllame recipe build HANDLE [--yes] # Write (or overwrite) HANDLE's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
-- fllame recipe vram HANDLE [--max-model-len N] [--max-num-seqs N] [--details] # Estimate VRAM for HANDLE's recipe.
-- fllame recipe edit HANDLE # Open HANDLE's recipe.yaml in $EDITOR and re-validate on save.
-- fllame recipe remove HANDLE [--yes] # Delete HANDLE's whole recipe folder.
+- fllame recipe build RECIPE_ID [--yes] # Write (or overwrite) RECIPE_ID's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
+- fllame recipe vram RECIPE_ID [--max-model-len N] [--max-num-seqs N] [--details] # Estimate VRAM for RECIPE_ID's recipe.
+- fllame recipe edit RECIPE_ID # Open RECIPE_ID's recipe.yaml in $EDITOR and re-validate on save.
+- fllame recipe remove RECIPE_ID [--yes] # Delete RECIPE_ID's whole recipe folder.
 - fllame hardware scan # Detect this machine's NVIDIA GPU(s)/RAM and supported quantizations.
 - fllame model pull REPO_ID # Download REPO_ID into the Hugging Face cache.
 - fllame model list # List models currently present in the local cache (no network).
@@ -37,16 +37,16 @@ Then you can run the fllame commands below within the activated environment.
 - fllame config show # Print fllame's currently configured settings.
 - fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
 - fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
-- fllame serve HANDLE [--yes] # Launch HANDLE's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
-- fllame bench HANDLE [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside HANDLE's running container, print a results table, and save a reproducible run to HANDLE's bench/<timestamp>/ folder.
+- fllame serve RECIPE_ID [--yes] # Launch RECIPE_ID's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
+- fllame bench RECIPE_ID [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside RECIPE_ID's running container, print a results table, and save a reproducible run to RECIPE_ID's bench/<timestamp>/ folder.
 - fllame status # Show every recipe's container state via docker compose ps.
-- fllame stop HANDLE # Stop HANDLE's container via docker compose stop.
+- fllame stop RECIPE_ID # Stop RECIPE_ID's container via docker compose stop.
 
 Every command also takes `-h`/`--help`.
 
 ## Storage location
 
-Recipes live in `~/.config/fllame/recipes/<handle>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Both are safe to hand-edit - fllame never overwrites them on its own.
+Recipes live in `~/.config/fllame/recipes/<RECIPE_ID>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Both are safe to hand-edit - fllame never overwrites them on its own.
 
 ## Recipe format
 

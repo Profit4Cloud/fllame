@@ -94,11 +94,17 @@ app = typer.Typer(
     context_settings=_CONTEXT_SETTINGS,
 )
 recipe_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(recipe_app, name="recipe", help="Inspect the recipe registry.")
+app.add_typer(recipe_app, name="recipe", help="Create, build and inspect recipes.")
 hardware_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(hardware_app, name="hardware", help="Detect this machine's GPU/RAM.")
+app.add_typer(
+    hardware_app,
+    name="hardware",
+    help="Detect this machine's GPU(s), VRAM, RAM and supported quantizations.",
+)
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
+app.add_typer(
+    model_app, name="model", help="Pull, update, list and search for Hugging Face models."
+)
 config_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(config_app, name="config", help="View and change fllame's persisted settings.")
 
@@ -342,7 +348,7 @@ def _format_ports(publishers: list[dict]) -> str:
 
 
 def _compose_ps_json(handle: str) -> tuple[list[dict], int]:
-    """HANDLE's containers via `docker compose ps --all --format json`
+    """RECIPE_ID's containers via `docker compose ps --all --format json`
     (`--all` so a stopped-but-not-removed container still shows up, not
     just a running one) - an empty list and the failing exit code if
     the command itself failed (its stderr is echoed either way)."""
@@ -364,7 +370,7 @@ def _compose_ps_json(handle: str) -> tuple[list[dict], int]:
 
 @recipe_app.command("list")
 def recipe_list() -> None:
-    """List model handles with a recipe on file."""
+    """List every RECIPE_ID."""
     handles = _recipe_store().list_handles()
     if not handles:
         typer.echo(f"No recipes found in {config.recipes_dir()}")
@@ -374,14 +380,13 @@ def recipe_list() -> None:
 
 
 @recipe_app.command("show")
-def recipe_show(handle: str = typer.Argument(..., show_default=False)) -> None:
-    """Print HANDLE's resolved recipe - the same shape as the recipe
-    file, with `image` filled in from fllame's configured default when
-    the recipe doesn't pin its own. `command` is the last line, ready to
-    copy out and run by hand (`vllm serve ...` on a box with vLLM
-    installed) without going through Docker at all.
+def recipe_show(recipe_id: str = typer.Argument(..., show_default=False)) -> None:
+    """Print RECIPE_ID's recipe as YAML.
+
+    Shows the configured default `image` if the recipe has none.
+    The `command` line can be run by hand on a machine with vLLM.
     """
-    recipe = _resolve_image(_load_or_exit(handle))
+    recipe = _resolve_image(_load_or_exit(recipe_id))
     typer.echo(recipe.to_yaml().rstrip())
 
 
@@ -408,7 +413,7 @@ def _read_command() -> str:
         "with or without a trailing \\ - then a blank line or Ctrl-D:"
     )
     if not lines:
-        typer.echo("no `vllm serve <repo_id> ...` command given", err=True)
+        typer.echo("no `vllm serve REPO_ID ...` command given", err=True)
         raise typer.Exit(code=1)
     joined = join_command_lines(lines)
     try:
@@ -446,43 +451,34 @@ def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
         None,
         show_default=False,
-        help="Optionally, the whole `vllm serve <repo_id> ...` line as trailing "
-        "arguments instead of the guided dialogue - e.g. `fllame recipe add vllm "
-        "serve org/repo --max-model-len 8192`. A quick one-liner only - env vars/"
-        "preinstall commands need the dialogue (run with no trailing arguments).",
+        help="A `vllm serve REPO_ID ...` line, e.g. `fllame recipe add vllm serve "
+        "org/repo --max-model-len 8192`. Omit for the guided dialogue, which also "
+        "asks for env vars and preinstall commands.",
     ),
     image: str | None = typer.Option(
         None,
         "--image",
         show_default=False,
-        help="Docker image to pin this recipe to, overriding fllame's configured "
-        "default (`fllame config show`) - e.g. vllm/vllm-openai:v0.27.1. Omit to "
-        "let this recipe follow the configured default, whatever it is later "
-        "changed to.",
+        help="Docker image to pin, e.g. vllm/vllm-openai:v0.27.1. Omit to follow "
+        "the configured default (`fllame config show`).",
     ),
     pull: bool = typer.Option(
         False,
         "--pull",
-        help="Also download the model into the HF cache right after saving "
-        "(a no-op if it's already cached) - see `fllame model pull`.",
+        help="Also download REPO_ID after saving. Same as `fllame model pull`.",
     ),
     build: bool = typer.Option(
         False,
         "--build",
-        help="Also regenerate the compose folder right after saving - see "
-        "`fllame recipe build`. Fails if the model isn't cached yet unless "
-        "combined with --pull.",
+        help="Also build the recipe after saving. Same as `fllame recipe build`. "
+        "Needs REPO_ID to be downloaded, or --pull.",
     ),
 ) -> None:
-    """Create a recipe.
+    """Create a recipe from a `vllm serve` line.
 
-    Given trailing arguments, treats them as a quick one-liner: the
-    whole `vllm serve <repo_id> <args...>` line, same as today, no
-    prompts beyond the Docker image if neither `--image` nor a
-    configured default exists. With no trailing arguments, walks
-    through a short dialogue instead - Docker image, then preinstall
-    commands, then env vars, then the `vllm serve` command - the shape
-    a recipe typically comes in from a model card or vLLM's own docs.
+    The RECIPE_ID is derived from REPO_ID. Without a `vllm serve` line,
+    a dialogue asks for the Docker image, preinstall commands, env vars
+    and the `vllm serve` command.
     """
     if vllm_serve_line:
         pasted = shlex.join(vllm_serve_line)
@@ -577,22 +573,21 @@ def recipe_add(
 
 @recipe_app.command("build")
 def recipe_build(
-    handle: str = typer.Argument(..., show_default=False),
+    recipe_id: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Skip the cache-location-changed confirmation prompt - the "
-        "warning (if any) is still printed.",
+        help="Don't ask for confirmation when the cache location changed. "
+        "The warning is still printed.",
     ),
 ) -> None:
-    """Builds the recipe by creating a compose.yaml (and possibly a Dockerfile) in its folder.
-    Fails with a clear error if the model isn't fully downloaded yet.
-    Validates the result with docker build (a recipe with preinstall) or docker compose pull
-    (one without). This ensures that network access is needed during build time only, and not
-    during serve time.
+    """Write RECIPE_ID's compose.yaml, plus a Dockerfile if it has preinstall commands.
+
+    Overwrites hand edits to these files. REPO_ID must be downloaded first.
+    Then runs docker build or docker compose pull, so `serve` needs no network.
     """
-    _build_or_exit(_load_or_exit(handle), assume_yes=yes)
+    _build_or_exit(_load_or_exit(recipe_id), assume_yes=yes)
 
 
 _TOKEN_COUNT_SUFFIXES = {"": 1, "k": 1000, "K": 1024, "m": 1000**2, "M": 1024**2}
@@ -610,7 +605,7 @@ def _parse_token_count(flag: str, value: str) -> int:
 
 @recipe_app.command("vram")
 def recipe_vram(
-    handle: str = typer.Argument(..., show_default=False),
+    recipe_id: str = typer.Argument(..., show_default=False),
     max_model_len: str | None = typer.Option(
         None,
         "--max-model-len",
@@ -625,13 +620,13 @@ def recipe_vram(
     ),
     details: bool = typer.Option(False, "--details", help="Show how the estimate is calculated."),
 ) -> None:
-    """Estimate the VRAM HANDLE's model needs as served by its recipe, from the pulled
-    model's config.json and weight files.
+    """Estimate the VRAM RECIPE_ID needs.
 
-    Use it to pick --gpu-memory-utilization: vLLM claims that share of GPU memory whatever
-    the model needs, and fills what the weights leave with KV cache.
+    Reads config.json and the weight files of the downloaded REPO_ID.
+    Use it to pick --gpu-memory-utilization. vLLM claims that share of GPU
+    memory and fills what the weights leave with KV cache.
     """
-    recipe = _load_or_exit(handle)
+    recipe = _load_or_exit(recipe_id)
     args = recipe.serve_args
 
     raw_max_model_len = max_model_len or extract_flag_value(args, "--max-model-len")
@@ -653,8 +648,8 @@ def recipe_vram(
         them = "them" if len(missing) > 1 else "it"
         example = " ".join(f"{flag} N" for flag in missing)
         typer.echo(
-            f"{flags} not found in recipe '{handle}'. Add {them} to this command with "
-            f"a value: fllame recipe vram {handle} {example}",
+            f"{flags} not found in recipe '{recipe_id}'. Add {them} to this command with "
+            f"a value: fllame recipe vram {recipe_id} {example}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -703,34 +698,29 @@ def _validate_after_edit(handle: str, path: Path) -> Recipe | RecipeError:
 
 
 @recipe_app.command("edit")
-def recipe_edit(handle: str = typer.Argument(..., show_default=False)) -> None:
-    """Open HANDLE's recipe file in $EDITOR, then re-validate it.
+def recipe_edit(recipe_id: str = typer.Argument(..., show_default=False)) -> None:
+    """Open RECIPE_ID's recipe.yaml in $EDITOR, then validate it.
 
-    Lenient about how the `command` block ends up formatted (missing
-    indentation, a missing trailing `\\`, ...) and about a stray tab or
-    CRLF line ending elsewhere - fixed automatically before anything is
-    reported, and the file is re-saved in fllame's own canonical
-    rendering once it validates, regardless of which of those kicked in.
-    Anything else invalid offers a choice: reopen $EDITOR to fix it, or
-    revert to the version from before this edit (kept in memory for the
-    length of this command, not written to a backup file).
+    Small formatting slips (indentation, a missing `\\`, tabs, CRLF) are
+    fixed automatically. If the recipe is still invalid, you can edit it
+    again or revert to the previous version.
     """
-    path = config.recipe_dir(handle) / "recipe.yaml"
+    path = config.recipe_dir(recipe_id) / "recipe.yaml"
     if not path.is_file():
-        typer.echo(f"no recipe found for '{handle}' (expected {path})", err=True)
+        typer.echo(f"no recipe found for '{recipe_id}' (expected {path})", err=True)
         raise typer.Exit(code=1)
 
     original_text = path.read_text()
     click.edit(filename=str(path))
 
     while True:
-        result = _validate_after_edit(handle, path)
+        result = _validate_after_edit(recipe_id, path)
         if isinstance(result, Recipe):
             _recipe_store().save(result)
-            typer.echo(f"'{handle}' saved and valid.")
+            typer.echo(f"'{recipe_id}' saved and valid.")
             return
 
-        typer.echo(f"'{handle}' is no longer a valid recipe: {result}", err=True)
+        typer.echo(f"'{recipe_id}' is no longer a valid recipe: {result}", err=True)
         try:
             reopen = typer.confirm(
                 "Reopen $EDITOR to fix it? (No reverts to the version from before this edit)",
@@ -744,33 +734,28 @@ def recipe_edit(handle: str = typer.Argument(..., show_default=False)) -> None:
             continue
 
         path.write_text(original_text)
-        typer.echo(f"reverted '{handle}' to its previous version")
+        typer.echo(f"reverted '{recipe_id}' to its previous version")
         raise typer.Exit(code=1)
 
 
 @recipe_app.command("remove")
 def recipe_remove(
-    handle: str = typer.Argument(..., show_default=False),
+    recipe_id: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
 ) -> None:
-    """Delete HANDLE's whole folder - its recipe file and its generated
-    `compose.yaml`/`Dockerfile` together (see `fllame/config.py`'s
-    `recipe_dir`).
+    """Delete RECIPE_ID's folder: recipe.yaml, compose.yaml and Dockerfile.
 
-    Doesn't stop a container that's still running under it; if `fllame
-    stop HANDLE` matters, run it first. Also doesn't remove any Docker
-    image built or pulled for it - Docker holds that state, not fllame,
-    regardless of whether this recipe had a `Dockerfile`; `docker image
-    prune`/`docker rmi` is the way to reclaim that space.
+    Does not stop a running container. Run `fllame stop RECIPE_ID` first.
+    Does not remove Docker images. Use `docker image prune` or `docker rmi`.
     """
-    if not yes and not typer.confirm(f"Delete recipe '{handle}'?"):
+    if not yes and not typer.confirm(f"Delete recipe '{recipe_id}'?"):
         raise typer.Exit(code=0)
     try:
-        _recipe_store().remove(handle)
+        _recipe_store().remove(recipe_id)
     except RecipeError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
-    typer.echo(f"removed '{handle}'")
+    typer.echo(f"removed '{recipe_id}'")
     typer.echo(
         "note: this did not remove any Docker image built or pulled for it - "
         "run `docker image prune`/`docker rmi` yourself if you want that space back."
@@ -834,16 +819,10 @@ def _replace_image_in_file(path: Path, old_image: str, new_image: str) -> None:
 def config_set_default_image(image: str = typer.Argument(..., show_default=False)) -> None:
     """Set the vLLM Docker image for recipes that do not define one.
 
-    Pulls IMAGE first to confirm it actually resolves - the default is
-    left unchanged if the pull fails. Only affects recipes that don't
-    pin their own `image` - those keep using whatever they're pinned to
-    either way. Existing `compose.yaml`/`Dockerfile` files aren't
-    regenerated by this command; if any currently use the previous
-    default image verbatim, offers to update just that one value in
-    place, without touching anything else already there. A patched
-    Dockerfile's local image is then rebuilt automatically (a plain
-    `docker build`, not `recipe build`, so compose.yaml is never
-    touched by this).
+    Pulls IMAGE first. If the pull fails, the default is not changed.
+    Offers to replace the old image in existing compose.yaml and Dockerfile
+    files. Nothing else in those files changes. A changed Dockerfile is
+    rebuilt with `docker build`.
     """
     if image.endswith(":latest") or ":" not in image:
         typer.echo(
@@ -937,17 +916,9 @@ def config_set_default_gpu_memory_utilization(
 ) -> None:
     """Set the `--gpu-memory-utilization` value for recipes that do not define one.
 
-    An explicit `--gpu-memory-utilization` in a recipe's own command
-    always wins over this default - fllame never overrides it. `serve`
-    separately refuses to run any compose.yaml (regardless of where its
-    value came from) whose --gpu-memory-utilization is missing or
-    obviously invalid (<= 0 or > 1), since leaving vLLM unbounded can
-    let it claim a unified-memory machine's entire memory pool.
-
-    Existing `compose.yaml` files aren't regenerated by this command;
-    if any currently bake in the previous default value verbatim,
-    offers to update just that one value in place, without touching
-    anything else already there.
+    A recipe's own value always wins. VALUE must be above 0 and at most 1.
+    Offers to replace the old value in existing compose.yaml files.
+    Nothing else in those files changes.
     """
     if value <= 0 or value > 1.0:
         typer.echo(
@@ -982,7 +953,7 @@ def config_set_default_gpu_memory_utilization(
 
 @hardware_app.command("scan")
 def hardware_scan() -> None:
-    """Detect GPU(s), VRAM, and RAM on this machine."""
+    """Detect GPU(s), VRAM, RAM and supported quantizations on this machine."""
     profile = scan_hardware()
     if not profile.has_gpu:
         typer.echo("gpu:            none detected (no nvidia-smi on PATH)")
@@ -1022,13 +993,8 @@ def _friendly_permission_error(e: PermissionError) -> str:
 def model_pull(repo_id: str = typer.Argument(..., show_default=False)) -> None:
     """Download REPO_ID into the Hugging Face cache.
 
-    Takes a Hugging Face repo_id directly (e.g. `org/repo`), not a
-    recipe handle - `model` commands never depend on recipes at all,
-    since a recipe is a higher-level abstraction built on top of a
-    model, not the other way around (see CLAUDE.md, "Layering"). To
-    pull the model a specific recipe needs, either `recipe show
-    HANDLE` first to see its repo_id, or use `recipe add --pull`/
-    `recipe build HANDLE` instead.
+    REPO_ID is a Hugging Face repo id, e.g. `org/repo`, not a RECIPE_ID.
+    `fllame recipe show RECIPE_ID` shows a recipe's REPO_ID.
     """
     typer.echo(f"pulling '{repo_id}' into {config.hf_cache_dir()}")
     try:
@@ -1047,27 +1013,18 @@ def model_update(
     repo_id: str | None = typer.Argument(
         None,
         show_default=False,
-        help="Check only REPO_ID; omit to check every model currently in " "the local cache.",
+        help="Check only REPO_ID. Omit to check every cached model.",
     ),
     apply: bool = typer.Option(
         False,
         "--apply",
-        help="Re-pull any model found stale, via the same download path "
-        "`model pull` uses. Check-only by default - reports status, "
-        "downloads nothing.",
+        help="Download any stale model again. Without it, only reports status.",
     ),
 ) -> None:
     """Check cached models against the Hub for a newer revision.
 
-    A setup-phase command, like `model pull`/`model scan` - `fllame
-    serve` never checks this itself (see CLAUDE.md, "Setup vs.
-    running"), so this is the only place staleness is ever surfaced.
-    Check-only by default; `--apply` re-pulls anything stale, a no-op
-    download-wise if nothing has actually changed, since it goes
-    through the same `pull_model` `model pull` already uses.
-
-    Takes a repo_id directly, not a recipe handle - same reasoning as
-    `model pull` above.
+    `serve` runs offline and never checks this itself.
+    REPO_ID is a Hugging Face repo id, not a RECIPE_ID.
     """
     if repo_id is not None:
         repo_ids = [repo_id]
@@ -1109,8 +1066,7 @@ def model_update(
 
 @model_app.command("list")
 def model_list() -> None:
-    """List models currently present in the local Hugging Face cache -
-    a filesystem scan, no network involved."""
+    """List models in the local Hugging Face cache. Uses no network."""
     models = list_cached_models()
     if not models:
         typer.echo(f"No models cached in {config.hf_cache_dir()}")
@@ -1329,28 +1285,29 @@ def _require_safe_gpu_memory_utilization(recipe: Recipe) -> None:
 
 @app.command()
 def serve(
-    handle: str = typer.Argument(..., show_default=False),
+    recipe_id: str = typer.Argument(..., show_default=False),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Skip this command's confirmation prompts (the VRAM sanity check) - "
-        "any warning is still printed.",
+        help="Don't ask for confirmation after the VRAM check. "
+        "Warnings are still printed.",
     ),
 ) -> None:
-    """Launch HANDLE's recipe via `docker compose up -d`. Reads whatever
-    `compose.yaml` is already on disk - never regenerates it - and never
-    touches the network."""
-    recipe = _load_or_exit(handle)
+    """Start RECIPE_ID via `docker compose up -d`.
+
+    Uses the compose.yaml on disk as is. Uses no network.
+    """
+    recipe = _load_or_exit(recipe_id)
     _require_model_cached(recipe)
     _require_compose_built(recipe)
     _require_safe_gpu_memory_utilization(recipe)
     _warn_if_vram_likely_insufficient(recipe, assume_yes=yes)
 
-    code = _run_compose(handle, "up", "-d", handle)
+    code = _run_compose(recipe_id, "up", "-d", recipe_id)
     if code == 0:
-        container_name = config.compose_project_name(handle)
-        typer.echo(f"'{handle}' started - follow its logs with: docker logs -f {container_name}")
+        container_name = config.compose_project_name(recipe_id)
+        typer.echo(f"'{recipe_id}' started - follow its logs with: docker logs -f {container_name}")
         typer.echo(
             "model loading can take several minutes - an empty or quiet log right "
             "after this returns is expected, not a problem."
@@ -1504,17 +1461,18 @@ def _save_bench_context(
 
 
 @app.command(
+    short_help="Benchmark RECIPE_ID's running container at several concurrency levels.",
     help=(
-        "Benchmark HANDLE's running container with `vllm bench serve` at several "
-        "concurrency levels, on random prompts - a speed test, not a quality test. "
-        "HANDLE must already be up via `fllame serve`.\n\n"
-        "Every run is saved to HANDLE's bench/<timestamp>/ folder, with the result JSON "
-        "per level plus the recipe, compose.yaml, Dockerfile, config and parameters used.\n\n"
+        "Benchmark RECIPE_ID's running container with `vllm bench serve` at several "
+        "concurrency levels. Uses random prompts: a speed test, not a quality test. "
+        "Start RECIPE_ID first with `fllame serve`.\n\n"
+        "Each run is saved to RECIPE_ID's bench/<timestamp>/ folder: the result JSON "
+        "per level, plus the recipe, compose.yaml, Dockerfile, config and parameters.\n\n"
         "Columns:\n\n\b\n" + columns_help()
     )
 )
 def bench(
-    handle: str = typer.Argument(..., show_default=False),
+    recipe_id: str = typer.Argument(..., show_default=False),
     concurrency: str = typer.Option(
         ",".join(str(c) for c in DEFAULT_CONCURRENCY),
         "--concurrency",
@@ -1530,7 +1488,7 @@ def bench(
     input_len: int = typer.Option(DEFAULT_INPUT_LEN, "--input-len", help="Prompt tokens."),
     output_len: int = typer.Option(DEFAULT_OUTPUT_LEN, "--output-len", help="Generated tokens."),
 ) -> None:
-    recipe = _load_or_exit(handle)
+    recipe = _load_or_exit(recipe_id)
     _require_compose_built(recipe)
     try:
         levels = build_levels(
@@ -1541,16 +1499,16 @@ def bench(
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
 
-    _require_running(handle)
-    port = extract_flag_value(_served_command(handle), "--port") or "8000"
+    _require_running(recipe_id)
+    port = extract_flag_value(_served_command(recipe_id), "--port") or "8000"
     base_url = f"http://localhost:{port}"
-    served = _probe_served_model(handle, base_url)
+    served = _probe_served_model(recipe_id, base_url)
     model = served["id"]
 
     max_model_len = served.get("max_model_len")
     if isinstance(max_model_len, int) and input_len + output_len > max_model_len:
         typer.echo(
-            f"--input-len {input_len} + --output-len {output_len} exceeds '{handle}''s "
+            f"--input-len {input_len} + --output-len {output_len} exceeds '{recipe_id}''s "
             f"max model length of {max_model_len} tokens - lower either.",
             err=True,
         )
@@ -1558,7 +1516,7 @@ def bench(
 
     started = datetime.now().astimezone()
     stamp = started.strftime("%Y%m%d-%H%M")
-    run_dir = config.recipe_dir(handle) / "bench" / stamp
+    run_dir = config.recipe_dir(recipe_id) / "bench" / stamp
     shutil.rmtree(run_dir, ignore_errors=True)
     run_dir.mkdir(parents=True)
     container_dir = f"/tmp/fllame-bench-{stamp}"
@@ -1574,10 +1532,10 @@ def bench(
             result_filename=f"c{level.concurrency}.json",
         )
 
-    version = _exec_in_container(handle, "vllm", "--version")
+    version = _exec_in_container(recipe_id, "vllm", "--version")
     vllm_version = version.stdout.strip() if version.returncode == 0 else ""
     params = {
-        "handle": handle,
+        "handle": recipe_id,
         "started_at": started.isoformat(timespec="seconds"),
         "model": model,
         "base_url": base_url,
@@ -1598,7 +1556,7 @@ def bench(
     try:
         for level in levels:
             result = _run_showing_progress(
-                handle, f"Concurrency: {level.concurrency} | ", command_for(level)
+                recipe_id, f"Concurrency: {level.concurrency} | ", command_for(level)
             )
             if result.returncode != 0:
                 typer.echo((result.stdout + result.stderr).rstrip(), err=True)
@@ -1608,7 +1566,9 @@ def bench(
                     err=True,
                 )
                 raise typer.Exit(code=1)
-            saved = _exec_in_container(handle, "cat", f"{container_dir}/c{level.concurrency}.json")
+            saved = _exec_in_container(
+                recipe_id, "cat", f"{container_dir}/c{level.concurrency}.json"
+            )
             try:
                 data = json.loads(saved.stdout)
             except json.JSONDecodeError:
@@ -1619,15 +1579,15 @@ def bench(
             lines.append(format_row(result_cells(level, data), widths))
             typer.echo(lines[-1])
     except KeyboardInterrupt:
-        _exec_in_container(handle, "python3", "-c", _STOP_BENCH_SCRIPT, container_dir)
+        _exec_in_container(recipe_id, "python3", "-c", _STOP_BENCH_SCRIPT, container_dir)
         typer.echo(
-            f"interrupted - stopped `vllm bench serve` in '{handle}'. Levels finished so far "
+            f"interrupted - stopped `vllm bench serve` in '{recipe_id}'. Levels finished so far "
             f"are in {run_dir}",
             err=True,
         )
         raise typer.Exit(code=130) from None
     finally:
-        _exec_in_container(handle, "rm", "-rf", container_dir)
+        _exec_in_container(recipe_id, "rm", "-rf", container_dir)
         (run_dir / "results.txt").write_text("\n".join(lines) + "\n")
 
     typer.echo(f"\nsaved to {run_dir}")
@@ -1668,11 +1628,7 @@ def _status_row_from_compose(
 
 @app.command()
 def status() -> None:
-    """Show every recipe in one table - built or not, running or not.
-    A container's own row comes from `docker compose ps --all --format
-    json` (each recipe is still its own compose project); everything
-    else is read straight from recipe.yaml/compose.yaml. Never
-    regenerates compose.yaml."""
+    """Show the state of every recipe, built or not, running or not."""
     store = _recipe_store()
     handles = store.list_handles()
     if not handles:
@@ -1717,17 +1673,16 @@ def status() -> None:
             )
 
     if rows:
-        _print_table(["RECIPE", "NAME", "IMAGE", "STATUS", "PORTS"], rows)
+        _print_table(["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"], rows)
     raise typer.Exit(code=exit_code)
 
 
 @app.command()
-def stop(handle: str = typer.Argument(..., show_default=False)) -> None:
-    """Stop HANDLE's container via `docker compose stop`. Reads
-    whatever `compose.yaml` is already on disk - never regenerates it."""
-    recipe = _load_or_exit(handle)
+def stop(recipe_id: str = typer.Argument(..., show_default=False)) -> None:
+    """Stop RECIPE_ID's container via `docker compose stop`."""
+    recipe = _load_or_exit(recipe_id)
     _require_compose_built(recipe)
-    raise typer.Exit(code=_run_compose(handle, "stop", handle))
+    raise typer.Exit(code=_run_compose(recipe_id, "stop", recipe_id))
 
 
 if __name__ == "__main__":
