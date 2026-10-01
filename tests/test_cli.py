@@ -2470,7 +2470,7 @@ def test_status_invokes_docker_compose_ps_with_json_format(tmp_path: Path, monke
 
 
 def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch):
-    """One shared table, RECIPE first - not a separate `docker compose
+    """One shared table, RECIPE_ID first - not a separate `docker compose
     ps` table per recipe. COMMAND, CREATED, and SERVICE (always the
     same as RECIPE) are dropped. A recipe with no container at all
     still gets a row, filled in from compose.yaml instead of docker."""
@@ -2520,7 +2520,7 @@ def test_status_prints_one_table_across_every_recipe(tmp_path: Path, monkeypatch
     lines = result.output.splitlines()
     header_lines = [line for line in lines if line.startswith("RECIPE")]
     assert len(header_lines) == 1
-    assert header_lines[0].split() == ["RECIPE", "NAME", "IMAGE", "STATUS", "PORTS"]
+    assert header_lines[0].split() == ["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"]
     assert "COMMAND" not in result.output
     assert "CREATED" not in result.output
     # demo-a: a live container, straight from docker.
