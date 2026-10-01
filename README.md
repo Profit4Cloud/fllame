@@ -7,11 +7,18 @@ serve` flags to use. `fllame serve RECIPE_ID` resolves one into a
 `docker compose` service and runs it - no web UI, nothing installed on
 the host beyond fllame and Docker.
 
-## Install
+## Prerequisites
 
-Requires Python 3.12+ and Docker (with the `compose` plugin) on `PATH`.
+- Python 3.12+.
+- Docker with the `compose` plugin on `PATH`.
+- An NVIDIA GPU, with the NVIDIA driver and NVIDIA Container Toolkit.
+
 fllame runs the official `vllm/vllm-openai` image; it doesn't vendor
 vLLM itself.
+
+## Install
+
+Install [pipx](https://pipx.pypa.io) first if you don't have it.
 
 ```
 pipx install .
