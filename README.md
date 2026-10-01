@@ -11,10 +11,7 @@ the host beyond fllame and Docker.
 
 - Python 3.12+.
 - Docker with the `compose` plugin on `PATH`.
-- An NVIDIA GPU, with the NVIDIA driver and NVIDIA Container Toolkit.
-
-fllame runs the official `vllm/vllm-openai` image; it doesn't vendor
-vLLM itself.
+- An NVIDIA GPU with the NVIDIA Container Toolkit.
 
 ## Install
 
