@@ -102,7 +102,9 @@ app.add_typer(
     help="Detect this machine's GPU(s), VRAM, RAM and supported quantizations.",
 )
 model_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
-app.add_typer(model_app, name="model", help="Search, download, and inspect Hugging Face models.")
+app.add_typer(
+    model_app, name="model", help="Pull, update, list and search for Hugging Face models."
+)
 config_app = typer.Typer(no_args_is_help=True, context_settings=_CONTEXT_SETTINGS)
 app.add_typer(config_app, name="config", help="View and change fllame's persisted settings.")
 
