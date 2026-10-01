@@ -18,6 +18,8 @@ the host beyond fllame and Docker.
 Install [pipx](https://pipx.pypa.io) first if you don't have it.
 
 ```
+git clone https://github.com/Profit4Cloud/fllame.git
+cd fllame
 pipx install .
 ```
 
