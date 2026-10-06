@@ -60,6 +60,9 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
     # invoked command or a failure override `cli.subprocess.run`
     # themselves afterward.
     monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: _FakeCompletedProcess())
+    # `recipe build` resolves a floating `latest` image via Docker Hub;
+    # tests exercising that override `cli.pin_image` themselves.
+    monkeypatch.setattr(cli, "pin_image", lambda image: image)
 
 
 def _dialogue_input(*parts: str) -> str:
@@ -190,6 +193,7 @@ def test_recipe_show_missing_handle(tmp_path: Path, monkeypatch):
 def test_recipe_add_dialogue_collects_env_and_command(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
+        "vllm/vllm-openai:v0.27.1",
         "",  # no preinstall commands
         "FOO=bar",
         "",  # end env vars
@@ -198,7 +202,7 @@ def test_recipe_add_dialogue_collects_env_and_command(tmp_path: Path, monkeypatc
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        ["recipe", "add"],
         input=pasted,
     )
 
@@ -217,8 +221,6 @@ def test_recipe_add_accepts_vllm_serve_line_as_trailing_args(tmp_path: Path, mon
         [
             "recipe",
             "add",
-            "--image",
-            "vllm/vllm-openai:v0.27.1",
             "vllm",
             "serve",
             "Qwen/Qwen3-8B-FP8",
@@ -242,47 +244,84 @@ def test_recipe_add_trailing_args_bad_paste_still_validates(tmp_path: Path, monk
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "org/repo", "-x"],
+        ["recipe", "add", "org/repo", "-x"],
     )
 
     assert result.exit_code == 1
     assert list(tmp_path.glob("*.yaml")) == []
 
 
+def test_recipe_add_accepts_quoted_single_line_command(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "add", "vllm serve org/demo --tensor-parallel-size 1"])
+
+    assert result.exit_code == 0, result.output
+    recipe = cli._recipe_store().load("demo")
+    assert recipe.repo_id == "org/demo"
+    assert recipe.serve_args == ["--tensor-parallel-size", "1"]
+
+
+def test_recipe_add_accepts_quoted_multi_line_command(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "recipe",
+            "add",
+            "vllm serve org/demo \\\n  --tensor-parallel-size 1\n  --enable-auto-tool-choice",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    recipe = cli._recipe_store().load("demo")
+    assert recipe.repo_id == "org/demo"
+    assert recipe.serve_args == ["--tensor-parallel-size", "1", "--enable-auto-tool-choice"]
+
+
+def test_recipe_add_command_args_follow_default_image_without_prompt(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "add", "vllm", "serve", "org/demo"], input="")
+
+    assert result.exit_code == 0, result.output
+    assert "image:" not in (tmp_path / "demo" / "recipe.yaml").read_text()
+
+
+def test_recipe_add_command_args_reject_image_and_point_to_dialogue(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["recipe", "add", "vllm/vllm-openai:v0.28.0", "org/demo", "--tensor-parallel-size", "1"],
+    )
+
+    assert result.exit_code == 1
+    assert "without arguments" in result.output
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
+
+
+def test_recipe_add_command_args_reject_export_lines(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["recipe", "add", "export FOO=bar\nvllm serve org/demo"])
+
+    assert result.exit_code == 1
+    assert "without arguments" in result.output
+    assert list(tmp_path.glob("*/recipe.yaml")) == []
+
+
 def test_recipe_add_second_recipe_for_same_model_gets_suffixed(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    pasted = _dialogue_input("", "", "vllm serve org/demo")
+    pasted = _dialogue_input("img:v1", "", "", "vllm serve org/demo")
 
-    runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
-    result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+    runner.invoke(app, ["recipe", "add"], input=pasted)
+    result = runner.invoke(app, ["recipe", "add"], input=pasted)
 
     assert result.exit_code == 0
     assert (tmp_path / "demo" / "recipe.yaml").is_file()
     assert (tmp_path / "demo_2" / "recipe.yaml").is_file()
-
-
-def test_recipe_add_pinned_image_no_warning(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    result = runner.invoke(
-        app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
-    )
-
-    assert "unpinned" not in result.output
-
-
-def test_recipe_add_unpinned_image_warns(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    result = runner.invoke(
-        app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:latest"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
-    )
-
-    assert "unpinned" in result.output
 
 
 def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
@@ -290,8 +329,8 @@ def test_recipe_add_rejects_bad_command(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1"],
-        input=_dialogue_input("", "", "docker run img:v1"),
+        ["recipe", "add"],
+        input=_dialogue_input("img:v1", "", "", "docker run img:v1"),
     )
 
     assert result.exit_code == 1
@@ -304,6 +343,7 @@ def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, 
     require one."""
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
+        "img:v1",
         "",
         "",
         "vllm serve org/demo",
@@ -311,7 +351,7 @@ def test_recipe_add_dialogue_command_without_trailing_backslash(tmp_path: Path, 
         "--enable-auto-tool-choice",
     )
 
-    result = runner.invoke(app, ["recipe", "add", "--image", "img:v1"], input=pasted)
+    result = runner.invoke(app, ["recipe", "add"], input=pasted)
 
     assert result.exit_code == 0
     text = (tmp_path / "demo" / "recipe.yaml").read_text()
@@ -324,8 +364,8 @@ def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1"],
-        input=_dialogue_input("", ""),
+        ["recipe", "add"],
+        input=_dialogue_input("img:v1", "", ""),
     )
 
     assert result.exit_code == 1
@@ -335,6 +375,7 @@ def test_recipe_add_no_command_given_is_an_error(tmp_path: Path, monkeypatch):
 def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
+        "vllm/vllm-openai:v0.27.1",
         "pip install -U 'transformers>=5.8.0'",
         "",  # end preinstall
         "",  # no env vars
@@ -343,7 +384,7 @@ def test_recipe_add_dialogue_collects_preinstall_commands(tmp_path: Path, monkey
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        ["recipe", "add"],
         input=pasted,
     )
 
@@ -360,6 +401,7 @@ def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeyp
     it silently changes what they typed."""
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
+        "vllm/vllm-openai:v0.27.1",
         'uv pip install -U "transformers>=5.8.0"',
         "",  # end preinstall
         "",  # no env vars
@@ -368,7 +410,7 @@ def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeyp
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        ["recipe", "add"],
         input=pasted,
     )
 
@@ -382,6 +424,7 @@ def test_recipe_add_replaces_uv_pip_install_and_notifies(tmp_path: Path, monkeyp
 def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pasted = _dialogue_input(
+        "vllm/vllm-openai:v0.27.1",
         "pip install -U transformers",
         "",  # end preinstall
         "",  # no env vars
@@ -390,7 +433,7 @@ def test_recipe_add_plain_pip_install_preinstall_unchanged_no_note(tmp_path: Pat
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.27.1"],
+        ["recipe", "add"],
         input=pasted,
     )
 
@@ -662,42 +705,13 @@ def test_recipe_add_dialogue_overriding_configured_default_pins_image(tmp_path: 
     assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
 
 
-def test_recipe_add_explicit_image_flag_overrides_configured_default(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
-
-    result = runner.invoke(
-        app,
-        ["recipe", "add", "--image", "vllm/vllm-openai:v0.28.0"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
-    )
-
-    assert result.exit_code == 0
-    saved = tmp_path / "demo" / "recipe.yaml"
-    assert "image: vllm/vllm-openai:v0.28.0" in saved.read_text()
-
-
-def test_recipe_add_warns_when_configured_default_is_unpinned(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
-
-    result = runner.invoke(
-        app,
-        ["recipe", "add"],
-        input=_dialogue_input("", "", "", "vllm serve org/demo"),  # accept the unpinned default
-    )
-
-    assert "unpinned" in result.output
-
-
-def test_config_show_unset(tmp_path: Path, monkeypatch):
+def test_config_show_default_image_defaults_to_latest(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    assert "unset" in result.stdout
-    assert "vllm/vllm-openai:latest" in result.stdout
+    assert "default_image: vllm/vllm-openai:latest" in result.stdout
 
 
 def test_config_set_and_show_default_image(tmp_path: Path, monkeypatch):
@@ -723,14 +737,6 @@ def test_config_show_default_gpu_memory_utilization_defaults_to_0_92(tmp_path: P
     assert "default_gpu_memory_utilization: 0.92" in result.stdout
 
 
-def test_config_set_default_image_warns_unpinned(tmp_path: Path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-
-    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:latest"])
-
-    assert "unpinned" in result.output
-
-
 def _write_compose_with_image(tmp_path: Path, handle: str, image: str) -> Path:
     """A minimal, already-generated-looking compose.yaml, with a hand
     edit (a custom `shm_size:`) alongside the `image:` line - used to
@@ -740,19 +746,6 @@ def _write_compose_with_image(tmp_path: Path, handle: str, image: str) -> Path:
     compose_path = directory / "compose.yaml"
     compose_path.write_text(f"services:\n  {handle}:\n    image: {image}\n    shm_size: 2gb\n")
     return compose_path
-
-
-def test_config_set_default_image_no_prior_default_skips_batch_update(tmp_path: Path, monkeypatch):
-    """With no previously configured default, there's no old value to
-    search compose.yaml files for - nothing to prompt about."""
-    _isolate(tmp_path, monkeypatch)
-    _write_recipe(tmp_path)
-    _write_compose_with_image(tmp_path, "demo", "vllm/vllm-openai:latest")
-
-    result = runner.invoke(app, ["config", "set-default-image", "vllm/vllm-openai:v0.27.1"])
-
-    assert result.exit_code == 0
-    assert "compose.yaml" not in result.output
 
 
 def test_config_set_default_image_offers_batch_update_and_applies_on_confirm(
@@ -2348,8 +2341,8 @@ def test_recipe_add_plain_neither_pulls_nor_builds(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 0
@@ -2366,8 +2359,8 @@ def test_recipe_add_pull_downloads_the_model(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "--pull"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add", "--pull"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 0
@@ -2386,8 +2379,8 @@ def test_recipe_add_pull_hub_error_gives_friendly_message(tmp_path: Path, monkey
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "--pull"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add", "--pull"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 1
@@ -2408,8 +2401,8 @@ def test_recipe_add_pull_permission_error_gives_friendly_message(tmp_path: Path,
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "--pull"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add", "--pull"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 1
@@ -2424,8 +2417,8 @@ def test_recipe_add_build_without_pull_fails_when_not_cached(tmp_path: Path, mon
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "--build"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add", "--build"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 1
@@ -2445,8 +2438,8 @@ def test_recipe_add_pull_and_build_together(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["recipe", "add", "--image", "img:v1", "--pull", "--build"],
-        input=_dialogue_input("", "", "vllm serve org/demo"),
+        ["recipe", "add", "--pull", "--build"],
+        input=_dialogue_input("img:v1", "", "", "vllm serve org/demo"),
     )
 
     assert result.exit_code == 0
@@ -3107,3 +3100,57 @@ def test_bench_ctrl_c_keeps_finished_levels(tmp_path: Path, monkeypatch):
     assert sorted(p.name for p in run_dir.glob("c*.json")) == ["c1.json", "c4.json"]
     results = (run_dir / "results.txt").read_text().splitlines()
     assert [line.split()[0] for line in results] == ["CONC", "1", "4"]
+
+
+def test_recipe_build_pins_floating_default_image(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(
+        cli,
+        "pin_image",
+        lambda image: "vllm/vllm-openai:v0.31.0" if image == "vllm/vllm-openai:latest" else image,
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0, result.output
+    assert "resolved 'vllm/vllm-openai:latest' to 'vllm/vllm-openai:v0.31.0'" in result.output
+    compose = yaml.safe_load((tmp_path / "demo" / "compose.yaml").read_text())
+    assert compose["services"]["demo"]["image"] == "vllm/vllm-openai:v0.31.0"
+    assert "image:" not in (tmp_path / "demo" / "recipe.yaml").read_text()
+
+
+def test_recipe_build_pins_floating_image_in_dockerfile(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "recipe.yaml").write_text(
+        "command: vllm serve org/demo\npreinstall:\n  - pip install -U transformers\n"
+    )
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli, "pin_image", lambda image: "vllm/vllm-openai:v0.31.0")
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0, result.output
+    dockerfile = (tmp_path / "demo" / "Dockerfile").read_text()
+    assert dockerfile.startswith("FROM vllm/vllm-openai:v0.31.0\n")
+
+
+def test_recipe_build_fails_when_image_cannot_be_pinned(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+
+    def fail(image):
+        raise cli.ImageResolveError("can't resolve 'vllm/vllm-openai:latest'")
+
+    monkeypatch.setattr(cli, "pin_image", fail)
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "can't resolve" in result.output
+    assert not (tmp_path / "demo" / "compose.yaml").exists()

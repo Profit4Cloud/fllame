@@ -45,6 +45,7 @@ from fllame.bench.sweep import (
     result_cells,
 )
 from fllame.compose.generator import generate_compose, write_compose_file
+from fllame.compose.images import ImageResolveError, pin_image
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
     VllmCommandError,
@@ -60,7 +61,7 @@ from fllame.models.sizing import memory_budget_gb, usable_memory_gb
 from fllame.models.updater import check_for_update
 from fllame.models.vram import VramEstimateError, estimate_vram
 from fllame.recipes.naming import derive_handle
-from fllame.recipes.parser import RecipePasteError, parse_env_line, parse_pasted_recipe
+from fllame.recipes.parser import RecipePasteError, parse_command_args, parse_env_line
 from fllame.recipes.store import RecipeStore, autofix_whitespace
 
 # `--help` is Click's default; `-h` is the standard Unix short form on
@@ -110,8 +111,6 @@ app.add_typer(config_app, name="config", help="View and change fllame's persiste
 
 BACKEND = VllmServingBackend()
 
-_FALLBACK_IMAGE = "vllm/vllm-openai:latest"
-
 
 def _recipe_store() -> RecipeStore:
     return RecipeStore(config.recipes_dir())
@@ -120,7 +119,7 @@ def _recipe_store() -> RecipeStore:
 def _resolve_image(recipe: Recipe) -> Recipe:
     if recipe.image is not None:
         return recipe
-    return dataclasses.replace(recipe, image=config_file.get_default_image() or _FALLBACK_IMAGE)
+    return dataclasses.replace(recipe, image=config_file.get_default_image())
 
 
 def _load_or_exit(handle: str) -> Recipe:
@@ -201,6 +200,17 @@ def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
     )
 
 
+def _pin_image_or_exit(recipe: Recipe) -> Recipe:
+    try:
+        pinned = pin_image(recipe.image)
+    except ImageResolveError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    if pinned != recipe.image:
+        typer.echo(f"resolved '{recipe.image}' to '{pinned}'")
+    return dataclasses.replace(recipe, image=pinned)
+
+
 def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     """Builds the recipe by creating a `compose.yaml` (and possibly a `Dockerfile`) in its folder.
     Validates the result with `docker build` (a recipe with `preinstall`) or `docker compose
@@ -217,6 +227,7 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     tp_warning = tensor_parallel_size_mismatch_warning(recipe, hardware)
     if tp_warning is not None:
         typer.echo(tp_warning, err=True)
+    recipe = _pin_image_or_exit(_resolve_image(recipe))
     dockerfile_content = _write_recipe_compose(
         recipe, default_gpu_memory_utilization=default_gpu_memory_utilization
     )
@@ -451,16 +462,10 @@ def recipe_add(
     vllm_serve_line: list[str] = typer.Argument(
         None,
         show_default=False,
-        help="A `vllm serve REPO_ID ...` line, e.g. `fllame recipe add vllm serve "
-        "org/repo --max-model-len 8192`. Omit for the guided dialogue, which also "
-        "asks for env vars and preinstall commands.",
-    ),
-    image: str | None = typer.Option(
-        None,
-        "--image",
-        show_default=False,
-        help="Docker image to pin, e.g. vllm/vllm-openai:v0.27.1. Omit to follow "
-        "the configured default (`fllame config show`).",
+        help="A `vllm serve REPO_ID ...` command, with or without quotes, e.g. "
+        "`fllame recipe add vllm serve org/repo --max-model-len 8192`. Omit for the "
+        "guided dialogue, which also asks for the image, env vars and preinstall "
+        "commands.",
     ),
     pull: bool = typer.Option(
         False,
@@ -474,33 +479,27 @@ def recipe_add(
         "Needs REPO_ID to be downloaded, or --pull.",
     ),
 ) -> None:
-    """Create a recipe from a `vllm serve` line.
+    """Create a recipe from a `vllm serve` command.
 
-    The RECIPE_ID is derived from REPO_ID. Without a `vllm serve` line,
+    The RECIPE_ID is derived from REPO_ID. The recipe uses the configured
+    default image (`fllame config show`). Without a `vllm serve` command,
     a dialogue asks for the Docker image, preinstall commands, env vars
     and the `vllm serve` command.
     """
+    image: str | None = None
     if vllm_serve_line:
-        pasted = shlex.join(vllm_serve_line)
         try:
-            parsed = parse_pasted_recipe(pasted)
+            command = parse_command_args(vllm_serve_line)
         except RecipePasteError as e:
             typer.echo(str(e), err=True)
             raise typer.Exit(code=1) from e
-        command, env, preinstall = parsed.command, parsed.env, parsed.preinstall
-
-        if image is None and config_file.get_default_image() is None:
-            image = typer.prompt(
-                "Docker image (e.g. vllm/vllm-openai:v0.27.1) - or set a default "
-                "with `fllame config set-default-image` to skip this next time",
-                default=_FALLBACK_IMAGE,
-            )
+        env: dict[str, str] = {}
+        preinstall: list[str] = []
     else:
-        if image is None:
-            configured_default = config_file.get_default_image()
-            image = typer.prompt("Docker image", default=configured_default or _FALLBACK_IMAGE)
-            if configured_default is not None and image == configured_default:
-                image = None  # follow the configured default rather than pin it
+        configured_default = config_file.get_default_image()
+        image = typer.prompt("Docker image", default=configured_default)
+        if image == configured_default:
+            image = None  # follow the configured default rather than pin it
 
         preinstall = _read_block(
             "Preinstall commands to run before `vllm serve`, one per line "
@@ -526,14 +525,6 @@ def recipe_add(
             "note: replaced 'uv pip install' with 'pip install' in the preinstall "
             "step - the vllm/vllm-openai image's own Python environment isn't the "
             "uv-managed venv 'uv pip install' expects."
-        )
-
-    warn_image = image if image is not None else config_file.get_default_image()
-    if warn_image is not None and (warn_image.endswith(":latest") or ":" not in warn_image):
-        typer.echo(
-            "warning: using an unpinned image tag - pin it to a specific "
-            "version once you've confirmed this recipe works.",
-            err=True,
         )
 
     repo_id, _ = parse_vllm_serve_command(command)
@@ -765,11 +756,7 @@ def recipe_remove(
 @config_app.command("show")
 def config_show() -> None:
     """Print fllame's current persisted settings."""
-    default_image = config_file.get_default_image()
-    if default_image is not None:
-        typer.echo(f"default_image: {default_image}")
-    else:
-        typer.echo(f"default_image: (unset - falls back to '{_FALLBACK_IMAGE}')")
+    typer.echo(f"default_image: {config_file.get_default_image()}")
 
     typer.echo(
         f"default_gpu_memory_utilization: {config_file.get_default_gpu_memory_utilization()}"
@@ -824,13 +811,6 @@ def config_set_default_image(image: str = typer.Argument(..., show_default=False
     files. Nothing else in those files changes. A changed Dockerfile is
     rebuilt with `docker build`.
     """
-    if image.endswith(":latest") or ":" not in image:
-        typer.echo(
-            "warning: using an unpinned image tag - pin it to a specific "
-            "version once you've confirmed recipes work with it.",
-            err=True,
-        )
-
     typer.echo(f"pulling '{image}' to confirm it resolves ...")
     if _run_docker("pull", image) != 0:
         typer.echo("Failed to pull image. The default image was not changed.", err=True)
@@ -840,7 +820,7 @@ def config_set_default_image(image: str = typer.Argument(..., show_default=False
     config_file.set_default_image(image)
     typer.echo(f"default image set to '{image}'")
 
-    if old_default is None or old_default == image:
+    if old_default == image:
         return
 
     affected = _build_artifacts_using_image(old_default)
@@ -1451,7 +1431,7 @@ def _save_bench_context(
         if (recipe_dir / name).is_file():
             shutil.copy2(recipe_dir / name, run_dir / name)
     settings = {
-        "default_image": config_file.get_default_image() or _FALLBACK_IMAGE,
+        "default_image": config_file.get_default_image(),
         "default_gpu_memory_utilization": config_file.get_default_gpu_memory_utilization(),
     }
     (run_dir / "config.yaml").write_text(yaml.safe_dump(settings, sort_keys=False))

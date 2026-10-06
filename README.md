@@ -30,7 +30,7 @@ Then you can run the fllame commands below within the activated environment.
 
 - fllame recipe list # List every RECIPE_ID.
 - fllame recipe show RECIPE_ID # Print RECIPE_ID's resolved recipe as YAML.
-- fllame recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] # Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
+- fllame recipe add [VLLM_SERVE_LINE...] [--pull] [--build] # Create a recipe from a vllm serve command, or a guided dialogue if none is given.
 - fllame recipe build RECIPE_ID [--yes] # Write (or overwrite) RECIPE_ID's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
 - fllame recipe vram RECIPE_ID [--max-model-len N] [--max-num-seqs N] [--details] # Estimate VRAM for RECIPE_ID's recipe.
 - fllame recipe edit RECIPE_ID # Open RECIPE_ID's recipe.yaml in $EDITOR and re-validate on save.
@@ -41,7 +41,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] # Search the Hub, ranked by downloads and size.
 - fllame model update [REPO_ID] [--apply] # Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - fllame config show # Print fllame's currently configured settings.
-- fllame config set-default-image IMAGE # Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
+- fllame config set-default-image IMAGE # Set the default image recipes fall back to (default: vllm/vllm-openai:latest); offers to update existing compose.yaml/Dockerfile files still using the old default.
 - fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
 - fllame serve RECIPE_ID [--yes] # Launch RECIPE_ID's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame bench RECIPE_ID [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside RECIPE_ID's running container, print a results table, and save a reproducible run to RECIPE_ID's bench/<timestamp>/ folder.
@@ -54,18 +54,36 @@ Every command also takes `-h`/`--help`.
 
 Recipes live in `~/.config/fllame/recipes/<RECIPE_ID>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Both are safe to hand-edit - fllame never overwrites them on its own.
 
+## Adding a recipe
+
+Pass a `vllm serve` command to `recipe add`. Quotes are optional, and the command may span several lines:
+
+```bash
+fllame recipe add vllm serve org/repo --max-model-len 8192
+
+fllame recipe add "vllm serve org/repo
+  --max-model-len 8192
+  --tensor-parallel-size 1"
+```
+
+Without quotes, end each line but the last with `\`. The recipe uses the default image. For a custom image, env vars or preinstall commands, run `fllame recipe add` without arguments to start a dialogue.
+
+## Docker image versions
+
+The default image is `vllm/vllm-openai:latest`. `recipe build` resolves `latest` to the release it points at, e.g. `vllm/vllm-openai:v0.31.0`, and writes that into `compose.yaml` or the `Dockerfile`. A built recipe therefore never drifts to another vLLM version. Rebuilding picks up the newest release. If no release tag matches, the image digest is written instead.
+
 ## Recipe format
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
 | `command`     | yes      | the whole `vllm serve <repo_id> <args...>` invocation, not split into separate keys - `repo_id` and the host port mapping are derived from it |
-| `image`       | no       | Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use `fllame config`'s default, or `vllm/vllm-openai:latest` if no default is set |
+| `image`       | no       | Docker image to run, e.g. `vllm/vllm-openai:v0.27.1` - omit to use `fllame config`'s default |
 | `env`         | no       | environment variables; must not set `HF_HOME`, `HF_HUB_CACHE`, or `HF_HUB_OFFLINE`, which fllame manages itself |
 | `preinstall`  | no       | shell commands run, in order, as `Dockerfile` `RUN` lines when `recipe build` builds this recipe's local image - not re-run at `serve` time |
 
 ## Advanced
 
-Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, and `ipc: host` unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame never respects your edits, but doesn't verify them, so you must know what you are doing. The same
+Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, and `ipc: host` unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame always respects your edits, but doesn't verify them, so you must know what you are doing. The same
 goes for a `Dockerfile`, which is generated for recipes with `preinstall`.
 
 Every generated `compose.yaml` always has `--gpu-memory-utilization` set to aconfigurable default. It is `0.92` by default, but this can be changed using `fllame config set-default-gpu-memory-utilization <value>`. This default is only used when there is no explicit value in
