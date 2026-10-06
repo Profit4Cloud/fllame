@@ -1767,7 +1767,7 @@ def status(
 
     redraw = watch and sys.stdout.isatty()
     shown_readiness: list[str] | None = None
-    shown_rows = 0
+    shown_lines: list[str] = []
     most_running = 0
     try:
         while True:
@@ -1776,8 +1776,9 @@ def status(
             # Over a pipe, a new table only when a state changes - not each
             # time docker's "Up N minutes" ticks over.
             if redraw or readiness != shown_readiness:
-                if shown_rows:
-                    sys.stdout.write(f"\033[{shown_rows}F\033[J")
+                # Counted at the current width: most terminals re-wrap on resize.
+                if shown_lines:
+                    sys.stdout.write(f"\033[{_screen_rows(shown_lines)}F\033[J")
                     sys.stdout.flush()
                 if redraw or shown_readiness is None:
                     for warning in warnings:
@@ -1786,7 +1787,7 @@ def status(
                 for line in lines:
                     typer.echo(line)
                 if redraw:
-                    shown_rows = _screen_rows([*warnings, *lines])
+                    shown_lines = [*warnings, *lines]
                 shown_readiness = readiness
             if not watch or all(state in _SETTLED_READINESS for state in readiness):
                 break
