@@ -1341,11 +1341,6 @@ _READINESS_SCRIPT = """
 import json, sys, urllib.request
 base = sys.argv[1]
 try:
-    urllib.request.urlopen(base + "/health", timeout=5)
-except Exception:
-    print("loading")
-    sys.exit()
-try:
     model = json.load(urllib.request.urlopen(base + "/v1/models", timeout=5))["data"][0]["id"]
     body = {"model": model, "prompt": "The capital of France is", "max_tokens": 1}
     request = urllib.request.Request(
@@ -1355,7 +1350,7 @@ try:
     )
     json.load(urllib.request.urlopen(request, timeout=30))["choices"][0]["text"]
 except Exception:
-    print("unhealthy")
+    print("loading model")
     sys.exit()
 print("ready")
 """
@@ -1407,7 +1402,7 @@ def _base_url(handle: str) -> str:
 def _probe_readiness(handle: str) -> str:
     result = _exec_in_container(handle, "python3", "-c", _READINESS_SCRIPT, _base_url(handle))
     state = result.stdout.strip()
-    return state if state in ("loading", "unhealthy", "ready") else "unknown"
+    return state if state in ("loading model", "ready") else "unknown"
 
 
 def _probe_served_model(handle: str, base_url: str) -> dict:
