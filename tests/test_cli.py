@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 from huggingface_hub.errors import HfHubHTTPError
 from typer.testing import CliRunner
@@ -1719,9 +1720,7 @@ def test_serve_sets_container_name_on_the_compose_service(tmp_path: Path, monkey
     assert "container_name: fllame-demo" in compose_text
 
 
-def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
-    tmp_path: Path, monkeypatch
-):
+def test_serve_prints_status_and_docker_logs_hints_on_success(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1732,6 +1731,7 @@ def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
 
     assert result.exit_code == 0
     assert "docker logs -f fllame-demo" in result.output
+    assert "fllame status demo --watch" in result.output
     assert "can take several minutes" in result.output
 
 
@@ -1750,6 +1750,7 @@ def test_serve_omits_docker_logs_hint_on_failure(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert "docker logs" not in result.output
+    assert "fllame status" not in result.output
 
 
 def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):
@@ -2693,6 +2694,45 @@ def test_stop_requires_compose_already_built(tmp_path: Path, monkeypatch):
     assert called == []
 
 
+def test_stop_without_recipe_id_stops_every_running_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    for handle in ("demo-a", "demo-b", "demo-c"):
+        _write_recipe(tmp_path, handle=handle)
+        _write_compose(tmp_path, handle=handle)
+    _write_recipe(tmp_path, handle="unbuilt")
+    states = {"demo-a": "running", "demo-b": "exited", "demo-c": "running"}
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[-2:] == ["--format", "json"]:
+            handle = Path(command[command.index("-f") + 1]).parent.name
+            return _FakeSubprocessResult(stdout=json.dumps([{"State": states[handle]}]))
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0
+    stops = [command[-2:] for command in commands if "stop" in command]
+    assert stops == [["stop", "demo-a"], ["stop", "demo-c"]]
+
+
+def test_stop_without_recipe_id_reports_nothing_running(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_compose_ps_json({"demo": []}))
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0
+    assert "Nothing is running." in result.output
+
+
 def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
@@ -3126,6 +3166,19 @@ def test_bench_ctrl_c_keeps_finished_levels(tmp_path: Path, monkeypatch):
     assert [line.split()[0] for line in results] == ["CONC", "1", "4"]
 
 
+def _fake_status_docker(probe_stdout: str, captured: list):
+    def fake_run(command, **kwargs):
+        if command[-2:] == ["--format", "json"]:
+            container = {
+                "Name": "fllame-demo",
+                "Image": "vllm/vllm-openai:v0.27.1",
+                "State": "running",
+                "Status": "Up 5 minutes",
+                "Publishers": [],
+            }
+            return _FakeSubprocessResult(stdout=json.dumps([container]))
+        captured.append(command)
+        return _FakeSubprocessResult(stdout=probe_stdout)
 def test_recipe_build_pins_floating_default_image(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     (tmp_path / "demo").mkdir()
@@ -3191,6 +3244,167 @@ def _docker_with_local_tags(tags: str):
         return _FakeCompletedProcess()
 
     return fake_run
+
+
+@pytest.mark.parametrize(
+    "probe_stdout", ["loading model\n", "error\n", "not responding\n", "ready\n"]
+)
+def test_status_appends_readiness_to_a_running_container(tmp_path: Path, monkeypatch, probe_stdout):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    probes = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker(probe_stdout, probes))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert f"{probe_stdout.strip().capitalize()} (5 minutes)" in result.output
+    assert probes[0][-2:] == [cli._READINESS_SCRIPT, "http://localhost:8000"]
+
+
+def test_status_reports_unknown_when_the_readiness_probe_cannot_run(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker("", []))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Unknown (5 minutes)" in result.output
+
+
+def test_status_does_not_probe_a_stopped_container(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    container = {"Name": "fllame-demo", "State": "exited", "Status": "Exited (0) 1 hour ago"}
+    monkeypatch.setattr(cli.subprocess, "run", _fake_compose_ps_json({"demo": [container]}))
+    probed = []
+    monkeypatch.setattr(cli, "_probe_readiness", probed.append)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert probed == []
+
+
+def _watch_status(tmp_path: Path, monkeypatch, states: list[str], args: list[str]):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker("", []))
+    remaining = list(states)
+    monkeypatch.setattr(cli, "_probe_readiness", lambda handle: remaining.pop(0))
+    sleeps = []
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+    return runner.invoke(app, ["status", *args]), remaining, sleeps
+
+
+def test_status_watch_rechecks_until_ready(tmp_path: Path, monkeypatch):
+    result, remaining, sleeps = _watch_status(
+        tmp_path,
+        monkeypatch,
+        ["loading model", "loading model", "not responding", "ready"],
+        ["--watch"],
+    )
+
+    assert result.exit_code == 0
+    assert remaining == []
+    assert sleeps == [cli._WATCH_INTERVAL_SECONDS] * 3
+    # Over a pipe, a table is printed only when a state changes.
+    assert result.output.count("RECIPE_ID") == 3
+    assert result.output.count("Loading model") == 1
+    assert result.output.rstrip().endswith("8000:8000")
+    assert "Ready (5 minutes)" in result.output.splitlines()[-1]
+
+
+def test_status_watch_stops_on_error_with_exit_code_1(tmp_path: Path, monkeypatch):
+    result, remaining, _ = _watch_status(
+        tmp_path, monkeypatch, ["loading model", "error", "ready"], ["-w"]
+    )
+
+    assert result.exit_code == 1
+    assert remaining == ["ready"]
+    assert "Error (5 minutes)" in result.output
+
+
+def test_status_without_watch_checks_once(tmp_path: Path, monkeypatch):
+    result, remaining, sleeps = _watch_status(tmp_path, monkeypatch, ["loading model", "ready"], [])
+
+    assert result.exit_code == 0
+    assert remaining == ["ready"]
+    assert sleeps == []
+
+
+def test_status_watch_stops_on_ctrl_c(tmp_path: Path, monkeypatch):
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker("loading model\n", []))
+    monkeypatch.setattr(cli.time, "sleep", interrupt)
+
+    result = runner.invoke(app, ["status", "--watch"])
+
+    assert result.exit_code == 130
+
+
+def test_status_recipe_id_shows_only_that_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path, handle="demo-a")
+    _write_recipe(tmp_path, handle="demo-b")
+
+    result = runner.invoke(app, ["status", "demo-b"])
+
+    assert result.exit_code == 0
+    assert "demo-b" in result.output
+    assert "demo-a" not in result.output
+
+
+def test_status_unknown_recipe_id(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["status", "nope"])
+
+    assert result.exit_code == 1
+
+
+def test_status_watch_exits_1_when_the_container_stops(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    passes = [
+        {"Name": "fllame-demo", "State": "running", "Status": "Up 1 minute"},
+        {"Name": "fllame-demo", "State": "exited", "Status": "Exited (1) 1 second ago"},
+    ]
+
+    def fake_run(command, **kwargs):
+        return _FakeSubprocessResult(stdout=json.dumps([passes.pop(0)]))
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "_probe_readiness", lambda handle: "loading model")
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    result = runner.invoke(app, ["status", "--watch"])
+
+    assert result.exit_code == 1
+    assert "Exited (1)" in result.output
+
+
+def test_readiness_status_lowercases_docker_uptime():
+    assert cli._readiness_status("loading model", "Up About a minute") == (
+        "Loading model (about a minute)"
+    )
 
 
 def test_recipe_build_offline_uses_newest_local_release(tmp_path: Path, monkeypatch):

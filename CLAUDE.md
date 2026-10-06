@@ -101,7 +101,7 @@ The only exceptions are `config set-default-image IMAGE` and
 - serve RECIPE_ID [--detach] [--yes] — Launch RECIPE_ID's recipe via docker compose up; never touches the network.
 - bench RECIPE_ID [--concurrency LIST] [--num-prompts LIST] [--input-len N] [--output-len N] — Benchmark RECIPE_ID's running container at several concurrency levels; saves each run to its bench/ folder.
 - status — Show every recipe's container state via docker compose ps.
-- stop RECIPE_ID — Stop RECIPE_ID's container via docker compose stop.
+- stop [RECIPE_ID] — Stop RECIPE_ID's container via docker compose stop. Without RECIPE_ID, stop every running one.
 
 ## Commands to implement
 - recipe scan — Scans the vLLM website for recipes.

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -269,14 +270,21 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     typer.echo(f"wrote {compose_path}")
 
 
-def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+def _format_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     """Left-aligned, space-padded columns - `docker ps` style, no
     border characters."""
     all_rows = [headers, *rows]
     widths = [max(len(row[i]) for row in all_rows) for i in range(len(headers))]
+    lines = []
     for row in all_rows:
         padded = [cell.ljust(width) for cell, width in zip(row[:-1], widths[:-1], strict=False)]
-        typer.echo("  ".join([*padded, row[-1]]))
+        lines.append("  ".join([*padded, row[-1]]))
+    return lines
+
+
+def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+    for line in _format_table(headers, rows):
+        typer.echo(line)
 
 
 def _format_count(n: int | None) -> str:
@@ -1321,11 +1329,9 @@ def serve(
     code = _run_compose(recipe_id, "up", "-d", recipe_id)
     if code == 0:
         container_name = config.compose_project_name(recipe_id)
-        typer.echo(f"'{recipe_id}' started - follow its logs with: docker logs -f {container_name}")
-        typer.echo(
-            "model loading can take several minutes - an empty or quiet log right "
-            "after this returns is expected, not a problem."
-        )
+        typer.echo(f"'{recipe_id}' started. Loading the model can take several minutes.")
+        typer.echo(f"Wait until ready: fllame status {recipe_id} --watch")
+        typer.echo(f"Follow the logs:  docker logs -f {container_name}")
     raise typer.Exit(code=code)
 
 
@@ -1347,6 +1353,36 @@ import sys, urllib.request
 base = sys.argv[1]
 urllib.request.urlopen(base + "/health", timeout=5)
 print(urllib.request.urlopen(base + "/v1/models", timeout=5).read().decode())
+"""
+
+# /health can answer while generation still fails, so readiness means one real
+# token. Raw /v1/completions skips the chat template, so no model starts thinking.
+# vLLM opens its port only once the model is loaded, so a refused connection
+# means loading, while an HTTP error or a timeout means a live but broken server.
+_READINESS_SCRIPT = """
+import json, sys, urllib.error, urllib.request
+base = sys.argv[1]
+try:
+    model = json.load(urllib.request.urlopen(base + "/v1/models", timeout=5))["data"][0]["id"]
+    body = {"model": model, "prompt": "The capital of France is", "max_tokens": 1}
+    request = urllib.request.Request(
+        base + "/v1/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    json.load(urllib.request.urlopen(request, timeout=30))["choices"][0]["text"]
+except urllib.error.HTTPError:
+    print("error")
+except Exception as e:
+    reason = getattr(e, "reason", e)
+    if isinstance(reason, ConnectionRefusedError):
+        print("loading model")
+    elif isinstance(reason, TimeoutError):
+        print("not responding")
+    else:
+        print("error")
+else:
+    print("ready")
 """
 
 # `docker exec` without a TTY doesn't forward Ctrl-C into the container, so the
@@ -1386,6 +1422,17 @@ def _served_command(handle: str) -> list[str]:
         return [str(token) for token in compose["services"][handle].get("command") or []]
     except (yaml.YAMLError, KeyError, TypeError, AttributeError, OSError):
         return []
+
+
+def _base_url(handle: str) -> str:
+    port = extract_flag_value(_served_command(handle), "--port") or "8000"
+    return f"http://localhost:{port}"
+
+
+def _probe_readiness(handle: str) -> str:
+    result = _exec_in_container(handle, "python3", "-c", _READINESS_SCRIPT, _base_url(handle))
+    state = result.stdout.strip()
+    return state if state in ("loading model", "error", "not responding", "ready") else "unknown"
 
 
 def _probe_served_model(handle: str, base_url: str) -> dict:
@@ -1514,8 +1561,7 @@ def bench(
         raise typer.Exit(code=1) from e
 
     _require_running(recipe_id)
-    port = extract_flag_value(_served_command(recipe_id), "--port") or "8000"
-    base_url = f"http://localhost:{port}"
+    base_url = _base_url(recipe_id)
     served = _probe_served_model(recipe_id, base_url)
     model = served["id"]
 
@@ -1640,22 +1686,32 @@ def _status_row_from_compose(
     ]
 
 
-@app.command()
-def status() -> None:
-    """Show the state of every recipe, built or not, running or not."""
-    store = _recipe_store()
-    handles = store.list_handles()
-    if not handles:
-        typer.echo(f"No recipes found in {config.recipes_dir()}")
-        raise typer.Exit(code=0)
+_STATUS_HEADERS = ["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"]
+_WATCH_INTERVAL_SECONDS = 5
+# "not responding" and "unknown" can still clear up by waiting.
+_SETTLED_READINESS = ("ready", "error")
 
+
+def _readiness_status(state: str, docker_status: str) -> str:
+    """e.g. "Ready (5 minutes)" from docker's "Up 5 minutes"."""
+    uptime = docker_status.removeprefix("Up ")
+    return f"{state.capitalize()} ({uptime[:1].lower()}{uptime[1:]})"
+
+
+def _status_rows(
+    store: RecipeStore, handles: list[str]
+) -> tuple[list[list[str]], list[str], int, list[str]]:
+    """The table rows, warnings, the exit code, and the readiness of every
+    running container."""
     rows = []
+    warnings = []
     exit_code = 0
+    readiness = []
     for handle in handles:
         try:
             recipe = store.load(handle)
         except RecipeError as e:
-            typer.echo(f"warning: {e}", err=True)
+            warnings.append(f"warning: {e}")
             continue
 
         compose_path = config.recipe_dir(handle) / "compose.yaml"
@@ -1676,27 +1732,120 @@ def status() -> None:
             # - fall back to the configured port rather than leaving
             # this blank.
             ports = _format_ports(container.get("Publishers") or [])
+            container_status = container.get("Status", "")
+            if container.get("State") == "running":
+                state = _probe_readiness(handle)
+                readiness.append(state)
+                container_status = _readiness_status(state, container_status)
             rows.append(
                 [
                     handle,
                     container.get("Name", ""),
                     container.get("Image", ""),
-                    container.get("Status", ""),
+                    container_status,
                     ports or f"{recipe.port}:{recipe.port}",
                 ]
             )
+    return rows, warnings, exit_code, readiness
 
-    if rows:
-        _print_table(["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"], rows)
+
+def _screen_rows(lines: list[str]) -> int:
+    """How many terminal rows LINES take once long ones wrap."""
+    columns = shutil.get_terminal_size().columns
+    return sum(max(1, -(-len(line) // columns)) for line in lines)
+
+
+@app.command()
+def status(
+    recipe_id: str | None = typer.Argument(
+        None, show_default=False, help="Only this recipe [default: every recipe]."
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        "-w",
+        help=f"Re-check every {_WATCH_INTERVAL_SECONDS}s until every running container is "
+        "ready or in error. Exits 1 on error. Ctrl-C stops it.",
+    ),
+) -> None:
+    """Show the state of every recipe, built or not, running or not."""
+    store = _recipe_store()
+    if recipe_id is not None:
+        _load_or_exit(recipe_id)
+        handles = [recipe_id]
+    else:
+        handles = store.list_handles()
+    if not handles:
+        typer.echo(f"No recipes found in {config.recipes_dir()}")
+        raise typer.Exit(code=0)
+
+    redraw = watch and sys.stdout.isatty()
+    shown_readiness: list[str] | None = None
+    shown_lines: list[str] = []
+    most_running = 0
+    try:
+        while True:
+            rows, warnings, exit_code, readiness = _status_rows(store, handles)
+            most_running = max(most_running, len(readiness))
+            # Over a pipe, a new table only when a state changes - not each
+            # time docker's "Up N minutes" ticks over.
+            if redraw or readiness != shown_readiness:
+                # Counted at the current width: most terminals re-wrap on resize.
+                if shown_lines:
+                    sys.stdout.write(f"\033[{_screen_rows(shown_lines)}F\033[J")
+                    sys.stdout.flush()
+                if redraw or shown_readiness is None:
+                    for warning in warnings:
+                        typer.echo(warning, err=True)
+                lines = _format_table(_STATUS_HEADERS, rows) if rows else []
+                for line in lines:
+                    typer.echo(line)
+                if redraw:
+                    shown_lines = [*warnings, *lines]
+                shown_readiness = readiness
+            if not watch or all(state in _SETTLED_READINESS for state in readiness):
+                break
+            time.sleep(_WATCH_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+
+    # A container that stops while watched has crashed.
+    if watch and ("error" in readiness or len(readiness) < most_running):
+        exit_code = exit_code or 1
     raise typer.Exit(code=exit_code)
 
 
 @app.command()
-def stop(recipe_id: str = typer.Argument(..., show_default=False)) -> None:
-    """Stop RECIPE_ID's container via `docker compose stop`."""
-    recipe = _load_or_exit(recipe_id)
-    _require_compose_built(recipe)
-    raise typer.Exit(code=_run_compose(recipe_id, "stop", recipe_id))
+def stop(
+    recipe_id: str | None = typer.Argument(
+        None, show_default=False, help="Only this recipe [default: every running recipe]."
+    ),
+) -> None:
+    """Stop RECIPE_ID's container, or every running one, via `docker compose stop`."""
+    if recipe_id is not None:
+        recipe = _load_or_exit(recipe_id)
+        _require_compose_built(recipe)
+        raise typer.Exit(code=_run_compose(recipe_id, "stop", recipe_id))
+
+    exit_code = 0
+    stopped_any = False
+    for handle in _recipe_store().list_handles():
+        if not (config.recipe_dir(handle) / "compose.yaml").is_file():
+            continue
+        containers, code = _compose_ps_json(handle)
+        if code != 0:
+            exit_code = code
+            continue
+        if any(
+            c.get("State") in ("running", "paused", "restarting")
+            for c in containers
+            if c.get("Service", handle) == handle
+        ):
+            stopped_any = True
+            exit_code = _run_compose(handle, "stop", handle) or exit_code
+    if not stopped_any and exit_code == 0:
+        typer.echo("Nothing is running.")
+    raise typer.Exit(code=exit_code)
 
 
 if __name__ == "__main__":
