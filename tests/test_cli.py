@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 from huggingface_hub.errors import HfHubHTTPError
 from typer.testing import CliRunner
@@ -3107,3 +3108,65 @@ def test_bench_ctrl_c_keeps_finished_levels(tmp_path: Path, monkeypatch):
     assert sorted(p.name for p in run_dir.glob("c*.json")) == ["c1.json", "c4.json"]
     results = (run_dir / "results.txt").read_text().splitlines()
     assert [line.split()[0] for line in results] == ["CONC", "1", "4"]
+
+
+def _fake_status_docker(probe_stdout: str, captured: list):
+    def fake_run(command, **kwargs):
+        if command[-2:] == ["--format", "json"]:
+            container = {
+                "Name": "fllame-demo",
+                "Image": "vllm/vllm-openai:v0.27.1",
+                "State": "running",
+                "Status": "Up 5 minutes",
+                "Publishers": [],
+            }
+            return _FakeSubprocessResult(stdout=json.dumps([container]))
+        captured.append(command)
+        return _FakeSubprocessResult(stdout=probe_stdout)
+
+    return fake_run
+
+
+@pytest.mark.parametrize("probe_stdout", ["loading\n", "unhealthy\n", "ready\n"])
+def test_status_appends_readiness_to_a_running_container(tmp_path: Path, monkeypatch, probe_stdout):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    probes = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker(probe_stdout, probes))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert f"Up 5 minutes ({probe_stdout.strip()})" in result.output
+    assert probes[0][-2:] == [cli._READINESS_SCRIPT, "http://localhost:8000"]
+
+
+def test_status_reports_unknown_when_the_readiness_probe_cannot_run(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_status_docker("", []))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Up 5 minutes (unknown)" in result.output
+
+
+def test_status_does_not_probe_a_stopped_container(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    container = {"Name": "fllame-demo", "State": "exited", "Status": "Exited (0) 1 hour ago"}
+    monkeypatch.setattr(cli.subprocess, "run", _fake_compose_ps_json({"demo": [container]}))
+    probed = []
+    monkeypatch.setattr(cli, "_probe_readiness", probed.append)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert probed == []

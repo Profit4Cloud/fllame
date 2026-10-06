@@ -1335,6 +1335,31 @@ urllib.request.urlopen(base + "/health", timeout=5)
 print(urllib.request.urlopen(base + "/v1/models", timeout=5).read().decode())
 """
 
+# /health can answer while generation still fails, so readiness means one real
+# token. Raw /v1/completions skips the chat template, so no model starts thinking.
+_READINESS_SCRIPT = """
+import json, sys, urllib.request
+base = sys.argv[1]
+try:
+    urllib.request.urlopen(base + "/health", timeout=5)
+except Exception:
+    print("loading")
+    sys.exit()
+try:
+    model = json.load(urllib.request.urlopen(base + "/v1/models", timeout=5))["data"][0]["id"]
+    body = {"model": model, "prompt": "The capital of France is", "max_tokens": 1}
+    request = urllib.request.Request(
+        base + "/v1/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    json.load(urllib.request.urlopen(request, timeout=30))["choices"][0]["text"]
+except Exception:
+    print("unhealthy")
+    sys.exit()
+print("ready")
+"""
+
 # `docker exec` without a TTY doesn't forward Ctrl-C into the container, so the
 # bench process is signalled explicitly. Walks /proc rather than calling pkill,
 # which the vLLM image isn't guaranteed to ship either.
@@ -1372,6 +1397,17 @@ def _served_command(handle: str) -> list[str]:
         return [str(token) for token in compose["services"][handle].get("command") or []]
     except (yaml.YAMLError, KeyError, TypeError, AttributeError, OSError):
         return []
+
+
+def _base_url(handle: str) -> str:
+    port = extract_flag_value(_served_command(handle), "--port") or "8000"
+    return f"http://localhost:{port}"
+
+
+def _probe_readiness(handle: str) -> str:
+    result = _exec_in_container(handle, "python3", "-c", _READINESS_SCRIPT, _base_url(handle))
+    state = result.stdout.strip()
+    return state if state in ("loading", "unhealthy", "ready") else "unknown"
 
 
 def _probe_served_model(handle: str, base_url: str) -> dict:
@@ -1500,8 +1536,7 @@ def bench(
         raise typer.Exit(code=1) from e
 
     _require_running(recipe_id)
-    port = extract_flag_value(_served_command(recipe_id), "--port") or "8000"
-    base_url = f"http://localhost:{port}"
+    base_url = _base_url(recipe_id)
     served = _probe_served_model(recipe_id, base_url)
     model = served["id"]
 
@@ -1662,12 +1697,15 @@ def status() -> None:
             # - fall back to the configured port rather than leaving
             # this blank.
             ports = _format_ports(container.get("Publishers") or [])
+            container_status = container.get("Status", "")
+            if container.get("State") == "running":
+                container_status += f" ({_probe_readiness(handle)})"
             rows.append(
                 [
                     handle,
                     container.get("Name", ""),
                     container.get("Image", ""),
-                    container.get("Status", ""),
+                    container_status,
                     ports or f"{recipe.port}:{recipe.port}",
                 ]
             )

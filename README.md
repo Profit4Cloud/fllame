@@ -45,10 +45,31 @@ Then you can run the fllame commands below within the activated environment.
 - fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
 - fllame serve RECIPE_ID [--yes] # Launch RECIPE_ID's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame bench RECIPE_ID [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside RECIPE_ID's running container, print a results table, and save a reproducible run to RECIPE_ID's bench/<timestamp>/ folder.
-- fllame status # Show every recipe's container state via docker compose ps.
+- fllame status # Show every recipe's container state via docker compose ps, plus whether a running server answers.
 - fllame stop RECIPE_ID # Stop RECIPE_ID's container via docker compose stop.
 
 Every command also takes `-h`/`--help`.
+
+## Is the server up?
+
+Run `fllame status`. A running container's STATUS ends with one of:
+
+- `(loading)` - vLLM is still starting. `/health` doesn't answer yet.
+- `(unhealthy)` - `/health` answers, but a 1-token test completion fails within 30s.
+- `(ready)` - the test completion returned a token. The server can serve.
+- `(unknown)` - the check itself couldn't run inside the container.
+
+To try it by hand, ask a real question. Replace the port and model with your recipe's.
+The model name is the REPO_ID, unless the recipe sets `--served-model-name`.
+`curl localhost:8000/v1/models` lists it.
+
+```
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "What is the capital of France?"}]}'
+```
+
+A thinking model may reason at length before it answers.
 
 ## Storage location
 
