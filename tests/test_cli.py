@@ -3141,7 +3141,7 @@ def test_status_appends_readiness_to_a_running_container(tmp_path: Path, monkeyp
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert f"Up 5 minutes ({probe_stdout.strip()})" in result.output
+    assert f"{probe_stdout.strip().capitalize()} (5 minutes)" in result.output
     assert probes[0][-2:] == [cli._READINESS_SCRIPT, "http://localhost:8000"]
 
 
@@ -3155,7 +3155,7 @@ def test_status_reports_unknown_when_the_readiness_probe_cannot_run(tmp_path: Pa
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert "Up 5 minutes (unknown)" in result.output
+    assert "Unknown (5 minutes)" in result.output
 
 
 def test_status_does_not_probe_a_stopped_container(tmp_path: Path, monkeypatch):
@@ -3200,9 +3200,9 @@ def test_status_watch_rechecks_until_ready(tmp_path: Path, monkeypatch):
     assert sleeps == [cli._WATCH_INTERVAL_SECONDS] * 3
     # Over a pipe, a table is printed only when a state changes.
     assert result.output.count("RECIPE_ID") == 3
-    assert result.output.count("(loading model)") == 1
+    assert result.output.count("Loading model") == 1
     assert result.output.rstrip().endswith("8000:8000")
-    assert "(ready)" in result.output.splitlines()[-1]
+    assert "Ready (5 minutes)" in result.output.splitlines()[-1]
 
 
 def test_status_watch_stops_on_error_with_exit_code_1(tmp_path: Path, monkeypatch):
@@ -3212,7 +3212,7 @@ def test_status_watch_stops_on_error_with_exit_code_1(tmp_path: Path, monkeypatc
 
     assert result.exit_code == 1
     assert remaining == ["ready"]
-    assert "(error)" in result.output
+    assert "Error (5 minutes)" in result.output
 
 
 def test_status_without_watch_checks_once(tmp_path: Path, monkeypatch):
@@ -3280,3 +3280,9 @@ def test_status_watch_exits_1_when_the_container_stops(tmp_path: Path, monkeypat
 
     assert result.exit_code == 1
     assert "Exited (1)" in result.output
+
+
+def test_readiness_status_lowercases_docker_uptime():
+    assert cli._readiness_status("loading model", "Up About a minute") == (
+        "Loading model (about a minute)"
+    )

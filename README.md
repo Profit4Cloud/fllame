@@ -52,16 +52,16 @@ Every command also takes `-h`/`--help`.
 
 ## Is the server up?
 
-Run `fllame status`. A running container's STATUS ends with one of:
+Run `fllame status`. A running container's STATUS is one of these, with its uptime in brackets, e.g. `Ready (5 minutes)`:
 
-- `(loading model)` - vLLM doesn't accept connections yet. Loading can take 10 minutes or more.
-- `(ready)` - a 1-token test completion returned a token. The server can serve.
-- `(error)` - the server answers, but the test completion fails. Check `docker logs`.
-- `(not responding)` - the test completion took over 30s. The server is hung, or very busy.
-- `(unknown)` - the check itself couldn't run inside the container.
+- `Loading model` - vLLM doesn't accept connections yet. Loading can take 10 minutes or more.
+- `Ready` - a 1-token test completion returned a token. The server can serve.
+- `Error` - the server answers, but the test completion fails. Check `docker logs`.
+- `Not responding` - the test completion took over 30s. The server is hung, or very busy.
+- `Unknown` - the check itself couldn't run inside the container.
 
 To wait until the server is up, run `fllame status RECIPE_ID --watch`.
-It re-checks every 5s and stops at `(ready)` or `(error)`. It exits 1 on `(error)`, or when the container stops, so scripts can use it:
+It re-checks every 5s and stops at `Ready` or `Error`. It exits 1 on `Error`, or when the container stops, so scripts can use it:
 `fllame serve RECIPE_ID && fllame status RECIPE_ID --watch`.
 
 If vLLM crashes, the container stops. STATUS then shows `Exited (N)`, where a non-zero N means a crash.

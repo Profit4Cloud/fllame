@@ -1680,6 +1680,12 @@ _WATCH_INTERVAL_SECONDS = 5
 _SETTLED_READINESS = ("ready", "error")
 
 
+def _readiness_status(state: str, docker_status: str) -> str:
+    """e.g. "Ready (5 minutes)" from docker's "Up 5 minutes"."""
+    uptime = docker_status.removeprefix("Up ")
+    return f"{state.capitalize()} ({uptime[:1].lower()}{uptime[1:]})"
+
+
 def _status_rows(
     store: RecipeStore, handles: list[str]
 ) -> tuple[list[list[str]], list[str], int, list[str]]:
@@ -1718,7 +1724,7 @@ def _status_rows(
             if container.get("State") == "running":
                 state = _probe_readiness(handle)
                 readiness.append(state)
-                container_status += f" ({state})"
+                container_status = _readiness_status(state, container_status)
             rows.append(
                 [
                     handle,
