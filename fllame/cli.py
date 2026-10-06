@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -241,14 +242,21 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
     typer.echo(f"wrote {compose_path}")
 
 
-def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+def _format_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     """Left-aligned, space-padded columns - `docker ps` style, no
     border characters."""
     all_rows = [headers, *rows]
     widths = [max(len(row[i]) for row in all_rows) for i in range(len(headers))]
+    lines = []
     for row in all_rows:
         padded = [cell.ljust(width) for cell, width in zip(row[:-1], widths[:-1], strict=False)]
-        typer.echo("  ".join([*padded, row[-1]]))
+        lines.append("  ".join([*padded, row[-1]]))
+    return lines
+
+
+def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+    for line in _format_table(headers, rows):
+        typer.echo(line)
 
 
 def _format_count(n: int | None) -> str:
@@ -1666,22 +1674,26 @@ def _status_row_from_compose(
     ]
 
 
-@app.command()
-def status() -> None:
-    """Show the state of every recipe, built or not, running or not."""
-    store = _recipe_store()
-    handles = store.list_handles()
-    if not handles:
-        typer.echo(f"No recipes found in {config.recipes_dir()}")
-        raise typer.Exit(code=0)
+_STATUS_HEADERS = ["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"]
+_WATCH_INTERVAL_SECONDS = 5
+# "not responding" and "unknown" can still clear up by waiting.
+_SETTLED_READINESS = ("ready", "error")
 
+
+def _status_rows(
+    store: RecipeStore, handles: list[str], *, warn: bool
+) -> tuple[list[list[str]], int, list[str]]:
+    """The table rows, the exit code, and the readiness of every running
+    container."""
     rows = []
     exit_code = 0
+    readiness = []
     for handle in handles:
         try:
             recipe = store.load(handle)
         except RecipeError as e:
-            typer.echo(f"warning: {e}", err=True)
+            if warn:
+                typer.echo(f"warning: {e}", err=True)
             continue
 
         compose_path = config.recipe_dir(handle) / "compose.yaml"
@@ -1704,7 +1716,9 @@ def status() -> None:
             ports = _format_ports(container.get("Publishers") or [])
             container_status = container.get("Status", "")
             if container.get("State") == "running":
-                container_status += f" ({_probe_readiness(handle)})"
+                state = _probe_readiness(handle)
+                readiness.append(state)
+                container_status += f" ({state})"
             rows.append(
                 [
                     handle,
@@ -1714,9 +1728,59 @@ def status() -> None:
                     ports or f"{recipe.port}:{recipe.port}",
                 ]
             )
+    return rows, exit_code, readiness
 
-    if rows:
-        _print_table(["RECIPE_ID", "NAME", "IMAGE", "STATUS", "PORTS"], rows)
+
+@app.command()
+def status(
+    recipe_id: str | None = typer.Argument(
+        None, show_default=False, help="Only this recipe [default: every recipe]."
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        "-w",
+        help=f"Re-check every {_WATCH_INTERVAL_SECONDS}s until every running container is "
+        "ready or in error. Exits 1 on error. Ctrl-C stops it.",
+    ),
+) -> None:
+    """Show the state of every recipe, built or not, running or not."""
+    store = _recipe_store()
+    if recipe_id is not None:
+        _load_or_exit(recipe_id)
+        handles = [recipe_id]
+    else:
+        handles = store.list_handles()
+    if not handles:
+        typer.echo(f"No recipes found in {config.recipes_dir()}")
+        raise typer.Exit(code=0)
+
+    live = sys.stdout.isatty()
+    shown: list[str] = []
+    shown_readiness: list[str] | None = None
+    most_running = 0
+    try:
+        while True:
+            rows, exit_code, readiness = _status_rows(store, handles, warn=shown_readiness is None)
+            lines = _format_table(_STATUS_HEADERS, rows) if rows else []
+            most_running = max(most_running, len(readiness))
+            # Over a pipe, a new table only when a state changes - not each
+            # time docker's "Up N minutes" ticks over.
+            if live or readiness != shown_readiness:
+                if live and shown:
+                    sys.stdout.write(f"\033[{len(shown)}F\033[J")
+                for line in lines:
+                    typer.echo(line)
+                shown, shown_readiness = lines, readiness
+            if not watch or all(state in _SETTLED_READINESS for state in readiness):
+                break
+            time.sleep(_WATCH_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+
+    # A container that stops while watched has crashed.
+    if watch and ("error" in readiness or len(readiness) < most_running):
+        exit_code = exit_code or 1
     raise typer.Exit(code=exit_code)
 
 

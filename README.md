@@ -45,7 +45,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame config set-default-gpu-memory-utilization VALUE # Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own (default: 0.92); offers to update existing compose.yaml files still using the old default.
 - fllame serve RECIPE_ID [--yes] # Launch RECIPE_ID's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame bench RECIPE_ID [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside RECIPE_ID's running container, print a results table, and save a reproducible run to RECIPE_ID's bench/<timestamp>/ folder.
-- fllame status # Show every recipe's container state via docker compose ps, plus whether a running server can generate.
+- fllame status [RECIPE_ID] [--watch] # Show each recipe's container state via docker compose ps, plus whether a running server can generate. --watch re-checks every 5s until every running server is ready or in error.
 - fllame stop RECIPE_ID # Stop RECIPE_ID's container via docker compose stop.
 
 Every command also takes `-h`/`--help`.
@@ -59,6 +59,10 @@ Run `fllame status`. A running container's STATUS ends with one of:
 - `(error)` - the server answers, but the test completion fails. Check `docker logs`.
 - `(not responding)` - the test completion took over 30s. The server is hung, or very busy.
 - `(unknown)` - the check itself couldn't run inside the container.
+
+To wait until the server is up, run `fllame status RECIPE_ID --watch`.
+It re-checks every 5s and stops at `(ready)` or `(error)`. It exits 1 on `(error)`, or when the container stops, so scripts can use it:
+`fllame serve RECIPE_ID && fllame status RECIPE_ID --watch`.
 
 If vLLM crashes, the container stops. STATUS then shows `Exited (N)`, where a non-zero N means a crash.
 
