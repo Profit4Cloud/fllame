@@ -1337,8 +1337,10 @@ print(urllib.request.urlopen(base + "/v1/models", timeout=5).read().decode())
 
 # /health can answer while generation still fails, so readiness means one real
 # token. Raw /v1/completions skips the chat template, so no model starts thinking.
+# vLLM opens its port only once the model is loaded, so a refused connection
+# means loading, while an HTTP error or a timeout means a live but broken server.
 _READINESS_SCRIPT = """
-import json, sys, urllib.request
+import json, sys, urllib.error, urllib.request
 base = sys.argv[1]
 try:
     model = json.load(urllib.request.urlopen(base + "/v1/models", timeout=5))["data"][0]["id"]
@@ -1349,10 +1351,18 @@ try:
         headers={"Content-Type": "application/json"},
     )
     json.load(urllib.request.urlopen(request, timeout=30))["choices"][0]["text"]
-except Exception:
-    print("loading model")
-    sys.exit()
-print("ready")
+except urllib.error.HTTPError:
+    print("error")
+except Exception as e:
+    reason = getattr(e, "reason", e)
+    if isinstance(reason, ConnectionRefusedError):
+        print("loading model")
+    elif isinstance(reason, TimeoutError):
+        print("not responding")
+    else:
+        print("error")
+else:
+    print("ready")
 """
 
 # `docker exec` without a TTY doesn't forward Ctrl-C into the container, so the
@@ -1402,7 +1412,7 @@ def _base_url(handle: str) -> str:
 def _probe_readiness(handle: str) -> str:
     result = _exec_in_container(handle, "python3", "-c", _READINESS_SCRIPT, _base_url(handle))
     state = result.stdout.strip()
-    return state if state in ("loading model", "ready") else "unknown"
+    return state if state in ("loading model", "error", "not responding", "ready") else "unknown"
 
 
 def _probe_served_model(handle: str, base_url: str) -> dict:

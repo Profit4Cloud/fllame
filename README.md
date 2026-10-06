@@ -54,9 +54,13 @@ Every command also takes `-h`/`--help`.
 
 Run `fllame status`. A running container's STATUS ends with one of:
 
-- `(loading model)` - a 1-token test completion fails or takes over 30s. Loading can take 10 minutes or more.
-- `(ready)` - the test completion returned a token. The server can serve.
+- `(loading model)` - vLLM doesn't accept connections yet. Loading can take 10 minutes or more.
+- `(ready)` - a 1-token test completion returned a token. The server can serve.
+- `(error)` - the server answers, but the test completion fails. Check `docker logs`.
+- `(not responding)` - the test completion took over 30s. The server is hung, or very busy.
 - `(unknown)` - the check itself couldn't run inside the container.
+
+If vLLM crashes, the container stops. STATUS then shows `Exited (N)`, where a non-zero N means a crash.
 
 To try it by hand, ask a real question. Replace the port and model with your recipe's.
 The model name is the REPO_ID, unless the recipe sets `--served-model-name`.

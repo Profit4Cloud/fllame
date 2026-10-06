@@ -3127,7 +3127,9 @@ def _fake_status_docker(probe_stdout: str, captured: list):
     return fake_run
 
 
-@pytest.mark.parametrize("probe_stdout", ["loading model\n", "ready\n"])
+@pytest.mark.parametrize(
+    "probe_stdout", ["loading model\n", "error\n", "not responding\n", "ready\n"]
+)
 def test_status_appends_readiness_to_a_running_container(tmp_path: Path, monkeypatch, probe_stdout):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
