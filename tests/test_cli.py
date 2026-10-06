@@ -1703,9 +1703,7 @@ def test_serve_sets_container_name_on_the_compose_service(tmp_path: Path, monkey
     assert "container_name: fllame-demo" in compose_text
 
 
-def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
-    tmp_path: Path, monkeypatch
-):
+def test_serve_prints_status_and_docker_logs_hints_on_success(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
@@ -1716,6 +1714,7 @@ def test_serve_prints_docker_logs_hint_and_loading_time_note_on_success(
 
     assert result.exit_code == 0
     assert "docker logs -f fllame-demo" in result.output
+    assert "fllame status demo --watch" in result.output
     assert "can take several minutes" in result.output
 
 
@@ -1734,6 +1733,7 @@ def test_serve_omits_docker_logs_hint_on_failure(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert "docker logs" not in result.output
+    assert "fllame status" not in result.output
 
 
 def test_serve_unknown_handle_never_checks_cache_or_calls_docker(tmp_path: Path, monkeypatch):

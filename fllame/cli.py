@@ -1315,11 +1315,9 @@ def serve(
     code = _run_compose(recipe_id, "up", "-d", recipe_id)
     if code == 0:
         container_name = config.compose_project_name(recipe_id)
-        typer.echo(f"'{recipe_id}' started - follow its logs with: docker logs -f {container_name}")
-        typer.echo(
-            "model loading can take several minutes - an empty or quiet log right "
-            "after this returns is expected, not a problem."
-        )
+        typer.echo(f"'{recipe_id}' started. Loading the model can take several minutes.")
+        typer.echo(f"Wait until ready: fllame status {recipe_id} --watch")
+        typer.echo(f"Follow the logs:  docker logs -f {container_name}")
     raise typer.Exit(code=code)
 
 
