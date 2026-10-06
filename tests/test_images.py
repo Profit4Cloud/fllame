@@ -2,7 +2,13 @@ import urllib.error
 
 import pytest
 
-from fllame.compose.images import ImageResolveError, is_floating, pin_image
+from fllame.compose.images import (
+    HubUnreachableError,
+    ImageResolveError,
+    is_floating,
+    newest_release,
+    pin_image,
+)
 
 _HUB = "https://hub.docker.com/v2/repositories"
 
@@ -99,5 +105,20 @@ def test_network_error_is_reported():
     def fetch(url):
         raise urllib.error.URLError("offline")
 
-    with pytest.raises(ImageResolveError, match="offline"):
+    with pytest.raises(HubUnreachableError, match="offline"):
         pin_image("vllm/vllm-openai:latest", fetch)
+
+
+def test_malformed_response_is_not_reported_as_unreachable():
+    with pytest.raises(ImageResolveError) as excinfo:
+        pin_image("vllm/vllm-openai:latest", lambda url: {})
+    assert not isinstance(excinfo.value, HubUnreachableError)
+
+
+def test_newest_release_compares_versions_numerically():
+    tags = ["v0.9.0", "v0.31.0", "v0.30.0", "latest", "v0.32.0rc1", "<none>"]
+    assert newest_release("vllm/vllm-openai", tags) == "vllm/vllm-openai:v0.31.0"
+
+
+def test_newest_release_none_without_release_tags():
+    assert newest_release("vllm/vllm-openai", ["latest", "nightly"]) is None

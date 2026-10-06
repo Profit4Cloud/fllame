@@ -45,7 +45,13 @@ from fllame.bench.sweep import (
     result_cells,
 )
 from fllame.compose.generator import generate_compose, write_compose_file
-from fllame.compose.images import ImageResolveError, pin_image
+from fllame.compose.images import (
+    HubUnreachableError,
+    ImageResolveError,
+    image_name,
+    newest_release,
+    pin_image,
+)
 from fllame.domain.recipe import Recipe, RecipeError
 from fllame.domain.vllm_command import (
     VllmCommandError,
@@ -203,11 +209,19 @@ def _friendly_docker_build_error(handle: str, *, dockerfile: bool) -> str:
 def _pin_image_or_exit(recipe: Recipe) -> Recipe:
     try:
         pinned = pin_image(recipe.image)
+    except HubUnreachableError as e:
+        name = image_name(recipe.image)
+        pinned = newest_release(name, _local_image_tags(name))
+        if pinned is None:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from e
+        typer.echo(f"Docker Hub unreachable - using newest local version '{pinned}'")
     except ImageResolveError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
-    if pinned != recipe.image:
-        typer.echo(f"resolved '{recipe.image}' to '{pinned}'")
+    else:
+        if pinned != recipe.image:
+            typer.echo(f"resolved '{recipe.image}' to '{pinned}'")
     return dataclasses.replace(recipe, image=pinned)
 
 
@@ -238,6 +252,9 @@ def _build_or_exit(recipe: Recipe, *, assume_yes: bool = False) -> None:
         tag = config.local_image_tag(recipe.handle)
         typer.echo(f"building '{tag}' from {directory / 'Dockerfile'} ...")
         code = _run_docker("build", "-t", tag, str(directory))
+    elif _image_is_local(recipe.image):
+        typer.echo(f"'{recipe.image}' is already downloaded - skipping the pull")
+        code = 0
     else:
         typer.echo("validating the configured image with `docker compose pull` ...")
         code = _run_compose(recipe.handle, "pull")
@@ -303,6 +320,23 @@ _DOCKER_NOT_FOUND_MESSAGE = (
     "docker (or the compose plugin) was not found on PATH - fllame runs "
     "vLLM as a Docker container, install Docker to use this command."
 )
+
+
+def _docker_output(*args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True)
+    except FileNotFoundError as e:
+        typer.echo(_DOCKER_NOT_FOUND_MESSAGE, err=True)
+        raise typer.Exit(code=1) from e
+
+
+def _image_is_local(image: str) -> bool:
+    return _docker_output("image", "inspect", image).returncode == 0
+
+
+def _local_image_tags(name: str) -> list[str]:
+    result = _docker_output("image", "ls", name, "--format", "{{.Tag}}")
+    return result.stdout.split() if result.returncode == 0 else []
 
 
 def _run_docker(*args: str) -> int:

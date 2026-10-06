@@ -96,6 +96,16 @@ def _capturing_run_all(commands: list):
     return fake_run
 
 
+def _docker_without_local_images(commands: list):
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["image", "inspect"]:
+            return _FakeSubprocessResult(returncode=1)
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
 class _FakeSubprocessResult:
     def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
         self.returncode = returncode
@@ -1511,16 +1521,30 @@ def test_recipe_build_without_preinstall_validates_image_via_compose_pull(
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
     monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
-    captured = {}
-    monkeypatch.setattr(cli.subprocess, "run", _capturing_run(captured))
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _docker_without_local_images(commands))
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
     assert result.exit_code == 0
-    assert captured["command"][:3] == ["docker", "compose", "-f"]
-    assert captured["command"][-1] == "pull"
+    assert commands[-1][:3] == ["docker", "compose", "-f"]
+    assert commands[-1][-1] == "pull"
     compose_text = (tmp_path / "demo" / "compose.yaml").read_text()
     assert "image: vllm/vllm-openai:v0.27.1" in compose_text
+
+
+def test_recipe_build_skips_pull_when_image_is_local(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    commands = []
+    monkeypatch.setattr(cli.subprocess, "run", _capturing_run_all(commands))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0
+    assert "already downloaded" in result.output
+    assert commands == [["docker", "image", "inspect", "vllm/vllm-openai:v0.27.1"]]
 
 
 def test_recipe_build_dockerfile_left_untouched_when_recipe_has_no_preinstall(
@@ -1572,7 +1596,7 @@ def test_recipe_build_docker_compose_pull_failure_gives_friendly_error(tmp_path:
     class _FailedProcess:
         returncode = 1
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda command: _FailedProcess())
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: _FailedProcess())
 
     result = runner.invoke(app, ["recipe", "build", "demo"])
 
@@ -3153,4 +3177,50 @@ def test_recipe_build_fails_when_image_cannot_be_pinned(tmp_path: Path, monkeypa
 
     assert result.exit_code == 1
     assert "can't resolve" in result.output
+    assert not (tmp_path / "demo" / "compose.yaml").exists()
+
+
+def _hub_unreachable(image):
+    raise cli.HubUnreachableError("can't resolve: Docker Hub unreachable")
+
+
+def _docker_with_local_tags(tags: str):
+    def fake_run(command, **kwargs):
+        if command[1:3] == ["image", "ls"]:
+            return _FakeSubprocessResult(stdout=tags)
+        return _FakeCompletedProcess()
+
+    return fake_run
+
+
+def test_recipe_build_offline_uses_newest_local_release(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli, "pin_image", _hub_unreachable)
+    monkeypatch.setattr(
+        cli.subprocess, "run", _docker_with_local_tags("v0.9.0\nv0.31.0\nv0.30.0\n<none>\n")
+    )
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 0, result.output
+    assert "using newest local version 'vllm/vllm-openai:v0.31.0'" in result.output
+    compose = yaml.safe_load((tmp_path / "demo" / "compose.yaml").read_text())
+    assert compose["services"]["demo"]["image"] == "vllm/vllm-openai:v0.31.0"
+
+
+def test_recipe_build_offline_without_local_release_fails(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "recipe.yaml").write_text("command: vllm serve org/demo\n")
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    monkeypatch.setattr(cli, "pin_image", _hub_unreachable)
+    monkeypatch.setattr(cli.subprocess, "run", _docker_with_local_tags(""))
+
+    result = runner.invoke(app, ["recipe", "build", "demo"])
+
+    assert result.exit_code == 1
+    assert "Docker Hub unreachable" in result.output
     assert not (tmp_path / "demo" / "compose.yaml").exists()

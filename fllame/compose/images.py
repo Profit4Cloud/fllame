@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -18,6 +17,10 @@ _MAX_PAGES = 5
 
 
 class ImageResolveError(RuntimeError):
+    pass
+
+
+class HubUnreachableError(ImageResolveError):
     pass
 
 
@@ -53,7 +56,11 @@ def pin_image(image: str, fetch_json: Callable[[str], dict] | None = None) -> st
             url = page.get("next")
             if not url:
                 break
-    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+    except OSError as e:
+        raise HubUnreachableError(
+            f"can't resolve '{image}' to a fixed version: Docker Hub unreachable ({e})"
+        ) from e
+    except (ValueError, KeyError, TypeError) as e:
         raise ImageResolveError(
             f"can't resolve '{image}' to a fixed version via Docker Hub: {e}"
         ) from e
@@ -62,6 +69,18 @@ def pin_image(image: str, fetch_json: Callable[[str], dict] | None = None) -> st
         "Docker Hub matches it. Set an image with a version tag via "
         "`fllame config set-default-image` or in the recipe."
     )
+
+
+def image_name(image: str) -> str:
+    return _split_tag(image)[0]
+
+
+def newest_release(name: str, tags: list[str]) -> str | None:
+    releases = [tag for tag in tags if _RELEASE_TAG.match(tag)]
+    if not releases:
+        return None
+    newest = max(releases, key=lambda tag: tuple(int(part) for part in tag.lstrip("v").split(".")))
+    return f"{name}:{newest}"
 
 
 def _split_tag(image: str) -> tuple[str, str | None]:

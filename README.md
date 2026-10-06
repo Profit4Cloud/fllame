@@ -31,7 +31,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame recipe list # List every RECIPE_ID.
 - fllame recipe show RECIPE_ID # Print RECIPE_ID's resolved recipe as YAML.
 - fllame recipe add [VLLM_SERVE_LINE...] [--pull] [--build] # Create a recipe from a vllm serve command, or a guided dialogue if none is given.
-- fllame recipe build RECIPE_ID [--yes] # Write (or overwrite) RECIPE_ID's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull.
+- fllame recipe build RECIPE_ID [--yes] # Write (or overwrite) RECIPE_ID's compose.yaml (and Dockerfile, if it has preinstall) - the only command that does - then validate it with a real docker build/pull. Skips the pull if the image is already downloaded.
 - fllame recipe vram RECIPE_ID [--max-model-len N] [--max-num-seqs N] [--details] # Estimate VRAM for RECIPE_ID's recipe.
 - fllame recipe edit RECIPE_ID # Open RECIPE_ID's recipe.yaml in $EDITOR and re-validate on save.
 - fllame recipe remove RECIPE_ID [--yes] # Delete RECIPE_ID's whole recipe folder.
@@ -71,6 +71,8 @@ Without quotes, end each line but the last with `\`. The recipe uses the default
 ## Docker image versions
 
 The default image is `vllm/vllm-openai:latest`. `recipe build` resolves `latest` to the release it points at, e.g. `vllm/vllm-openai:v0.31.0`, and writes that into `compose.yaml` or the `Dockerfile`. A built recipe therefore never drifts to another vLLM version. Rebuilding picks up the newest release. If no release tag matches, the build stops with an error. Then set an image with a version tag.
+
+Without network access, `recipe build` uses the newest `vX.Y.Z` version already downloaded, and says so. If none is downloaded, it stops with an error.
 
 ## Recipe format
 
