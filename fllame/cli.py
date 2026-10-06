@@ -1731,6 +1731,12 @@ def _status_rows(
     return rows, warnings, exit_code, readiness
 
 
+def _screen_rows(lines: list[str]) -> int:
+    """How many terminal rows LINES take once long ones wrap."""
+    columns = shutil.get_terminal_size().columns
+    return sum(max(1, -(-len(line) // columns)) for line in lines)
+
+
 @app.command()
 def status(
     recipe_id: str | None = typer.Argument(
@@ -1757,6 +1763,7 @@ def status(
 
     redraw = watch and sys.stdout.isatty()
     shown_readiness: list[str] | None = None
+    shown_rows = 0
     most_running = 0
     try:
         while True:
@@ -1765,15 +1772,17 @@ def status(
             # Over a pipe, a new table only when a state changes - not each
             # time docker's "Up N minutes" ticks over.
             if redraw or readiness != shown_readiness:
-                if redraw:
-                    # Clearing the whole screen, like `watch`, survives wrapped lines.
-                    sys.stdout.write("\033[H\033[J")
+                if shown_rows:
+                    sys.stdout.write(f"\033[{shown_rows}F\033[J")
                     sys.stdout.flush()
                 if redraw or shown_readiness is None:
                     for warning in warnings:
                         typer.echo(warning, err=True)
-                if rows:
-                    _print_table(_STATUS_HEADERS, rows)
+                lines = _format_table(_STATUS_HEADERS, rows) if rows else []
+                for line in lines:
+                    typer.echo(line)
+                if redraw:
+                    shown_rows = _screen_rows([*warnings, *lines])
                 shown_readiness = readiness
             if not watch or all(state in _SETTLED_READINESS for state in readiness):
                 break
