@@ -1803,11 +1803,36 @@ def status(
 
 
 @app.command()
-def stop(recipe_id: str = typer.Argument(..., show_default=False)) -> None:
-    """Stop RECIPE_ID's container via `docker compose stop`."""
-    recipe = _load_or_exit(recipe_id)
-    _require_compose_built(recipe)
-    raise typer.Exit(code=_run_compose(recipe_id, "stop", recipe_id))
+def stop(
+    recipe_id: str | None = typer.Argument(
+        None, show_default=False, help="Only this recipe [default: every running recipe]."
+    ),
+) -> None:
+    """Stop RECIPE_ID's container, or every running one, via `docker compose stop`."""
+    if recipe_id is not None:
+        recipe = _load_or_exit(recipe_id)
+        _require_compose_built(recipe)
+        raise typer.Exit(code=_run_compose(recipe_id, "stop", recipe_id))
+
+    exit_code = 0
+    stopped_any = False
+    for handle in _recipe_store().list_handles():
+        if not (config.recipe_dir(handle) / "compose.yaml").is_file():
+            continue
+        containers, code = _compose_ps_json(handle)
+        if code != 0:
+            exit_code = code
+            continue
+        if any(
+            c.get("State") in ("running", "paused", "restarting")
+            for c in containers
+            if c.get("Service", handle) == handle
+        ):
+            stopped_any = True
+            exit_code = _run_compose(handle, "stop", handle) or exit_code
+    if not stopped_any and exit_code == 0:
+        typer.echo("Nothing is running.")
+    raise typer.Exit(code=exit_code)
 
 
 if __name__ == "__main__":

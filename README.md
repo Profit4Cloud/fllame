@@ -46,7 +46,7 @@ Then you can run the fllame commands below within the activated environment.
 - fllame serve RECIPE_ID [--yes] # Launch RECIPE_ID's recipe via docker compose up -d (always detached) and print a docker logs command to follow it; never touches the network.
 - fllame bench RECIPE_ID [--concurrency 1,4,8,16,32] [--num-prompts N,...] [--input-len N] [--output-len N] # Run a vllm bench serve concurrency sweep inside RECIPE_ID's running container, print a results table, and save a reproducible run to RECIPE_ID's bench/<timestamp>/ folder.
 - fllame status [RECIPE_ID] [--watch] # Show each recipe's container state via docker compose ps, plus whether a running server can generate. --watch re-checks every 5s until every running server is ready or in error.
-- fllame stop RECIPE_ID # Stop RECIPE_ID's container via docker compose stop.
+- fllame stop [RECIPE_ID] # Stop RECIPE_ID's container via docker compose stop. Without RECIPE_ID, stop every running one.
 
 Every command also takes `-h`/`--help`.
 

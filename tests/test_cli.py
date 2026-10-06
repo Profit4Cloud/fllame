@@ -2677,6 +2677,45 @@ def test_stop_requires_compose_already_built(tmp_path: Path, monkeypatch):
     assert called == []
 
 
+def test_stop_without_recipe_id_stops_every_running_recipe(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    for handle in ("demo-a", "demo-b", "demo-c"):
+        _write_recipe(tmp_path, handle=handle)
+        _write_compose(tmp_path, handle=handle)
+    _write_recipe(tmp_path, handle="unbuilt")
+    states = {"demo-a": "running", "demo-b": "exited", "demo-c": "running"}
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[-2:] == ["--format", "json"]:
+            handle = Path(command[command.index("-f") + 1]).parent.name
+            return _FakeSubprocessResult(stdout=json.dumps([{"State": states[handle]}]))
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0
+    stops = [command[-2:] for command in commands if "stop" in command]
+    assert stops == [["stop", "demo-a"], ["stop", "demo-c"]]
+
+
+def test_stop_without_recipe_id_reports_nothing_running(tmp_path: Path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _write_recipe(tmp_path)
+    monkeypatch.setattr(cli, "is_model_cached", lambda repo_id: True)
+    _write_compose(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_compose_ps_json({"demo": []}))
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0
+    assert "Nothing is running." in result.output
+
+
 def test_docker_not_found_gives_friendly_error(tmp_path: Path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _write_recipe(tmp_path)
