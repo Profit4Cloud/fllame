@@ -70,7 +70,7 @@ Without quotes, end each line but the last with `\`. The recipe uses the default
 
 ## Docker image versions
 
-The default image is `vllm/vllm-openai:latest`. `recipe build` resolves `latest` to the release it points at, e.g. `vllm/vllm-openai:v0.31.0`, and writes that into `compose.yaml` or the `Dockerfile`. A built recipe therefore never drifts to another vLLM version. Rebuilding picks up the newest release. If no release tag matches, the image digest is written instead.
+The default image is `vllm/vllm-openai:latest`. `recipe build` resolves `latest` to the release it points at, e.g. `vllm/vllm-openai:v0.31.0`, and writes that into `compose.yaml` or the `Dockerfile`. A built recipe therefore never drifts to another vLLM version. Rebuilding picks up the newest release. If no release tag matches, the build stops with an error. Then set an image with a version tag.
 
 ## Recipe format
 

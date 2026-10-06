@@ -71,14 +71,17 @@ def test_release_tag_found_on_a_later_page():
     assert pin_image("vllm/vllm-openai:latest", fetch) == "vllm/vllm-openai:v0.31.0"
 
 
-def test_falls_back_to_digest_when_no_release_tag_matches():
+def test_no_matching_release_tag_is_an_error():
     fetch = _fake_hub("sha256:aaa", [[{"name": "v0.31.0-cu129", "digest": "sha256:aaa"}]])
-    assert pin_image("vllm/vllm-openai:latest", fetch) == "vllm/vllm-openai@sha256:aaa"
+    with pytest.raises(ImageResolveError, match="no release tag"):
+        pin_image("vllm/vllm-openai:latest", fetch)
 
 
 def test_official_image_uses_library_namespace():
-    fetch = _fake_hub("sha256:aaa", [[]], repository="library/ubuntu")
-    assert pin_image("ubuntu", fetch) == "ubuntu@sha256:aaa"
+    fetch = _fake_hub(
+        "sha256:aaa", [[{"name": "v1.0.0", "digest": "sha256:aaa"}]], repository="library/ubuntu"
+    )
+    assert pin_image("ubuntu", fetch) == "ubuntu:v1.0.0"
 
 
 def test_docker_io_prefix_is_docker_hub():

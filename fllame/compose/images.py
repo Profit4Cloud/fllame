@@ -30,8 +30,7 @@ def is_floating(image: str) -> bool:
 
 def pin_image(image: str, fetch_json: Callable[[str], dict] | None = None) -> str:
     """`image` itself when it isn't floating. Otherwise the release tag
-    sharing `latest`'s digest, or the digest itself when no release tag
-    matches."""
+    sharing `latest`'s digest."""
     if not is_floating(image):
         return image
     fetch = fetch_json or _fetch_json
@@ -58,7 +57,11 @@ def pin_image(image: str, fetch_json: Callable[[str], dict] | None = None) -> st
         raise ImageResolveError(
             f"can't resolve '{image}' to a fixed version via Docker Hub: {e}"
         ) from e
-    return f"{name}@{digest}"
+    raise ImageResolveError(
+        f"can't resolve '{image}' to a fixed version: no release tag (vX.Y.Z) on "
+        "Docker Hub matches it. Set an image with a version tag via "
+        "`fllame config set-default-image` or in the recipe."
+    )
 
 
 def _split_tag(image: str) -> tuple[str, str | None]:
