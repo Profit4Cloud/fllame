@@ -1681,19 +1681,19 @@ _SETTLED_READINESS = ("ready", "error")
 
 
 def _status_rows(
-    store: RecipeStore, handles: list[str], *, warn: bool
-) -> tuple[list[list[str]], int, list[str]]:
-    """The table rows, the exit code, and the readiness of every running
-    container."""
+    store: RecipeStore, handles: list[str]
+) -> tuple[list[list[str]], list[str], int, list[str]]:
+    """The table rows, warnings, the exit code, and the readiness of every
+    running container."""
     rows = []
+    warnings = []
     exit_code = 0
     readiness = []
     for handle in handles:
         try:
             recipe = store.load(handle)
         except RecipeError as e:
-            if warn:
-                typer.echo(f"warning: {e}", err=True)
+            warnings.append(f"warning: {e}")
             continue
 
         compose_path = config.recipe_dir(handle) / "compose.yaml"
@@ -1728,7 +1728,7 @@ def _status_rows(
                     ports or f"{recipe.port}:{recipe.port}",
                 ]
             )
-    return rows, exit_code, readiness
+    return rows, warnings, exit_code, readiness
 
 
 @app.command()
@@ -1755,23 +1755,26 @@ def status(
         typer.echo(f"No recipes found in {config.recipes_dir()}")
         raise typer.Exit(code=0)
 
-    live = sys.stdout.isatty()
-    shown: list[str] = []
+    redraw = watch and sys.stdout.isatty()
     shown_readiness: list[str] | None = None
     most_running = 0
     try:
         while True:
-            rows, exit_code, readiness = _status_rows(store, handles, warn=shown_readiness is None)
-            lines = _format_table(_STATUS_HEADERS, rows) if rows else []
+            rows, warnings, exit_code, readiness = _status_rows(store, handles)
             most_running = max(most_running, len(readiness))
             # Over a pipe, a new table only when a state changes - not each
             # time docker's "Up N minutes" ticks over.
-            if live or readiness != shown_readiness:
-                if live and shown:
-                    sys.stdout.write(f"\033[{len(shown)}F\033[J")
-                for line in lines:
-                    typer.echo(line)
-                shown, shown_readiness = lines, readiness
+            if redraw or readiness != shown_readiness:
+                if redraw:
+                    # Clearing the whole screen, like `watch`, survives wrapped lines.
+                    sys.stdout.write("\033[H\033[J")
+                    sys.stdout.flush()
+                if redraw or shown_readiness is None:
+                    for warning in warnings:
+                        typer.echo(warning, err=True)
+                if rows:
+                    _print_table(_STATUS_HEADERS, rows)
+                shown_readiness = readiness
             if not watch or all(state in _SETTLED_READINESS for state in readiness):
                 break
             time.sleep(_WATCH_INTERVAL_SECONDS)
