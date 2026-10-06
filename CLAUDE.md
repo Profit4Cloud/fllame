@@ -15,10 +15,11 @@ fllame/            # The package. CLI (Typer), domain types, backends, generator
   backends/           # `ServingBackend` seam; `vllm.py` is the only implementation,
                        # turning a Recipe into a docker-compose service definition.
   recipes/store.py   # Reads/writes Recipes from a directory of hand-edited YAML files.
-  recipes/parser.py  # Parses a pasted export/vllm-serve block for `recipe add`.
+  recipes/parser.py  # Parses `recipe add`'s `vllm serve` command and dialogue env lines.
   recipes/naming.py  # Derives a RECIPE_ID from a REPO_ID.
   hardware/scanner.py # Live NVIDIA GPU/RAM detection (`nvidia-smi`, `/proc/meminfo`).
   compose/generator.py # Compiles one recipe into its own compose folder.
+  compose/images.py  # Pins a floating `latest` image to its release tag at build.
   models/puller.py   # Downloads a model into HF's own cache via huggingface_hub.
   models/cache.py    # Lists/verifies what's in that cache - a filesystem scan, no network.
   models/discovery.py # Searches the HF Hub for candidate models, ranked.
@@ -84,8 +85,8 @@ The only exceptions are `config set-default-image IMAGE` and
 
 - recipe list — List every RECIPE_ID in $FLLAME_RECIPES_DIR.
 - recipe show RECIPE_ID — Print RECIPE_ID's resolved recipe as YAML.
-- recipe add [VLLM_SERVE_LINE...] [--image IMAGE] [--pull] [--build] — Create a recipe from a pasted vllm serve line, or a guided dialogue if none is given.
-- recipe build RECIPE_ID — Regenerate RECIPE_ID's compose.yaml standalone, without starting it.
+- recipe add [VLLM_SERVE_LINE...] [--pull] [--build] — Create a recipe from a vllm serve command (quotes optional), or a guided dialogue if none is given. Only the dialogue sets an image, env vars or preinstall commands.
+- recipe build RECIPE_ID — Regenerate RECIPE_ID's compose.yaml standalone, without starting it. A `latest` image is resolved to its release tag.
 - recipe edit RECIPE_ID — Open RECIPE_ID's recipe.yaml in $EDITOR and re-validate on save.
 - recipe remove RECIPE_ID [--yes] — Delete RECIPE_ID's whole recipe folder.
 - recipe vram RECIPE_ID [--max-model-len N] [--max-num-seqs N] [--details] — Estimate VRAM for RECIPE_ID's recipe.
@@ -95,7 +96,7 @@ The only exceptions are `config set-default-image IMAGE` and
 - model scan [--query QUERY] [--quant QUANT] [--max-size SIZE] [--min-params N] [--max-params N] [--limit N] — Search the Hub, ranked by downloads and size.
 - model update [REPO_ID] [--apply] — Check cached model(s) against the Hub for a newer revision; --apply re-pulls anything stale.
 - config show — Print the currently configured default Docker image.
-- config set-default-image IMAGE — Set the default image recipes fall back to; offers to update existing compose.yaml/Dockerfile files still using the old default.
+- config set-default-image IMAGE — Set the default image recipes fall back to (default: vllm/vllm-openai:latest); offers to update existing compose.yaml/Dockerfile files still using the old default.
 - config set-default-gpu-memory-utilization VALUE — Set the --gpu-memory-utilization value recipe build injects when a recipe doesn't set its own; offers to update existing compose.yaml files still using the old default.
 - serve RECIPE_ID [--detach] [--yes] — Launch RECIPE_ID's recipe via docker compose up; never touches the network.
 - bench RECIPE_ID [--concurrency LIST] [--num-prompts LIST] [--input-len N] [--output-len N] — Benchmark RECIPE_ID's running container at several concurrency levels; saves each run to its bench/ folder.
