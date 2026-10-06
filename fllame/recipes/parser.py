@@ -1,24 +1,20 @@
-"""Parses a pasted `export KEY=VALUE` + `RUN <command>` +
-`vllm serve <repo_id> <args...>` block. `export` values and the `vllm
-serve` line reject shell metacharacters (parsed by fllame, never a real
-shell); a `RUN` line is genuinely meant to be shell text, so it's stored
-and run verbatim instead.
+"""Parses `recipe add` input: a `vllm serve` command given as arguments,
+and the `KEY=VALUE` env lines its guided dialogue collects. Both reject
+shell metacharacters - fllame parses them, never a real shell.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+import shlex
 
 from fllame.domain.vllm_command import (
     VllmCommandError,
-    join_line_continuations,
+    join_command_lines,
     parse_vllm_serve_command,
     split_shell_safe,
 )
 
-_EXPORT_PATTERN = re.compile(r"^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-_RUN_PATTERN = re.compile(r"^RUN\s+(.+)$")
 _ENV_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
@@ -26,55 +22,24 @@ class RecipePasteError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class ParsedRecipe:
-    repo_id: str
-    command: str
-    env: dict[str, str] = field(default_factory=dict)
-    preinstall: list[str] = field(default_factory=list)
-
-
-def parse_pasted_recipe(text: str) -> ParsedRecipe:
-    env: dict[str, str] = {}
-    repo_id: str | None = None
-    command: str | None = None
-    preinstall: list[str] = []
-
-    for raw_line in join_line_continuations(text).splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        export_match = _EXPORT_PATTERN.match(line)
-        if export_match:
-            key, value = export_match.groups()
-            env[key] = _parse_single_token(f"env var '{key}'", value)
-            continue
-
-        run_match = _RUN_PATTERN.match(line)
-        if run_match:
-            preinstall.append(run_match.group(1))
-            continue
-
-        if line == "vllm serve" or line.startswith("vllm serve "):
-            if command is not None:
-                raise RecipePasteError("more than one `vllm serve` line - paste exactly one")
-            try:
-                repo_id, _ = parse_vllm_serve_command(line)
-            except VllmCommandError as e:
-                raise RecipePasteError(str(e)) from e
-            command = line
-            continue
-
+def parse_command_args(args: list[str]) -> str:
+    """One logical `vllm serve` line from `recipe add`'s arguments. A
+    single argument is a quoted paste and is taken as-is; re-quoting it
+    with `shlex.join` would wrap the whole command in quotes. Several
+    arguments are the shell's own split of an unquoted command."""
+    text = args[0] if len(args) == 1 else shlex.join(args)
+    command = join_command_lines(text.splitlines())
+    if command != "vllm serve" and not command.startswith("vllm serve "):
         raise RecipePasteError(
-            "unrecognized line (only `export KEY=VALUE` lines, `RUN <command>` "
-            f"lines, and one `vllm serve ...` line are accepted): {line!r}"
+            "Only a `vllm serve REPO_ID ...` command can be passed here. "
+            "For a custom image, env vars or preinstall commands, run "
+            "`fllame recipe add` without arguments."
         )
-
-    if command is None or repo_id is None:
-        raise RecipePasteError("no `vllm serve <repo_id> ...` line found in the paste")
-
-    return ParsedRecipe(repo_id=repo_id, command=command, env=env, preinstall=preinstall)
+    try:
+        parse_vllm_serve_command(command)
+    except VllmCommandError as e:
+        raise RecipePasteError(str(e)) from e
+    return command
 
 
 def parse_env_line(line: str) -> tuple[str, str]:
@@ -84,16 +49,12 @@ def parse_env_line(line: str) -> tuple[str, str]:
     if not match:
         raise RecipePasteError(f"not a KEY=VALUE line: {line!r}")
     key, value = match.groups()
-    return key, _parse_single_token(f"env var '{key}'", value)
-
-
-def _parse_single_token(where: str, value: str) -> str:
     try:
-        tokens = split_shell_safe(where, value)
+        tokens = split_shell_safe(f"env var '{key}'", value)
     except VllmCommandError as e:
         raise RecipePasteError(str(e)) from e
     if len(tokens) != 1:
         raise RecipePasteError(
-            f"{where}: value must be a single token (quote it if it has spaces): {value!r}"
+            f"env var '{key}': value must be a single token (quote it if it has spaces): {value!r}"
         )
-    return tokens[0]
+    return key, tokens[0]

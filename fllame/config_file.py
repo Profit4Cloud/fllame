@@ -11,6 +11,10 @@ from fllame import config
 # explicitly from the recipe, or the default below - so this setting is never left unset.
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.92
 
+# `recipe build` pins `latest` to the release it points at, so following
+# it never makes a built recipe drift.
+_DEFAULT_IMAGE = "vllm/vllm-openai:latest"
+
 
 def _read() -> dict:
     path = config.config_file_path()
@@ -25,8 +29,8 @@ def _write(data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False))
 
 
-def get_default_image() -> str | None:
-    return _read().get("default_image")
+def get_default_image() -> str:
+    return _read().get("default_image", _DEFAULT_IMAGE)
 
 
 def set_default_image(image: str) -> None:
