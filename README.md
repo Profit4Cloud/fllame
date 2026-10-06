@@ -50,34 +50,6 @@ Then you can run the fllame commands below within the activated environment.
 
 Every command also takes `-h`/`--help`.
 
-## Is the server up?
-
-Run `fllame status`. A running container's STATUS is one of these, with its uptime in brackets, e.g. `Ready (5 minutes)`:
-
-- `Loading model` - vLLM doesn't accept connections yet. Loading can take 10 minutes or more.
-- `Ready` - a 1-token test completion returned a token. The server can serve.
-- `Error` - the server answers, but the test completion fails. Check `docker logs`.
-- `Not responding` - the test completion took over 30s. The server is hung, or very busy.
-- `Unknown` - the check itself couldn't run inside the container.
-
-To wait until the server is up, run `fllame status RECIPE_ID --watch`.
-It re-checks every 5s and stops at `Ready` or `Error`. It exits 1 on `Error`, or when the container stops, so scripts can use it:
-`fllame serve RECIPE_ID && fllame status RECIPE_ID --watch`.
-
-If vLLM crashes, the container stops. STATUS then shows `Exited (N)`, where a non-zero N means a crash.
-
-To try it by hand, ask a real question. Replace the port and model with your recipe's.
-The model name is the REPO_ID, unless the recipe sets `--served-model-name`.
-`curl localhost:8000/v1/models` lists it.
-
-```
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "What is the capital of France?"}]}'
-```
-
-A thinking model may reason at length before it answers.
-
 ## Storage location
 
 Recipes live in `~/.config/fllame/recipes/<RECIPE_ID>/recipe.yaml` (override with `FLLAME_RECIPES_DIR`). That same folder also stores `compose.yaml` and `Dockerfile` if generated during build. Both are safe to hand-edit - fllame never overwrites them on its own.
