@@ -112,7 +112,7 @@ A recipe's `env` can override the telemetry vars.
 Check these before serving in a shared or production environment:
 
 - **Media URLs.** Requests with `image_url` make vLLM fetch remote URLs. Restrict hosts with `--allowed-media-domains`. Block redirects with `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0`.
-- **Network exposure.** The port binds to all interfaces, without authentication. Bind it to `127.0.0.1` in `compose.yaml`. Put a reverse proxy, like nginx, in front. Or require a token with `--api-key`.
+- **Network exposure.** The port binds to all interfaces, without authentication. Bind it to `127.0.0.1` in `compose.yaml`. Put a reverse proxy, like nginx, in front. Also require a token with `--api-key`.
 - **Dev mode.** Never set `VLLM_SERVER_DEV_MODE=1`. It exposes unsafe debug endpoints.
 - **`trust_remote_code`.** Runs Python code from the model repo. Only use it for repos you trust.
 - **HF cache.** fllame trusts everything in the HF cache folders. Control who can write there.
