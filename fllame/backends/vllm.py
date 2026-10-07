@@ -110,6 +110,7 @@ class VllmServingBackend:
             # vLLM itself is covered by VLLM_NO_USAGE_STATS; DO_NOT_TRACK is
             # the cross-library convention other packages in the image honor.
             "DO_NOT_TRACK": "1",
+            "RAY_USAGE_STATS_ENABLED": "0",
             # Without a TTY, Python block-buffers stdout and `docker logs` stalls.
             "PYTHONUNBUFFERED": "1",
             **recipe.env,

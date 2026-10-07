@@ -74,6 +74,7 @@ def test_build_service_with_gpus(monkeypatch):
         "HF_HUB_DISABLE_TELEMETRY=1",
         "VLLM_NO_USAGE_STATS=1",
         "DO_NOT_TRACK=1",
+        "RAY_USAGE_STATS_ENABLED=0",
         "PYTHONUNBUFFERED=1",
         "FOO=bar",
     ]

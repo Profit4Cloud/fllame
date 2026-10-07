@@ -85,11 +85,27 @@ Without network access, `recipe build` uses the newest `vX.Y.Z` version already 
 
 ## Advanced
 
-Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, `ipc: host`, and telemetry opt-outs (`VLLM_NO_USAGE_STATS=1`, `HF_HUB_DISABLE_TELEMETRY=1`, `DO_NOT_TRACK=1`) unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame always respects your edits, but doesn't verify them, so you must know what you are doing. The same
+Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, `ipc: host`, and the env vars listed under [Security](#security) unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame always respects your edits, but doesn't verify them, so you must know what you are doing. The same
 goes for a `Dockerfile`, which is generated for recipes with `preinstall`.
 
 Every generated `compose.yaml` always has `--gpu-memory-utilization` set to aconfigurable default. It is `0.92` by default, but this can be changed using `fllame config set-default-gpu-memory-utilization <value>`. This default is only used when there is no explicit value in
 the recipe.
+
+## Security
+
+Every generated `compose.yaml` sets these env vars:
+
+| Variable                        | Why                                   |
+|---------------------------------|---------------------------------------|
+| `HF_HUB_OFFLINE=1`              | No network access at serve time.      |
+| `HF_HOME`, `HF_HUB_CACHE`       | Point to the mounted local cache.     |
+| `VLLM_NO_USAGE_STATS=1`         | Disable vLLM usage stats.             |
+| `HF_HUB_DISABLE_TELEMETRY=1`    | Disable Hugging Face telemetry.       |
+| `DO_NOT_TRACK=1`                | Opt out for other libraries.          |
+| `RAY_USAGE_STATS_ENABLED=0`     | Disable Ray usage stats.              |
+| `PYTHONUNBUFFERED=1`            | Show logs immediately in `docker logs`. |
+
+A recipe's `env` can override the telemetry vars.
 
 ## Development
 
