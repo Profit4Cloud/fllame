@@ -116,7 +116,7 @@ Check these before serving in a shared or production environment:
 - **Dev mode.** Never set `VLLM_SERVER_DEV_MODE=1`. It exposes unsafe debug endpoints.
 - **`trust_remote_code`.** Runs Python code from the model repo. Only use it for repos you trust.
 - **HF cache.** fllame trusts everything in the HF cache folders. Control who can write there.
-- **Offline check.** Add a network with `internal: true` to `compose.yaml`. Serve once to prove no network is needed.
+- **Offline check.** Add a network with `internal: true` to `compose.yaml`. Serve once to prove no network is needed. Ports are not published then, so check `docker logs`.
 - **`ipc: host`.** Shares the host's IPC namespace, for PyTorch shared memory. For stronger isolation, replace it with `shm_size:`, e.g. `16g`.
 
 ## Development
