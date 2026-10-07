@@ -71,6 +71,9 @@ def test_build_service_with_gpus(monkeypatch):
         "HF_HOME=/root/.cache/huggingface",
         "HF_HUB_CACHE=/root/.cache/huggingface",
         "HF_HUB_OFFLINE=1",
+        "HF_HUB_DISABLE_TELEMETRY=1",
+        "VLLM_NO_USAGE_STATS=1",
+        "DO_NOT_TRACK=1",
         "PYTHONUNBUFFERED=1",
         "FOO=bar",
     ]
