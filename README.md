@@ -85,11 +85,39 @@ Without network access, `recipe build` uses the newest `vX.Y.Z` version already 
 
 ## Advanced
 
-Every generated `compose.yaml` gets `HF_HUB_OFFLINE=1`, `gpus: all`, and `ipc: host` unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame always respects your edits, but doesn't verify them, so you must know what you are doing. The same
+Every generated `compose.yaml` gets `gpus: all`, `ipc: host`, and the env vars listed under [Environment Variables](#environment-variables) unconditionally - hard defaults, not recipe fields. To override one (network access for a linked repo, pinning specific GPU device IDs, an explicit `shm_size:`), edit the generated `compose.yaml` directly. Fllame always respects your edits, but doesn't verify them, so you must know what you are doing. The same
 goes for a `Dockerfile`, which is generated for recipes with `preinstall`.
 
 Every generated `compose.yaml` always has `--gpu-memory-utilization` set to aconfigurable default. It is `0.92` by default, but this can be changed using `fllame config set-default-gpu-memory-utilization <value>`. This default is only used when there is no explicit value in
 the recipe.
+
+## Environment Variables
+
+Every generated `compose.yaml` sets these env vars:
+
+| Variable                        | Why                                   |
+|---------------------------------|---------------------------------------|
+| `HF_HUB_OFFLINE=1`              | No network access at serve time.      |
+| `HF_HOME`, `HF_HUB_CACHE`       | Point to the mounted local cache.     |
+| `VLLM_NO_USAGE_STATS=1`         | Disable vLLM usage stats.             |
+| `HF_HUB_DISABLE_TELEMETRY=1`    | Disable Hugging Face telemetry.       |
+| `DO_NOT_TRACK=1`                | Opt out for other libraries.          |
+| `RAY_USAGE_STATS_ENABLED=0`     | Disable Ray usage stats.              |
+| `PYTHONUNBUFFERED=1`            | Show logs immediately in `docker logs`. |
+
+A recipe's `env` can override the telemetry vars.
+
+### Enterprise use
+
+Check these before serving in a shared or production environment:
+
+- **Media URLs.** Requests with `image_url` make vLLM fetch remote URLs. Restrict hosts with `--allowed-media-domains`. Block redirects with `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0`.
+- **Network exposure.** The port binds to all interfaces, without authentication. Bind it to `127.0.0.1` in `compose.yaml`. Put a reverse proxy, like nginx, in front. Also require a token with `--api-key`.
+- **Dev mode.** Never set `VLLM_SERVER_DEV_MODE=1`. It exposes unsafe debug endpoints.
+- **`trust_remote_code`.** Runs Python code from the model repo. Only use it for repos you trust.
+- **HF cache.** fllame trusts everything in the HF cache folders. Control who can write there.
+- **Offline check.** Add a network with `internal: true` to `compose.yaml`. Serve once to prove no network is needed. Ports are not published then, so check `docker logs`.
+- **`ipc: host`.** Shares the host's IPC namespace, for PyTorch shared memory. For stronger isolation, replace it with `shm_size:`, e.g. `16g`.
 
 ## Development
 
